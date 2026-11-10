@@ -1,0 +1,112 @@
+// stages.h — CONTRACT (Wave 0): the interface of every pipeline stage.
+// Each owner implements its class in core/stages/<name>/*.cpp (replacing the
+// Wave-0 stub) and may add private headers there. Don't change these
+// signatures without a note in docs/CONTRACT-CHANGES.md.
+//
+// Per-frame order (port of upstream Mp4Exporter.exportStill, see docs/pipeline.md):
+//   src(BGRA8) -> Crop -> [Howlaround camera] -> Digital -> Ntsc -> upload
+//   -> Downscale -> Glitch -> Crt (librashader or bypass) -> output (= src size)
+#pragma once
+
+#include <memory>
+#include <string>
+
+#include "../gpu/gpu.h"
+#include "../src/internal.h"
+
+namespace ntscrt {
+
+// ---- Crop (agent A) ---------------------------------------------------------
+// Look key "crop" (NTSCRT extension; upstream keeps crop in app state):
+//   {"enabled":bool,"aspect":"16:9"|"4:3"|"1:1"|...,"center":[x,y],"zoom":f}
+// Output is the cropped picture at source pixel density (smaller than src).
+// The CRT stage later fits it into the output frame (letterbox, black bars).
+struct Crop {
+    static void apply(const json &look, const ImageBGRA8 &in, ImageBGRA8 &out);
+};
+
+// ---- Digital video codec (agent C) — CPU, temporal ----------------------------
+class DigitalStage {
+public:
+    DigitalStage();
+    ~DigitalStage();
+    bool active(const json &look) const;  // look["digital"]["enabled"]
+    // In place. Uses ctx.source_at / ctx.look_at for previous frames.
+    void process(ImageBGRA8 &inout, const FrameContext &ctx);
+    void flush();
+private:
+    struct Impl; std::unique_ptr<Impl> impl_;
+};
+
+// ---- NTSC signal via ntsc-rs (agent A) — CPU, pure per frame -------------------
+class NtscStage {
+public:
+    NtscStage();
+    ~NtscStage();
+    bool active(const json &look) const;  // look["ntsc"]["enabled"]
+    void process(ImageBGRA8 &inout, const FrameContext &ctx);  // uses ntsc_frame(ctx)
+    static std::string descriptors_json();  // ntsc-rs settings schema
+private:
+    struct Impl; std::unique_ptr<Impl> impl_;
+};
+
+// ---- Downscale (agent D) — GPU ------------------------------------------------
+class Downscaler {
+public:
+    explicit Downscaler(gpu::Device &dev);
+    ~Downscaler();
+    // Returns the chain input (retro raster). If look["downscale"] disabled,
+    // returns `in` unchanged (shared ptr copy).
+    std::shared_ptr<gpu::Texture> run(const std::shared_ptr<gpu::Texture> &in,
+                                      const FrameContext &ctx);
+private:
+    struct Impl; std::unique_ptr<Impl> impl_;
+};
+
+// ---- Glitch TV/VCR receiver (agent B) — CPU simulation + GPU compose ----------
+class GlitchStage {
+public:
+    explicit GlitchStage(gpu::Device &dev);
+    ~GlitchStage();
+    bool active(const json &look) const;
+    // Returns a new texture of the same size as chain_input (or chain_input if
+    // inactive / healthy set — must be pixel-identical then).
+    std::shared_ptr<gpu::Texture> run(const std::shared_ptr<gpu::Texture> &chain_input,
+                                      const FrameContext &ctx);
+    void flush();
+private:
+    struct Impl; std::unique_ptr<Impl> impl_;
+};
+
+// ---- CRT shader via librashader, or bypass (agent D) — GPU ----------------------
+class CrtStage {
+public:
+    CrtStage(gpu::Device &dev, const std::string &resource_dir);
+    ~CrtStage();
+    // Renders chain_input into `out` (host output size), letterboxing to the
+    // chain input's aspect. Uses upstream ScanlineGrid supersampling rules.
+    // look["shader"]["enabled"]==false -> ShaderBypass path.
+    void render(const gpu::Texture &chain_input, gpu::Texture &out, const FrameContext &ctx);
+    void flush();
+private:
+    struct Impl; std::unique_ptr<Impl> impl_;
+};
+
+// ---- Screen Loop / howlaround (agent D) — GPU, sequential ---------------------
+class Howlaround {
+public:
+    explicit Howlaround(gpu::Device &dev);
+    ~Howlaround();
+    bool active(const json *feedback) const;
+    // Replaces the scene with the camera's view of the simulated TV (runs the
+    // run-up on first use / after seeks, pulling frames via ctx.source_at).
+    std::shared_ptr<gpu::Texture> camera(const std::shared_ptr<gpu::Texture> &scene,
+                                         const json &feedback, const FrameContext &ctx);
+    // After the CRT stage: push the displayed TV picture into the ring.
+    void after_frame(const gpu::Texture &tv_picture, const json &feedback, const FrameContext &ctx);
+    void flush();
+private:
+    struct Impl; std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace ntscrt

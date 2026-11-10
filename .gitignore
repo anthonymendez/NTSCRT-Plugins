@@ -1,0 +1,8 @@
+/build*/
+/out/
+target/
+*.user
+.vs/
+.DS_Store
+xcuserdata/
+DerivedData/

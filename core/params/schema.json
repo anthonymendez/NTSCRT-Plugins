@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "note": "Wave-0 seed. Agent A generates the full list from upstream Swift param definitions + ntsc-rs descriptors. Format: docs/params.md.",
+  "groups": [
+    { "id": "downscale", "label": "Downscale" },
+    { "id": "ntsc", "label": "NTSC (TV)" },
+    { "id": "glitch", "label": "Glitch" },
+    { "id": "crt", "label": "CRT" },
+    { "id": "digital", "label": "Digital video" },
+    { "id": "crop", "label": "Crop" },
+    { "id": "screenloop", "label": "Screen Loop" }
+  ],
+  "params": [
+    { "id": "downscale.enabled", "group": "downscale", "label": "Enable", "type": "bool", "default": true, "path": "/downscale/enabled", "animatable": false },
+    { "id": "downscale.width", "group": "downscale", "label": "Width", "type": "int", "default": 320, "min": 64, "max": 1920, "path": "/downscale/width", "animatable": true },
+    { "id": "downscale.method", "group": "downscale", "label": "Method", "type": "choice", "default": "area", "options": [ { "value": "area", "label": "Smooth" }, { "value": "nearest", "label": "Chunky" } ], "path": "/downscale/method", "animatable": false },
+    { "id": "ntsc.enabled", "group": "ntsc", "label": "Enable", "type": "bool", "default": true, "path": "/ntsc/enabled", "animatable": false },
+    { "id": "glitch.enabled", "group": "glitch", "label": "Enable", "type": "bool", "default": false, "path": "/glitch/enabled", "animatable": false },
+    { "id": "crt.enabled", "group": "crt", "label": "Enable", "type": "bool", "default": true, "path": "/shader/enabled", "animatable": false },
+    { "id": "crt.preset", "group": "crt", "label": "Shader", "type": "choice", "default": "crt/crtglow_gauss.slangp", "options": [
+      { "value": "crt/crt-aperture.slangp", "label": "crt-aperture" },
+      { "value": "crt/crt-easymode.slangp", "label": "crt-easymode" },
+      { "value": "crt/crtglow_gauss.slangp", "label": "crtglow (gauss)" },
+      { "value": "crt/crtglow_lanczos.slangp", "label": "crtglow (lanczos)" },
+      { "value": "crt/crt-hyllian.slangp", "label": "crt-hyllian" },
+      { "value": "crt/crt-royale.slangp", "label": "crt-royale" },
+      { "value": "crt/crtsim.slangp", "label": "crtsim" } ], "path": "/shader/preset", "animatable": false },
+    { "id": "digital.enabled", "group": "digital", "label": "Enable", "type": "bool", "default": false, "path": "/digital/enabled", "animatable": false }
+  ]
+}
