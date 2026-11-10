@@ -1,7 +1,7 @@
 # Golden comparison against upstream NTSCRT crt-smoke references (owner: agent F).
 # References: tests/golden/ref/<id>.png (+ .json sidecar) from .github/workflows/golden.yml.
 # Entries without a reference are skipped, so the test passes until refs are committed.
-set(NTSCRT_GOLDEN_RESOURCE_DIR "${NTSCRT_ROOT}" CACHE PATH
+set(NTSCRT_GOLDEN_RESOURCE_DIR "${NTSCRT_RESOURCES_BUILD_DIR}" CACHE PATH
     "resource_dir passed to ntscrt_create by test_golden (needs presets/ and shaders/); env NTSCRT_RESOURCE_DIR overrides")
 
 ntscrt_add_test(test_golden test_golden.cpp)

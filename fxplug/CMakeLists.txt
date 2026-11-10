@@ -24,7 +24,7 @@ option(NTSCRT_BUILD_FXPLUG "Build the FxPlug 4 plug-in (needs Apple's FxPlug SDK
 set(NTSCRT_FXPLUG_SDK_DIR "/Library/Developer" CACHE PATH "FxPlug SDK install root (has Frameworks/FxPlug.framework)")
 set(NTSCRT_FXPLUG_BUNDLE_ID "com.anthonymendez.NTSCRT" CACHE STRING "Wrapper app bundle id (plug-in is <id>.Renderer)")
 set(NTSCRT_CODESIGN_IDENTITY "-" CACHE STRING "codesign identity for the FxPlug bundle ('-' = ad-hoc, else e.g. 'Developer ID Application: ...')")
-set(NTSCRT_SHADERS_DIR "" CACHE PATH "Directory copied to the plug-in's Resources/shaders (slang-shaders subset); empty = skip")
+set(NTSCRT_SHADERS_DIR "${NTSCRT_RESOURCES_BUILD_DIR}/shaders" CACHE PATH "Directory copied to the plug-in's Resources/shaders (slang-shaders subset); empty = skip")
 if(NOT NTSCRT_BUILD_FXPLUG)
   return()
 endif()
@@ -107,12 +107,13 @@ add_custom_target(ntscrt_fxplug ALL
     "--frameworks=${NTSCRT_FXPLUG_EMBED_DIR}"
     "--presets=${NTSCRT_ROOT}/presets"
     "--shaders=${NTSCRT_SHADERS_DIR}"
+    "--librashader=${NTSCRT_LIBRASHADER_BUILT}"
     "--param-ids=${CMAKE_CURRENT_SOURCE_DIR}/param_ids.json"
     "--template-dir=${CMAKE_CURRENT_BINARY_DIR}/template"
     "--renderer-entitlements=${CMAKE_CURRENT_SOURCE_DIR}/Renderer.entitlements"
     "--app-entitlements=${CMAKE_CURRENT_SOURCE_DIR}/App.entitlements"
     "--identity=${NTSCRT_CODESIGN_IDENTITY}"
-  DEPENDS ntscrt_fxplug_renderer ntscrt_fxplug_app "${FX_TEMPLATE}"
+  DEPENDS ntscrt_fxplug_renderer ntscrt_fxplug_app ntscrt_resources "${FX_TEMPLATE}"
           "${CMAKE_CURRENT_BINARY_DIR}/Info-Renderer.plist"
           cmake/assemble_bundle.sh Renderer.entitlements App.entitlements param_ids.json
   COMMENT "Assembling + signing ${FX_APP_NAME}.app (FxPlug)"

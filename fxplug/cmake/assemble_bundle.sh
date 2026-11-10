@@ -18,12 +18,13 @@ set -euo pipefail
 
 # Arguments are --key=value so an empty value (e.g. no shaders dir) can't shift the rest.
 SHADERS=""
+LIBRASHADER=""
 for arg in "$@"; do
   v="${arg#*=}"
   case "$arg" in
     --app=*) APP="$v" ;; --renderer=*) RENDERER="$v" ;; --plugin-name=*) PLUGIN_NAME="$v" ;;
     --plist=*) PLIST="$v" ;; --frameworks=*) FRAMEWORKS="$v" ;; --presets=*) PRESETS="$v" ;;
-    --shaders=*) SHADERS="$v" ;; --param-ids=*) PARAM_IDS="$v" ;; --template-dir=*) TEMPLATE_DIR="$v" ;;
+    --shaders=*) SHADERS="$v" ;; --librashader=*) LIBRASHADER="$v" ;; --param-ids=*) PARAM_IDS="$v" ;; --template-dir=*) TEMPLATE_DIR="$v" ;;
     --renderer-entitlements=*) RENT="$v" ;; --app-entitlements=*) AENT="$v" ;; --identity=*) IDENTITY="$v" ;;
     *) echo "assemble_bundle.sh: unknown arg $arg" >&2; exit 2 ;;
   esac
@@ -48,6 +49,9 @@ else
   echo "note: no shaders dir given (NTSCRT_SHADERS_DIR) - CRT stage will report missing resources" >&2
 fi
 cp "$PARAM_IDS" "$PK/Contents/Resources/param_ids.json"
+if [ -n "${LIBRASHADER:-}" ] && [ -f "$LIBRASHADER" ]; then
+  cp "$LIBRASHADER" "$PK/Contents/Frameworks/"   # CrtStage searches <Resources>/../Frameworks
+fi
 mkdir -p "$APP/Contents/Resources/Motion Templates"
 rsync -a --delete "$TEMPLATE_DIR/" "$APP/Contents/Resources/Motion Templates/"
 
@@ -62,7 +66,9 @@ sign() {  # sign <path> [entitlements]
   if [[ -n "${2:-}" ]]; then args+=(--entitlements "$2"); fi
   codesign "${args[@]}" "$1"
 }
-for fw in "$PK"/Contents/Frameworks/*.framework; do sign "$fw"; done
+for fw in "$PK"/Contents/Frameworks/*.framework "$PK"/Contents/Frameworks/*.dylib; do
+  [[ -e "$fw" ]] && sign "$fw"
+done
 sign "$PK" "$RENT"
 sign "$APP" "$AENT"
 codesign --verify --deep --strict "$APP"

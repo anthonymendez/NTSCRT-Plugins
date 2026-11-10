@@ -42,6 +42,7 @@ endif()
 # ---- librashader (dynamic library, loaded at runtime; never linked, so its
 # Rust std never meets ntsc-rs's static one) ----
 set(lib_out ${res}/${lib_name})
+set(NTSCRT_LIBRASHADER_BUILT ${lib_out} CACHE INTERNAL "librashader library assembled into the build resources dir")
 if(NTSCRT_LIBRASHADER_PREBUILT)
   add_custom_command(OUTPUT ${lib_out}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NTSCRT_LIBRASHADER_PREBUILT} ${lib_out}

@@ -80,9 +80,12 @@ add_custom_command(TARGET ntscrt_ofx POST_BUILD
   COMMAND ${CMAKE_COMMAND}
     -DBUNDLE=${NTSCRT_OFX_BUNDLE}
     -DPRESETS=${NTSCRT_ROOT}/presets
-    -DSHADERS=${NTSCRT_ROOT}/resources/shaders
-    -DLIBRASHADER=${NTSCRT_LIBRASHADER_LIB}
+    -DSHADERS=${NTSCRT_RESOURCES_BUILD_DIR}/shaders
+    -DLIBRASHADER=$<IF:$<BOOL:${NTSCRT_LIBRASHADER_LIB}>,${NTSCRT_LIBRASHADER_LIB},${NTSCRT_LIBRASHADER_BUILT}>
     -DPLIST=$<IF:$<BOOL:${APPLE}>,${CMAKE_CURRENT_BINARY_DIR}/Info.plist,>
     -P ${CMAKE_CURRENT_SOURCE_DIR}/bundle_resources.cmake
   COMMENT "Assembling NTSCRT.ofx.bundle resources"
   VERBATIM)
+if(TARGET ntscrt_resources)
+  add_dependencies(ntscrt_ofx ntscrt_resources)
+endif()

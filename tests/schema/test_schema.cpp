@@ -216,7 +216,7 @@ TEST_CASE("ntsc descriptor snapshot used by the generator is current") {
 }
 
 TEST_CASE("a default look renders") {
-    ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, NTSCRT_SOURCE_DIR};
+    ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, NTSCRT_BUILT_RESOURCES_DIR};
     ntscrt_instance *inst = nullptr;
     REQUIRE(ntscrt_create(&ci, &inst) == NTSCRT_OK);
     std::string look = default_look_for_shader("glow_gauss").look.dump();
