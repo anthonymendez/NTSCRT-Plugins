@@ -4,3 +4,9 @@
 [submodule "vendor/ntsc-rs"]
 	path = vendor/ntsc-rs
 	url = https://github.com/ntsc-rs/ntsc-rs
+[submodule "vendor/librashader"]
+	path = vendor/librashader
+	url = https://github.com/SnowflakePowered/librashader.git
+[submodule "vendor/slang-shaders"]
+	path = vendor/slang-shaders
+	url = https://github.com/libretro/slang-shaders.git

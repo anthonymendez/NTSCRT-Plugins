@@ -1,0 +1,1 @@
+ntscrt_add_test(test_downscale test_downscale.cpp)
