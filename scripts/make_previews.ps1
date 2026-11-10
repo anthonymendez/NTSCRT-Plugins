@@ -1,18 +1,27 @@
-# Regenerates the README preview images in docs/images/.
+# Regenerates the README preview GIFs in docs/images/ (hero-before-after.gif, looks-grid.gif).
 #
-#   powershell.exe -NoProfile -File scripts/make_previews.ps1 [-Cli path\to\ntscrt-cli.exe] [-Resources DIR]
+#   powershell.exe -NoProfile -File scripts/make_previews.ps1 [-Cli path/to/ntscrt-cli.exe] [-Resources DIR]
 #
-# Draws a synthetic test scene (no third-party footage), renders it through ntscrt-cli with a few looks,
-# and composites an animated before/after GIF (the scene scrolls, so the temporal effects show),
-# and a labelled grid of looks (JPEG, 960 px wide). The GIF needs ffmpeg on PATH.
+# Draws a looping synthetic test scene (no third-party footage; the grid scrolls, so the temporal
+# effects show), renders it with a few looks and composites two animated GIFs with ffmpeg (on PATH):
+# the original vs the default look split-screen, and a labelled 2x2 grid of looks.
+#
+# Two ways to render the looks:
+#  - this script alone: through ntscrt-cli (the same core as the plug-ins; no editor needed).
+#  - scripts/make_previews_resolve.py (what the README images use): renders the looks with the
+#    OpenFX plug-in inside DaVinci Resolve, headless, then calls this script with -Renders to
+#    composite them. It also uses -SceneOnly to get the scene frames.
 param(
     [string]$Cli = 'C:/ntb/main/tools/ntscrt-cli/Release/ntscrt-cli.exe',
     [string]$Resources = 'C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle/Contents/Resources',
     [string]$OutDir = '',
     [string]$WorkDir = '',
-    [int]$Quality = 85,
+    [switch]$SceneOnly,          # only write the scene frames (WorkDir/seq/in_0000.png ...) and stop
+    [string]$Renders = '',       # take the looks from <Renders>/<name>-0000.png ... instead of ntscrt-cli
+    [int]$SceneFrames = 120,     # scene frames written (the scene loops every $GifFrames)
     [int]$GifFrames = 60,
     [int]$GifWidth = 640,
+    [int]$GridWidth = 640,
     [int]$GifFps = 30
 )
 $ErrorActionPreference = 'Stop'
@@ -118,28 +127,14 @@ function Write-Look([string]$name, [string]$json) {
     $p = Join-Path $WorkDir "$name.json"; [IO.File]::WriteAllText($p, $json); $p
 }
 
-function Invoke-Render([string]$src, [string]$out, [string]$look, [int]$frame = 0) {
-    $a = @('--in', $src, '--out', $out, '--resources', $Resources, '--fps', '30', '--frame', "$frame")
-    if ($look) { $a += @('--look', $look) }
-    & $Cli @a
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $out)) { throw "ntscrt-cli failed for $out" }
-}
-
-function Invoke-RenderSeq([string]$pattern, [string]$outPattern, [string]$look, [int]$frames) {
-    $a = @('--seq', $pattern, '--out', $outPattern, '--resources', $Resources, '--fps', '30', '--frame', '0', '--frames', "$frames")
+function Invoke-RenderSeq([string]$pattern, [string]$outPattern, [string]$look, [int]$first, [int]$frames) {
+    $a = @('--seq', $pattern, '--out', $outPattern, '--resources', $Resources, '--fps', '30', '--frame', "$first", '--frames', "$frames")
     if ($look) { $a += @('--look', $look) }
     & $Cli @a
     if ($LASTEXITCODE -ne 0) { throw "ntscrt-cli failed for $outPattern" }
 }
 
 # ---- 3. Compositing ------------------------------------------------------------------------------
-function Get-Encoder {
-    $enc = [Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object MimeType -eq 'image/jpeg'
-    $ep = [Drawing.Imaging.EncoderParameters]::new(1)
-    $ep.Param[0] = [Drawing.Imaging.EncoderParameter]::new([Drawing.Imaging.Encoder]::Quality, [long]$Quality)
-    , @($enc, $ep)
-}
-
 function Add-Label($g, [string]$text, [int]$x, [int]$y, [int]$size = 20) {
     $font = [Drawing.Font]::new('Segoe UI', $size, [Drawing.FontStyle]::Bold, [Drawing.GraphicsUnit]::Pixel)
     $sz = $g.MeasureString($text, $font)
@@ -149,12 +144,8 @@ function Add-Label($g, [string]$text, [int]$x, [int]$y, [int]$size = 20) {
     $g.DrawString($text, $font, [Drawing.Brushes]::White, $x + $pad, $y + [int]($pad / 2))
 }
 
-function Save-Jpeg($bmp, [string]$path) {
-    $e = Get-Encoder; $bmp.Save($path, $e[0], $e[1])
-}
-
 # Hero: left half original, right half processed, split line + labels.
-function New-Hero([string]$before, [string]$after, [string]$path, [string]$format = 'jpeg') {
+function New-Hero([string]$before, [string]$after, [string]$path) {
     $b = [Drawing.Image]::FromFile($before); $a = [Drawing.Image]::FromFile($after)
     $canvas = [Drawing.Bitmap]::new($W, $H)
     $g = [Drawing.Graphics]::FromImage($canvas)
@@ -166,24 +157,7 @@ function New-Hero([string]$before, [string]$after, [string]$path, [string]$forma
     Add-Label $g 'Original' 16 ($H - 56) 24
     Add-Label $g 'NTSCRT (default look)' ($half + 16) ($H - 56) 24
     $g.Dispose(); $b.Dispose(); $a.Dispose()
-    if ($format -eq 'png') { $canvas.Save($path, [Drawing.Imaging.ImageFormat]::Png) } else { Save-Jpeg $canvas $path }
-    $canvas.Dispose()
-}
-
-# Animated before/after: render a looping scene sequence, split-screen each frame, encode a GIF.
-function New-HeroGif([string]$look, [string]$path) {
-    $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
-    if (-not $ffmpeg) { Write-Warning 'ffmpeg not found: skipping the animated preview'; return }
-    $seq = Join-Path $WorkDir 'seq'; Remove-Item -Recurse -Force $seq -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force $seq | Out-Null
-    for ($f = 0; $f -lt $GifFrames; $f++) { New-Scene (Join-Path $seq ('in_{0:D4}.png' -f $f)) $f $GifFrames }
-    Invoke-RenderSeq (Join-Path $seq 'in_%04d.png') (Join-Path $seq 'out_%04d.png') $look $GifFrames
-    for ($f = 0; $f -lt $GifFrames; $f++) {
-        New-Hero (Join-Path $seq ('in_{0:D4}.png' -f $f)) (Join-Path $seq ('out_{0:D4}.png' -f $f)) (Join-Path $seq ('hero_{0:D4}.png' -f $f)) 'png'
-    }
-    $vf = "fps=$GifFps,scale=${GifWidth}:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=full[p];[b][p]paletteuse=dither=sierra2_4a"
-    & $ffmpeg -hide_banner -loglevel error -y -framerate 30 -i (Join-Path $seq 'hero_%04d.png') -vf $vf -loop 0 $path
-    if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed' }
+    $canvas.Save($path, [Drawing.Imaging.ImageFormat]::Png); $canvas.Dispose()
 }
 
 # Grid: tiles of 480x270 (2 columns), each labelled.
@@ -211,26 +185,53 @@ function New-Grid([object[]]$tiles, [string]$path) {
         $img.Dispose()
     }
     $g.Dispose()
-    Save-Jpeg $canvas $path; $canvas.Dispose()
+    $canvas.Save($path, [Drawing.Imaging.ImageFormat]::Png); $canvas.Dispose()
+}
+
+function New-Gif([string]$pattern, [int]$width, [string]$path) {
+    $vf = "fps=$GifFps,scale=${width}:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=full[p];[b][p]paletteuse=dither=sierra2_4a"
+    & $ffmpeg -hide_banner -loglevel error -y -framerate 30 -i $pattern -vf $vf -loop 0 $path
+    if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed for $path" }
 }
 
 # ---- main ----------------------------------------------------------------------------------------
-$src = Join-Path $WorkDir 'scene.png'
-New-Scene $src
+$seq = Join-Path $WorkDir 'seq'
+$inPattern = Join-Path $seq 'in_%04d.png'
+if (-not $Renders) {
+    Remove-Item -Recurse -Force $seq -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $seq | Out-Null
+    for ($f = 0; $f -lt $SceneFrames; $f++) { New-Scene (Join-Path $seq ('in_{0:D4}.png' -f $f)) $f $GifFrames }
+    if ($SceneOnly) { Write-Output "scene: $SceneFrames frames in $seq"; return }
+} elseif (-not (Test-Path (Join-Path $seq 'in_0000.png'))) {
+    throw "-Renders needs the scene frames in $seq (run with -SceneOnly first, same -WorkDir)"
+}
+$ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+if (-not $ffmpeg) { throw 'ffmpeg not found on PATH' }
 
+# Start: first frame of each look's loop (the glitch looks are timed: start where something happens).
 $presets = Join-Path $repo 'presets'
 $looks = @(
-    @{ Name = 'default';    Label = 'Default look';               Look = (Write-Look 'default' '{}'); Frame = 0 },
-    @{ Name = 'vhold';      Label = 'V Hold glitch';              Look = (Join-Path $presets 'V Hold glitch.json'); Frame = 45 },
-    @{ Name = 'obliterated'; Label = 'Obliterated';               Look = (Join-Path $presets 'Obliterated.json'); Frame = 30 },
-    @{ Name = 'webcam';     Label = 'Webcam (low quality)';       Look = (Join-Path $presets 'Webcam (low quality).json'); Frame = 30 },
-    @{ Name = 'royale';     Label = 'CRT Royale shader (2x close-up)'; Look = (Write-Look 'royale' '{"shader": {"enabled": true, "preset": "royale"}}'); Frame = 0; Crop = @(300, 20) }
+    @{ Name = 'default';     Label = 'Default look';               Look = (Write-Look 'default' '{}'); Start = 0 },
+    @{ Name = 'vhold';       Label = 'V Hold glitch';              Look = (Join-Path $presets 'V Hold glitch.json'); Start = 30 },
+    @{ Name = 'obliterated'; Label = 'Obliterated';                Look = (Join-Path $presets 'Obliterated.json'); Start = 0 },
+    @{ Name = 'webcam';      Label = 'Webcam (low quality)';       Look = (Join-Path $presets 'Webcam (low quality).json'); Start = 0 },
+    @{ Name = 'royale';      Label = 'CRT Royale shader (2x close-up)'; Look = (Write-Look 'royale' '{"shader": {"enabled": true, "preset": "royale"}}'); Start = 0; Crop = @(300, 20) }
 )
-foreach ($l in $looks) {
-    $l.Path = Join-Path $WorkDir "$($l.Name).png"
-    Invoke-Render $src $l.Path $l.Look $l.Frame
+if ($Renders) {
+    $rdir = $Renders
+} else {
+    $rdir = Join-Path $WorkDir 'renders'; New-Item -ItemType Directory -Force $rdir | Out-Null
+    foreach ($l in $looks) { Invoke-RenderSeq $inPattern (Join-Path $rdir "$($l.Name)-%04d.png") $l.Look $l.Start $GifFrames }
 }
+function Frame($l, [int]$k) { Join-Path $rdir ('{0}-{1:D4}.png' -f $l.Name, ($l.Start + $k)) }
 
-New-HeroGif $looks[0].Look (Join-Path $OutDir 'hero-before-after.gif')
-New-Grid $looks[1..4] (Join-Path $OutDir 'looks-grid.jpg')
+$comp = Join-Path $WorkDir 'comp'; Remove-Item -Recurse -Force $comp -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $comp | Out-Null
+for ($k = 0; $k -lt $GifFrames; $k++) {
+    New-Hero (Join-Path $seq ('in_{0:D4}.png' -f ($looks[0].Start + $k))) (Frame $looks[0] $k) (Join-Path $comp ('hero_{0:D4}.png' -f $k))
+    $tiles = foreach ($l in $looks[1..4]) { @{ Label = $l.Label; Crop = $l.Crop; Path = (Frame $l $k) } }
+    New-Grid $tiles (Join-Path $comp ('grid_{0:D4}.png' -f $k))
+}
+New-Gif (Join-Path $comp 'hero_%04d.png') $GifWidth (Join-Path $OutDir 'hero-before-after.gif')
+New-Gif (Join-Path $comp 'grid_%04d.png') $GridWidth (Join-Path $OutDir 'looks-grid.gif')
 Get-ChildItem $OutDir | Select-Object Name, Length | Format-Table -AutoSize

@@ -16,6 +16,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ### Changed
 - README: the before/after preview is now an animated GIF (`scripts/make_previews.ps1` renders it with ffmpeg).
+- README previews: the looks grid is an animated GIF too, and both GIFs are now rendered by the OpenFX plug-in in
+  DaVinci Resolve (headless) with the new `scripts/make_previews_resolve.py`, checked against `ntscrt-cli`.
 
 ## [0.3.0] - 2026-11-10
 

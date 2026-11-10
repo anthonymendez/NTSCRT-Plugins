@@ -11,8 +11,10 @@ Status: in development. See `docs/` for architecture and contracts.
 ![Animated before/after: a scrolling synthwave test scene untouched on the left, through NTSCRT's default look on the right](docs/images/hero-before-after.gif)
 *Before / after with the default look, in motion: chroma bleed, moving noise, scanlines and CRT glow.*
 
-![Four NTSCRT looks: V Hold glitch, Obliterated, Webcam (low quality) and a close-up of the CRT Royale shader](docs/images/looks-grid.jpg)
-*A few of the bundled looks and CRT shaders (rendered with `scripts/make_previews.ps1`).*
+![Four animated NTSCRT looks: V Hold glitch, Obliterated, Webcam (low quality) and a close-up of the CRT Royale shader](docs/images/looks-grid.gif)
+*A few of the bundled looks and CRT shaders. Both animations are rendered by the Resolve plug-in itself
+(DaVinci Resolve running headless) with `scripts/make_previews_resolve.py`; `scripts/make_previews.ps1`
+makes the same GIFs through `ntscrt-cli` when Resolve isn't available.*
 
 ## Install
 
