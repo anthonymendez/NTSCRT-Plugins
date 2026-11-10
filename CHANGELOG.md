@@ -43,6 +43,9 @@ First public release. (0.1 and 0.2 were internal milestones and were never tagge
 - CRT shaders aperture and easymode looked wrong (darker, a much stronger mask): the plug-in also sent
   the other CRT presets' settings, and presets that share a setting name (gamma, mask strength)
   overwrote each other's values. Now only the selected preset's settings are sent (Resolve and Final Cut).
+- Windows: the CRT shaders needed the legacy DirectX 9 runtime (D3DX9_43.dll), which a clean Windows
+  doesn't have, so the CRT stage failed to load there. The bundled librashader now only contains the
+  Direct3D 11 (Windows) / Metal (macOS) runtime it uses.
 
 ### Developer
 - `tests/resolve/`: plug-in tests inside a running DaVinci Resolve (alpha modes, Edit page, out-of-order

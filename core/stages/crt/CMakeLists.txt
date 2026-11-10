@@ -55,7 +55,17 @@ else()
   endif()
   set(cargo_dir ${CMAKE_BINARY_DIR}/librashader-target)
   # As upstream DEVELOPMENT.md: `cargo build --release -p librashader-capi --features stable`.
-  set(cargo_args build --release --locked -p librashader-capi --features stable)
+  # Only the runtime CrtStage uses: the default (all runtimes) makes librashader.dll import
+  # D3DX9_43.dll (legacy DirectX 9 runtime, missing on a clean Windows: the DLL fails to load
+  # with error 126), d3d12 and dxcompiler.
+  if(WIN32)
+    set(libra_features "stable,runtime-d3d11")
+  elseif(APPLE)
+    set(libra_features "stable,runtime-metal")
+  else()
+    set(libra_features "stable")
+  endif()
+  set(cargo_args build --release --locked -p librashader-capi --no-default-features --features ${libra_features})
   if(APPLE)
     # Universal dylib when building universal, else the host/target arch.
     set(archs ${CMAKE_OSX_ARCHITECTURES})
