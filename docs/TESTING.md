@@ -30,7 +30,7 @@ Then restart Resolve / Final Cut.
 5. Render a few seconds on the Deliver page and play the file back.
 
 **Final Cut Pro** (12.4 or newer, macOS). Only if the release you installed includes the Final Cut plug-in
-(v0.3.0 doesn't: the installer says "skipping Final Cut Pro"):
+(v0.3.0 and v0.4.0 don't: the installer says "skipping Final Cut Pro"):
 1. Effects browser → *NTSCRT* → drag onto a clip. The look should appear in the viewer.
 2. Change a few parameters and the preset; scrub; render/share a few seconds.
 3. Put it on a title as in step 4 above.

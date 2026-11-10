@@ -14,6 +14,11 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-10
+
+Debug logging and a one-click logs folder for bug reports, and README previews rendered by the plug-in in
+Resolve. Still Resolve-only: the Final Cut plug-in is written but not yet built.
+
 ### Added
 - *Presets → Debug logging* checkbox (Resolve and Final Cut): logs every frame that effect renders, with
   per-phase timings and the full look, for bug reports. Presets never change it; Resolve doesn't save it with the project.
@@ -83,5 +88,6 @@ The macOS installer skips Final Cut Pro until a release includes it.
   `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log` / `~/Library/Logs/NTSCRT/ntscrt-ofx.log`, rotated at 1 MB.
   `NTSCRT_OFX_LOG=<file|off>` moves or disables it, `NTSCRT_OFX_LOG_VERBOSE=1` logs every frame.
 
-[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/anthonymendez/NTSCRT-Plugins/releases/tag/v0.3.0
