@@ -10,70 +10,70 @@ Status: in development. See `docs/` for architecture and contracts.
 
 ## Install
 
-| App | Supported | Download |
+| App | Supported |
+|---|---|
+| DaVinci Resolve (Windows) | 21.1.2 and later, x64 |
+| DaVinci Resolve (macOS) | 21.1.2 and later, Apple silicon + Intel |
+| Final Cut Pro (macOS) | 12.4 and later, Apple silicon + Intel |
+
+**Quit DaVinci Resolve / Final Cut Pro first**, then paste one line.
+
+**Windows** (PowerShell): installs the DaVinci Resolve plugin
+```powershell
+irm https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.ps1 | iex
+```
+
+**macOS** (Terminal): installs for DaVinci Resolve and/or Final Cut Pro, whichever you have
+```bash
+curl -fsSL https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.sh | sh
+```
+
+Accept the admin prompt (Windows) or enter your password (macOS), then start the app:
+
+- **Resolve**: *Effects → OpenFX → Filters → NTSCRT*. Drag it onto a clip, or into a node on the Color page.
+- **Final Cut Pro**: *Effects browser → NTSCRT*. Drag it onto a clip, then adjust it in the Video Inspector.
+  Keep `/Applications/NTSCRT.app`: the plug-in lives inside it.
+
+The scripts download the latest release, install it, and clear the macOS download quarantine. Re-run the
+same line to update. You can read them first: [install.ps1](install.ps1), [install.sh](install.sh).
+
+**Options**
+
+| | Windows (`install.ps1`) | macOS (`install.sh`) |
 |---|---|---|
-| DaVinci Resolve (Windows) | 21.1.2 and later, x64 | `NTSCRT-OFX-windows-x64.zip` |
-| DaVinci Resolve (macOS) | 21.1.2 and later, Apple silicon + Intel | `NTSCRT-OFX-macos-universal.zip` |
-| Final Cut Pro (macOS) | 12.4 and later, Apple silicon + Intel | `NTSCRT-FxPlug-macos-universal.zip` |
+| Uninstall | `-Uninstall` | `--uninstall` |
+| Specific release | `-Version v0.1.0` | `--version v0.1.0` |
+| Only one app | (Resolve only on Windows) | `--resolve` or `--fcp` |
+| Install a zip you downloaded | `-From path\to.zip` | `--from path/to.zip` |
 
-**Where to get the zips:** the latest release on the repo's **Releases** page. Until releases are published,
-use the build artifacts: **Actions → ci → latest green run on `main` → Artifacts** (GitHub wraps each
-artifact in one more zip; unzip it to get the file above).
+Passing options to a one-liner:
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.ps1))) -Uninstall
+```
+```bash
+curl -fsSL https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.sh | sh -s -- --fcp
+```
 
----
+> **While the repository is private** these URLs need GitHub access. Download `install.ps1` / `install.sh`
+> from the repo, sign in with the [GitHub CLI](https://cli.github.com) (`gh auth login`), and run the
+> script locally (`.\install.ps1` or `sh install.sh`). It then downloads the release through `gh`.
+> A `GITHUB_TOKEN` environment variable also works.
 
-### DaVinci Resolve — Windows (about 1 minute)
+<details><summary>Manual install from the zip (no scripts)</summary>
 
-1. **Quit Resolve.**
-2. Unzip `NTSCRT-OFX-windows-x64.zip` (right-click → *Extract All*). Don't run anything from inside the zip.
-3. In the extracted folder, double-click **`Install NTSCRT.cmd`** and click **Yes** at the Windows admin prompt.
-4. Start Resolve. The effect is in **Effects → OpenFX → Filters → NTSCRT**. Drag it onto a clip, or into a node
-   on the Color page.
+Download from the repo's **Releases** page: `NTSCRT-OFX-windows-x64.zip`, `NTSCRT-OFX-macos-universal.zip`
+or `NTSCRT-FxPlug-macos-universal.zip`.
 
-<details><summary>Manual install / uninstall</summary>
-
-- Manual: copy the `NTSCRT.ofx.bundle` folder into `C:\Program Files\Common Files\OFX\Plugins\`
-  (create `OFX\Plugins` if it doesn't exist), then restart Resolve.
-- Uninstall: run `powershell -ExecutionPolicy Bypass -File install-windows.ps1 -Uninstall` from the
-  extracted folder, or delete `C:\Program Files\Common Files\OFX\Plugins\NTSCRT.ofx.bundle`.
+- **Resolve on Windows:** unzip, then double-click **`Install NTSCRT.cmd`**, or copy the `NTSCRT.ofx.bundle`
+  folder into `C:\Program Files\Common Files\OFX\Plugins\` yourself.
+- **Resolve on macOS:** unzip, copy `NTSCRT.ofx.bundle` into `/Library/OFX/Plugins/`, then run
+  `sudo xattr -dr com.apple.quarantine /Library/OFX/Plugins/NTSCRT.ofx.bundle`.
+- **Final Cut Pro:** unzip, drag `NTSCRT.app` into Applications and open it once. It registers the plug-in,
+  installs the effect template, then quits. If macOS says it "can't be opened" (builds aren't notarized
+  yet), click **Open Anyway** in *System Settings → Privacy & Security* and open it again.
+- **Uninstall by hand:** delete the `NTSCRT.ofx.bundle` you copied. For Final Cut Pro, delete
+  `/Applications/NTSCRT.app` and `~/Movies/Motion Templates.localized/Effects.localized/NTSCRT`.
 </details>
-
-### DaVinci Resolve — macOS (about 1 minute)
-
-1. **Quit Resolve.**
-2. Double-click `NTSCRT-OFX-macos-universal.zip` to unzip it.
-3. Open **Terminal**, type `sh ` (with a trailing space), drag **`install-macos.sh`** from the unzipped folder into
-   the window, press **Return**, and enter your Mac password when asked.
-   The script copies the plugin to `/Library/OFX/Plugins/` and clears the download quarantine so macOS lets Resolve load it.
-4. Start Resolve. The effect is in **Effects → OpenFX → Filters → NTSCRT**.
-
-<details><summary>Manual install / uninstall</summary>
-
-- Manual: copy `NTSCRT.ofx.bundle` into `/Library/OFX/Plugins/`, then in Terminal run
-  `sudo xattr -dr com.apple.quarantine /Library/OFX/Plugins/NTSCRT.ofx.bundle` and restart Resolve.
-- Uninstall: `sh install-macos.sh --uninstall`, or delete `/Library/OFX/Plugins/NTSCRT.ofx.bundle`.
-</details>
-
-### Final Cut Pro — macOS (about 2 minutes)
-
-1. **Quit Final Cut Pro.**
-2. Unzip `NTSCRT-FxPlug-macos-universal.zip` and drag **`NTSCRT.app`** into **Applications**.
-3. Open **NTSCRT.app** once. It registers the plug-in and installs the effect template, then quits.
-   - If macOS says the app "can't be opened" (current builds aren't notarized): open **System Settings →
-     Privacy & Security**, scroll down, click **Open Anyway** next to NTSCRT, and open the app again.
-     (Or in Terminal: `xattr -dr com.apple.quarantine /Applications/NTSCRT.app`.)
-4. Start Final Cut Pro. The effect is in the **Effects browser → NTSCRT**. Drag it onto a clip, then adjust
-   it in the **Video Inspector**.
-
-**Keep `NTSCRT.app` in Applications.** The plug-in lives inside it, so deleting or moving the app removes the effect.
-
-<details><summary>Uninstall</summary>
-
-Delete `/Applications/NTSCRT.app` and the folder
-`~/Movies/Motion Templates.localized/Effects.localized/NTSCRT`.
-</details>
-
----
 
 ### Using it
 
@@ -91,11 +91,12 @@ Delete `/Applications/NTSCRT.app` and the folder
 
 | Problem | Fix |
 |---|---|
+| Windows installer stops with "Resolve is still running" | Quit Resolve completely (check the system tray and Task Manager), then run it again. It never replaces the plugin while Resolve has it open. |
 | Effect doesn't show up in Resolve | Restart Resolve fully. Check that the bundle is in the OFX folder above and that its whole folder was copied (`Contents\Win64\NTSCRT.ofx` on Windows, `Contents/MacOS/NTSCRT.ofx` on macOS). |
 | Resolve skips the plugin at startup | Resolve marks plugins that crashed as disabled. Re-enable it in *Preferences → Video Plugins* and send us the log. |
-| macOS: "NTSCRT.ofx is damaged / can't be verified" | Run the install script again: it clears the quarantine. For a manual copy, run the `xattr` command above. |
-| Final Cut: effect missing | Open `NTSCRT.app` once more and restart Final Cut. In Terminal, `pluginkit -mAvvv -p FxPlug` should list `NTSCRT Renderer`. |
-| Picture is black or unchanged | Usually a partial copy: the `shaders/` folder or `librashader` file inside the bundle is missing. Reinstall from the zip. Resolve shows the plugin's error message when it can't render. |
+| macOS: "NTSCRT.ofx is damaged / can't be verified" | Run the install line again: it clears the quarantine. For a manual copy, run the `xattr` command above. |
+| Final Cut: effect missing | Open `/Applications/NTSCRT.app` once more and restart Final Cut. In Terminal, `pluginkit -mAvvv -p FxPlug` should list `NTSCRT Renderer`. |
+| Picture is black or unchanged | Usually a partial copy: the `shaders/` folder or `librashader` file inside the bundle is missing. Run the install line again. Resolve shows the plugin's error message when it can't render. |
 
 Building from source instead: see [Build](#build-windows) below (Windows/Resolve) and `fxplug/README.md` (Final Cut).
 

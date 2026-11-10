@@ -25,8 +25,14 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $target = Join-Path $Dest "NTSCRT.ofx.bundle"
 try {
+    # Resolve keeps the plugin's DLLs open; replacing them while it runs leaves a half-deleted bundle.
+    for ($i = 0; $i -lt 3 -and (Get-Process -Name "Resolve" -ErrorAction SilentlyContinue); $i++) {
+        Write-Warning "DaVinci Resolve is running. Quit it, then press Enter."
+        Read-Host | Out-Null
+        Start-Sleep -Seconds 2
+    }
     if (Get-Process -Name "Resolve" -ErrorAction SilentlyContinue) {
-        Write-Warning "DaVinci Resolve is running. Quit it first if the copy fails (the plugin DLL is locked while Resolve runs)."
+        throw "DaVinci Resolve is still running. Quit it and run the installer again."
     }
     if ($Uninstall) {
         if (Test-Path $target) { Remove-Item -Recurse -Force -Confirm:$false $target }
