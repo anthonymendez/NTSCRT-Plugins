@@ -8,3 +8,8 @@ if(TARGET ntscrt_ofx)
     target_link_libraries(test_ofx PRIVATE ${CMAKE_DL_LIBS})
   endif()
 endif()
+
+# The host-independent param model (ofx/ofx_params.*), compiled straight in.
+ntscrt_add_test(test_ofx_params test_ofx_params.cpp ${NTSCRT_ROOT}/ofx/ofx_params.cpp)
+target_include_directories(test_ofx_params PRIVATE ${NTSCRT_ROOT}/ofx)
+target_link_libraries(test_ofx_params PRIVATE nlohmann_json::nlohmann_json)

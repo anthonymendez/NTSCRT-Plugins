@@ -263,6 +263,10 @@ void build_look(const Schema &s, const ValueFn &value, json &look, json &feedbac
     feedback = s.has_feedback() ? json{{"kind", "ntscrt-video-feedback"}, {"version", 2}} : json();
     for (size_t i = 0; i < s.params.size(); ++i) {
         const ParamDef &p = s.params[i];
+        // Hidden params aren't written: CRT presets share /shader/params/<NAME> keys
+        // (e.g. GAMMA_INPUT in aperture and easymode), so only the selected preset's
+        // values may go into the look (docs/params.md).
+        if (p.visible_if && !cond_true(s, *p.visible_if, value)) continue;
         try {
             json::json_pointer ptr(p.path);
             (p.feedback ? feedback : look)[ptr] = value(i);

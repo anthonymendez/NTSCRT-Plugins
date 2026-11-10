@@ -1,7 +1,7 @@
 # Tests inside DaVinci Resolve
 
-`run_resolve_tests.py` checks the OpenFX plug-in in a running Resolve: how Resolve actually calls
-it (alpha, frame order, bit depths, sizes, proxy, the Edit page), and that it matches `ntscrt-cli`.
+`run_resolve_tests.py` checks the OpenFX plug-in in a running Resolve, unattended: how Resolve actually calls
+it (alpha, frame order, bit depths, sizes, the Edit page), and that it matches `ntscrt-cli`.
 The ctest suites can't cover that. Run it before a release, and after changing anything in `ofx/` or
 the alpha / frame handling in `core/`.
 
@@ -17,16 +17,27 @@ the alpha / frame handling in `core/`.
 
 ## Run
 ```bash
-python tests/resolve/run_resolve_tests.py --build C:/ntb/main            # all tests, ~5 min
+# Recommended: Resolve closed; the suite starts it headless (-nogui), tests this build, quits it.
+python tests/resolve/run_resolve_tests.py --headless --bundle C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle --build C:/ntb/main
+# In an open Resolve (tests whatever plug-in it loaded; don't touch Resolve meanwhile):
 python tests/resolve/run_resolve_tests.py --build C:/ntb/main --quick --only alpha,order
 ```
+`--headless` is the unattended mode: with no UI there's no dialog that could block the run. Testers
+without a build use `scripts/ntscrt_doctor.py --resolve-tests` (see docs/TESTING.md), which fetches this
+suite and runs it headless against the installed plug-in.
 `--build` points at the CMake build dir (for `ntscrt-cli` and the bundle's shaders). Results land in
 `--out` (default: a new folder under the temp dir): `report.md`, `report.json`, and the rendered
 frames plus amplified diff images for anything that failed. Exit code 0 = no failures.
 
-The tests run in their own project, **NTSCRT Resolve Tests**, recreated on every run. The project that
-was open is saved first and reopened at the end. While the tests run, Fusion is in batch mode (no
-dialogs); don't use Resolve until it finishes.
+The tests run in their own project, **NTSCRT Resolve Tests** (reused when it's open, each run adding
+timelines stamped with the time; recreated otherwise). The project that was open is saved first and
+reopened at the end. Don't use Resolve until it finishes.
+
+How frames are captured: each test builds a Fusion comp in a timeline clip, routes the tool under test
+to MediaOut and renders the frames through the **render queue** (Deliver) as PNGs. Fusion Savers aren't
+used because a scripted Fusion render opens a modal "Render completed" box that blocks scripting. Alpha is
+recovered from a render over black and one over white. All timelines stay at 640×360: changing a
+timeline's resolution from a script crashed Resolve 21.1.2, so other sizes are made inside Fusion.
 
 ## Tests
 | Test | Checks | Pass when |
@@ -37,8 +48,7 @@ dialogs); don't use Resolve until it finishes.
 | order | default look, Digital codec on, Screen Loop on | a fresh instance rendering frames out of order matches sequential frames (mean diff ≤ 0.05) |
 | cli | default look on 8 frames, then every CRT preset | plug-in vs `ntscrt-cli` mean diff ≤ 2 (of 255) |
 | depth | 8-bit int, 16-bit int, 16-bit float sources | each within mean 1.5 of the 32-bit float result |
-| sizes | 1279×719, 1080×1920, 320×240 | output has the source size and isn't black |
-| proxy | Fusion half-resolution proxy render | mean diff ≤ 12 against the full render scaled down (skipped if Fusion ignores proxy) |
+| sizes | 1279×719, 1080×1920, 321×241 sources inside Fusion | renders, not black, lines up with the bypassed source |
 | speed | 1920×1080, every CRT preset | informational: ms per frame NTSCRT adds |
 
 ## When something fails

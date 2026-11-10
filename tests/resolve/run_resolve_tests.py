@@ -2,7 +2,8 @@
 """NTSCRT plug-in tests inside a running DaVinci Resolve (Studio, external scripting on).
 
 Drives Resolve through its scripting API: builds Fusion comps around the NTSCRT
-OpenFX tool, renders with Savers / still exports, and checks the results.
+OpenFX tool, renders frames through the render queue (Deliver) and checks them.
+No Fusion Savers: a scripted Fusion render pops a modal "Render completed" box.
 
   python tests/resolve/run_resolve_tests.py [--build C:/ntb/main] [--out DIR] [--only alpha,order]
                                             [--quick] [--keep-project]
@@ -15,13 +16,14 @@ Tests (see README.md next to this file):
   cli       plug-in output == ntscrt-cli on the same frames (default look + every CRT preset)
   depth     8-bit int / 16-bit int / 16-bit float / 32-bit float sources give the same result
   sizes     odd and portrait sizes render at the right size
-  proxy     Fusion proxy (half resolution) renders and stays close to full resolution
   speed     ms per frame at 1920x1080 for every CRT preset (informational)
 
 Resolve loads the plug-in from its OFX folder, or from OFX_PLUGIN_PATH at startup:
 tests/resolve/launch_resolve_dev.ps1 starts Resolve with a build's bundle.
 The tests run in their own project ("NTSCRT Resolve Tests"); the project that was
 open is saved first and reopened at the end.
+Unattended: --headless starts Resolve with -nogui (no UI, so no dialog can block), runs, and
+quits it; --bundle <NTSCRT.ofx.bundle> tests a build without installing it.
 Exit code: 0 all passed (skips allowed), 1 a test failed, 2 setup error.
 """
 import argparse
@@ -182,19 +184,6 @@ def dilate(mask, w, h, r):
     return out
 
 
-def downscale2(img):
-    w, h = img.w // 2, img.h // 2
-    px = bytearray(w * h * 4)
-    s = img.px
-    for y in range(h):
-        r0, r1 = (2 * y) * img.w * 4, (2 * y + 1) * img.w * 4
-        for x in range(w):
-            i0, i1 = r0 + 8 * x, r1 + 8 * x
-            for c in range(4):
-                px[(y * w + x) * 4 + c] = (s[i0 + c] + s[i0 + 4 + c] + s[i1 + c] + s[i1 + 4 + c] + 2) >> 2
-    return Image(w, h, px)
-
-
 # ------------------------------------------------------------ Resolve glue ---
 def connect():
     g = globals().get("resolve")
@@ -208,7 +197,9 @@ def connect():
         lib = os.environ.get("RESOLVE_SCRIPT_LIB", "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so")
     os.environ.setdefault("RESOLVE_SCRIPT_API", api)
     os.environ.setdefault("RESOLVE_SCRIPT_LIB", lib)
-    sys.path.append(os.path.join(api, "Modules"))
+    mod = os.path.join(api, "Modules")
+    if mod not in sys.path:
+        sys.path.append(mod)
     import DaVinciResolveScript as dvr  # noqa: E402
 
     r = dvr.scriptapp("Resolve")
@@ -218,11 +209,55 @@ def connect():
     return r
 
 
-class Fu:
-    """Small helpers over a Fusion composition."""
+RESOLVE_EXE = {
+    "win32": r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe",
+    "darwin": "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/MacOS/Resolve",
+}.get(sys.platform, "/opt/resolve/bin/resolve")
 
-    def __init__(self, comp, out_dir):
-        self.comp, self.out = comp, Path(out_dir)
+
+def resolve_running():
+    try:
+        if sys.platform == "win32":
+            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Resolve.exe", "/NH"], capture_output=True, text=True).stdout
+            return "Resolve.exe" in out
+        return subprocess.run(["pgrep", "-x", "Resolve"], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def start_headless(bundle, log_dir):
+    """Start Resolve with -nogui (no windows, so no dialog can block the tests). With `bundle`,
+    a copy of that NTSCRT.ofx.bundle is loaded through OFX_PLUGIN_PATH instead of / next to the
+    installed one. Returns the Popen."""
+    import shutil
+    import tempfile
+    if resolve_running():
+        raise RuntimeError("--headless starts its own Resolve: quit DaVinci Resolve first")
+    env = dict(os.environ)
+    if bundle:
+        b = Path(bundle)
+        if not (b / "Contents").is_dir():
+            raise RuntimeError(f"--bundle: {b} is not an NTSCRT.ofx.bundle")
+        dev = Path(tempfile.gettempdir()) / "ntscrt-ofx-dev"
+        shutil.rmtree(dev, ignore_errors=True)
+        shutil.copytree(b, dev / "NTSCRT.ofx.bundle")
+        env["OFX_PLUGIN_PATH"] = str(dev)
+    env.setdefault("NTSCRT_OFX_LOG", str(Path(log_dir) / "ntscrt-ofx.log"))
+    if not Path(RESOLVE_EXE).exists():
+        raise RuntimeError(f"Resolve not found at {RESOLVE_EXE}")
+    print(f"starting Resolve headless ({RESOLVE_EXE} -nogui)" + (f" with {bundle}" if bundle else ""), flush=True)
+    return subprocess.Popen([RESOLVE_EXE, "-nogui"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class Fu:
+    """Small helpers over the Fusion composition of a timeline clip. Frames are captured
+    through Resolve's render queue (Deliver), not Fusion Savers: a scripted Fusion render
+    pops a modal "Render completed" box that blocks scripting until someone clicks it."""
+
+    def __init__(self, suite, comp, tl):
+        self.suite, self.comp, self.tl, self.out = suite, comp, tl, suite.out
+        self.media_out = next(t for t in comp.GetToolList(False).values() if t.GetAttrs("TOOLS_RegID") == "MediaOut")
+        self.mattes = None
 
     def add(self, reg, **inputs):
         self.comp.Lock()
@@ -241,31 +276,39 @@ class Fu:
         else:  # a tool: connect its main output
             setattr(tool, name, value.Output)
 
-    def render(self, tools, frames, tag):
-        """Render `tools` ({name: tool}) at `frames` (list, rendered one by one in that order) or
-        (start, end) tuple (one render call). Returns {name: {frame: path}}."""
-        savers = {}
-        self.comp.Lock()
-        for name in tools:
-            savers[name] = self.comp.AddTool("Saver", -32768, -32768)
-        self.comp.Unlock()
-        paths = {}
-        try:
-            for name, tool in tools.items():
-                base = self.out / f"{tag}-{name}-.png"
-                savers[name].Clip = str(base)
-                savers[name].Input = tool.Output
-                paths[name] = base
-            ranges = [frames] if isinstance(frames, tuple) else [(f, f) for f in frames]
-            for a, b in ranges:
-                if not self.comp.Render({"Start": a, "End": b, "Wait": True}):
-                    raise RuntimeError(f"Fusion render {tag} {a}-{b} failed (see the Fusion console / NTSCRT_OFX_LOG)")
-        finally:
-            for s in savers.values():
-                s.Delete()
-        all_frames = list(range(frames[0], frames[1] + 1)) if isinstance(frames, tuple) else list(frames)
-        return {name: {f: Path(str(base).replace("-.png", f"-{f:04d}.png")) for f in all_frames}
-                for name, base in paths.items()}
+    def capture(self, tool, frames, tag):
+        """Route `tool` to MediaOut and render `frames` (a list rendered one job per frame in that
+        order, or an inclusive (start, end) tuple as one job). Returns {frame: png path}."""
+        self.media_out.Input = tool.Output
+        return self.suite.render_timeline(self.tl, frames, tag)
+
+    def render(self, tools, frames, tag, alpha=False):
+        """{name: {frame: path}} for each of `tools` ({name: tool}). alpha=True recovers the tool's
+        alpha from renders over black and over white (straight RGBA PNGs are written)."""
+        out = {}
+        for name, tool in tools.items():
+            if not alpha:
+                out[name] = self.capture(tool, frames, f"{tag}-{name}")
+                continue
+            if not self.mattes:
+                black = self.add("Background", TopLeftRed=0, TopLeftGreen=0, TopLeftBlue=0, TopLeftAlpha=1)
+                white = self.add("Background", TopLeftRed=1, TopLeftGreen=1, TopLeftBlue=1, TopLeftAlpha=1)
+                self.mattes = (self.add("Merge", Background=black), self.add("Merge", Background=white))
+            mb, mw = self.mattes
+            mb.Foreground = tool.Output
+            mw.Foreground = tool.Output
+            ob = self.capture(mb, frames, f"{tag}-{name}-overblack")
+            ow = self.capture(mw, frames, f"{tag}-{name}-overwhite")
+            out[name] = {}
+            for f in ob:
+                b, w = read_png(ob[f]), read_png(ow[f])
+                px = bytearray(b.px)
+                # over black = c*a (premultiplied); over white = c*a + (1 - a), so a = 1 - (white - black)
+                px[3::4] = bytes(max(0, min(255, 255 - (wv - bv))) for wv, bv in zip(w.channel(1), b.channel(1)))
+                path = self.out / f"{tag}-{name}-{f:04d}.png"
+                write_png(path, Image(b.w, b.h, px))
+                out[name][f] = path
+        return out
 
 
 def retry(fn, what, timeout=45.0):
@@ -278,18 +321,6 @@ def retry(fn, what, timeout=45.0):
         if time.time() > end:
             raise RuntimeError(f"Resolve kept refusing: {what} (a dialog open in Resolve?)")
         time.sleep(0.5)
-
-
-def tc_from_frame(frame, fps):
-    fps_i = int(round(fps))
-    f = frame % fps_i
-    s = frame // fps_i
-    return f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}:{f:02d}"
-
-
-def frame_from_tc(tc, fps):
-    hh, mm, ss, ff = (int(x) for x in tc.replace(";", ":").split(":"))
-    return ((hh * 60 + mm) * 60 + ss) * int(round(fps)) + ff
 
 
 # ------------------------------------------------------------------ suite ---
@@ -323,18 +354,20 @@ class Suite:
         pm = self.r.GetProjectManager()
         cur = pm.GetCurrentProject()
         self.prev_project = cur.GetName() if cur else None
-        if self.prev_project == PROJECT:
-            pm.SaveProject()  # closing an unsaved project asks "save changes?" and blocks scripting
-            pm.CloseProject(cur)
+        if self.prev_project and self.prev_project.startswith("Untitled Project"):
+            # Resolve's blank startup project: saving it opens a modal "name this project" dialog.
             self.prev_project = None
-        elif self.prev_project:
-            pm.SaveProject()
-        # A fresh project every run (deleting timelines from the UI side can raise a
-        # confirmation dialog that blocks scripting).
-        if PROJECT in (pm.GetProjectListInCurrentFolder() or []):
-            pm.DeleteProject(PROJECT)
-        if not pm.CreateProject(PROJECT):
-            raise RuntimeError(f"couldn't create project {PROJECT} (is a dialog open in Resolve?)")
+        # Closing, deleting or deleting timelines from the open project raises
+        # confirmation dialogs that block scripting, so: reuse the test project when
+        # it's open (each run's timelines get unique names), otherwise recreate it.
+        if self.prev_project != PROJECT:
+            if self.prev_project:
+                pm.SaveProject()  # a named project: saves silently
+            if PROJECT in (pm.GetProjectListInCurrentFolder() or []):
+                pm.DeleteProject(PROJECT)
+            if not pm.CreateProject(PROJECT) and not pm.LoadProject(PROJECT):
+                raise RuntimeError(f"couldn't create project {PROJECT} (is a dialog open in Resolve?)")
+        self.run_id = datetime.datetime.now().strftime("%H%M%S")
         p = pm.GetCurrentProject()
         mp = p.GetMediaPool()
         for k, v in (("timelineResolutionWidth", str(W)), ("timelineResolutionHeight", str(H)),
@@ -344,15 +377,57 @@ class Suite:
         self.p, self.mp = p, mp
         self.fps = float(p.GetSetting("timelineFrameRate") or FPS)
 
-    def new_comp(self, name):
-        """A timeline holding one Fusion composition clip; returns Fu over its comp."""
+    def new_timeline(self, name):
+        # Every timeline keeps the project size: changing a timeline's resolution from a
+        # script crashed Resolve 21.1.2. Other sizes are made inside Fusion instead.
         retry(lambda: self.r.OpenPage("edit"), "open the Edit page")
+        name = f"{name} {self.run_id}"
         tl = retry(lambda: self.mp.CreateEmptyTimeline(name), f"create timeline {name}")
         retry(lambda: self.p.SetCurrentTimeline(tl), "switch timeline")
+        return tl
+
+    def new_comp(self, name):
+        """A timeline holding one Fusion composition clip; returns Fu over its comp."""
+        tl = self.new_timeline(name)
         item = retry(lambda: tl.InsertFusionCompositionIntoTimeline(), "insert a Fusion composition")
         comp = retry(lambda: item.GetFusionCompByIndex(1), "get the Fusion composition")
-        retry(lambda: self.r.OpenPage("fusion"), "open the Fusion page")
-        return Fu(comp, self.out), item
+        return Fu(self, comp, tl), item
+
+    def render_timeline(self, tl, frames, tag):
+        """Render frames of `tl` (offsets from its start) to PNG through the render queue.
+        frames: list (one job per frame, in that order) or inclusive (a, b) tuple (one job).
+        Returns {frame: path}, files renamed to <tag>-<frame:04d>.png."""
+        retry(lambda: self.p.SetCurrentTimeline(tl), "switch timeline")
+        start = tl.GetStartFrame()
+        ranges = [frames] if isinstance(frames, tuple) else [(f, f) for f in frames]
+        out = {}
+        for a, b in ranges:
+            custom = f"{tag}-r{a}-"
+            retry(lambda: self.p.SetCurrentRenderFormatAndCodec("png", "RGB8"), "set the render format")
+            retry(lambda: self.p.SetRenderSettings({
+                "SelectAllFrames": False, "MarkIn": start + a, "MarkOut": start + b, "TargetDir": str(self.out),
+                "CustomName": custom, "FormatWidth": W, "FormatHeight": H}), "set render settings")
+            job = retry(lambda: self.p.AddRenderJob(), "add a render job")
+            try:
+                retry(lambda: self.p.StartRendering([job], False), "start rendering")
+                t0 = time.time()
+                while self.p.IsRenderingInProgress():
+                    if time.time() - t0 > 600:
+                        raise RuntimeError(f"render {tag} {a}-{b} took over 10 minutes")
+                    time.sleep(0.1)
+                st = self.p.GetRenderJobStatus(job) or {}
+                if st.get("JobStatus") != "Complete":
+                    raise RuntimeError(f"render {tag} {a}-{b}: {st} (see NTSCRT_OFX_LOG / Resolve's log)")
+            finally:
+                self.p.DeleteRenderJob(job)
+            for f in range(a, b + 1):
+                src = self.out / f"{custom}{start + f:08d}.png"
+                if not src.exists():
+                    raise RuntimeError(f"render {tag}: {src.name} missing")
+                dst = self.out / f"{tag}-{f:04d}.png"
+                os.replace(src, dst)
+                out[f] = dst
+        return out
 
     def close(self):
         pm = self.r.GetProjectManager()
@@ -381,14 +456,14 @@ class Suite:
     # -- scene building -----------------------------------------------------
     def scene(self, fu, w=W, h=H, animated=True, text=True):
         """Opaque source: gradient + (animated noise) + title. Returns the top tool."""
-        bg = fu.add("Background", Width=w, Height=h, Type="Corner",
+        bg = fu.add("Background", UseFrameFormatSettings=0, Width=w, Height=h, Type="Corner",
                     TopLeftRed=0.1, TopLeftGreen=0.3, TopLeftBlue=0.8,
                     TopRightRed=0.8, TopRightGreen=0.1, TopRightBlue=0.4,
                     BottomLeftRed=0.1, BottomLeftGreen=0.6, BottomLeftBlue=0.3,
                     BottomRightRed=0.9, BottomRightGreen=0.7, BottomRightBlue=0.1)
         top = bg
         if animated:
-            noise = fu.add("FastNoise", Width=w, Height=h, Detail=4, Contrast=1.5, XScale=8, SeetheRate=0.3)
+            noise = fu.add("FastNoise", UseFrameFormatSettings=0, Width=w, Height=h, Detail=4, Contrast=1.5, XScale=8, SeetheRate=0.3)
             top = fu.add("Merge", Background=top, Foreground=noise, Blend=0.35)
         if text:
             top = fu.add("Merge", Background=top, Foreground=self.title(fu))
@@ -425,7 +500,7 @@ class Suite:
         imgs = {}
         for mode, label in ((0, "clip"), (1, "spill")):
             fx.SetInput("alpha_mode", mode)
-            r = fu.render({"src": tx, "fx": fx}, [5], f"alpha-{label}")
+            r = fu.render({"src": tx, "fx": fx}, [5], f"alpha-{label}", alpha=True)
             imgs[label] = (read_png(r["src"][5]), read_png(r["fx"][5]))
         src, clip = imgs["clip"]
         _, spill = imgs["spill"]
@@ -459,30 +534,22 @@ class Suite:
         effects = [e for e in self.r.GetEffectsList() if "ntscrt" in (e.get("name", "") + e.get("id", "")).lower()]
         if not effects:
             return self.record("edit", "fail", notes="NTSCRT isn't in Resolve's effect list")
-        retry(lambda: self.r.OpenPage("edit"), "open the Edit page")
-        tl = retry(lambda: self.mp.CreateEmptyTimeline("edit-page"), "create timeline edit-page")
-        retry(lambda: self.p.SetCurrentTimeline(tl), "switch timeline")
+        tl = self.new_timeline("edit-page")
         item = tl.InsertFusionTitleIntoTimeline("Text+")
         if not item:
             return self.record("edit", "fail", notes="couldn't insert a Text+ title")
         comp = item.GetFusionCompByIndex(1)
         tmpl = next((t for t in comp.GetToolList(False).values() if t.GetAttrs("TOOLS_RegID") == "TextPlus"), None)
         if tmpl:
-            tmpl.SetInput("StyledText", "NTSCRT")
-            tmpl.SetInput("Size", 0.16)
+            for k, v in (("StyledText", "NTSCRT"), ("Size", 0.16), ("Red1", 1.0), ("Green1", 0.85), ("Blue1", 0.15)):
+                tmpl.SetInput(k, v)
         eff = item.AddEffect("ofx", effects[0]["id"])
         if not eff:
             return self.record("edit", "fail", notes=f"AddEffect({effects[0]['id']}) failed")
-        retry(lambda: self.r.OpenPage("color"), "open the Color page")
-        tl.SetCurrentTimecode(tc_from_frame(frame_from_tc(tl.GetStartTimecode(), self.fps) + 10, self.fps))
         shots = {}
         for label, on in (("off", False), ("on", True)):
             eff.SetIsEnabled(on)
-            time.sleep(2)
-            path = self.out / f"edit-{label}.png"
-            if not self.p.ExportCurrentFrameAsStill(str(path)):
-                return self.record("edit", "fail", notes="ExportCurrentFrameAsStill failed")
-            shots[label] = read_png(path)
+            shots[label] = read_png(self.render_timeline(tl, [10], f"edit-{label}")[10])
         off, on = shots["off"], shots["on"]
         lit = bytearray(1 if max(off.px[i * 4:i * 4 + 3]) > 24 else 0 for i in range(off.w * off.h))
         near = dilate(lit, off.w, off.h, 24)
@@ -500,7 +567,7 @@ class Suite:
         if inside["mean"] < 1.0:
             problems.append("the effect didn't change the title")
         self.record("edit", "fail" if problems else "pass", m, "; ".join(problems),
-                    ["edit-off.png", "edit-on.png", "edit-diff.png"])
+                    ["edit-off-0010.png", "edit-on-0010.png", "edit-diff.png"])
 
     def order_case(self, label, params):
         fu, _ = self.new_comp(f"order-{label}")
@@ -590,55 +657,35 @@ class Suite:
         self.record("depth", "fail" if problems else "pass", m, "; ".join(problems))
 
     def t_sizes(self):
+        """Odd and portrait source sizes inside Fusion. The plug-in renders them at their own size;
+        the timeline then fits the result into the 640x360 frame, so this checks the render works and
+        the picture lands where it should (not black, not shifted) against the bypassed source."""
         m, problems = {}, []
-        for w, h in ((1279, 719), (1080, 1920), (320, 240)):
+        for w, h in ((1279, 719), (1080, 1920), (321, 241)):
             fu, _ = self.new_comp(f"size-{w}x{h}")
             src = self.scene(fu, w, h, animated=False, text=False)
             fx = self.ntscrt(fu, src)
+            fx.SetAttrs({"TOOLB_PassThrough": True})
+            ref = read_png(fu.render({"fx": fx}, [0], f"size-{w}x{h}-src")["fx"][0])
+            fx.SetAttrs({"TOOLB_PassThrough": False})
             img = read_png(fu.render({"fx": fx}, [0], f"size-{w}x{h}")["fx"][0])
+            d = stats(ref, img)["rgb"]
             bright = mean(img.channel(1)[::97])
-            m[f"{w}x{h}"] = {"out": f"{img.w}x{img.h}", "mean_green": round(bright, 1)}
-            if (img.w, img.h) != (w, h):
-                problems.append(f"{w}x{h} rendered as {img.w}x{img.h}")
-            elif bright < 5:
+            m[f"{w}x{h}"] = {"vs_source": d, "mean_green": round(bright, 1)}
+            if bright < 5:
                 problems.append(f"{w}x{h} rendered black")
+            elif d["mean"] > 40:
+                problems.append(f"{w}x{h}: far from the source (mean {d['mean']}): wrong size or offset?")
         self.record("sizes", "fail" if problems else "pass", m, "; ".join(problems))
-
-    def t_proxy(self):
-        fu, _ = self.new_comp("proxy")
-        src = self.scene(fu, animated=False)
-        fx = self.ntscrt(fu, src)
-        full = read_png(fu.render({"fx": fx}, [0], "proxy-full")["fx"][0])
-        fx2 = self.ntscrt(fu, src)
-        sav = fu.comp.AddTool("Saver", -32768, -32768)
-        base = self.out / "proxy-half-.png"
-        sav.Clip = str(base)
-        sav.Input = fx2.Output
-        ok = fu.comp.Render({"Start": 0, "End": 0, "Wait": True, "Proxy": 2})
-        sav.Delete()
-        path = self.out / "proxy-half-0000.png"
-        if not ok or not path.exists():
-            return self.record("proxy", "fail", notes="proxy render failed")
-        half = read_png(path)
-        if (half.w, half.h) == (full.w, full.h):
-            return self.record("proxy", "skip", {"size": f"{half.w}x{half.h}"},
-                               "Fusion ignored the proxy setting for this render")
-        ref = downscale2(full)
-        if (ref.w, ref.h) != (half.w, half.h):
-            return self.record("proxy", "fail", notes=f"proxy size {half.w}x{half.h}, expected {ref.w}x{ref.h}")
-        s = stats(ref, half)["rgb"]
-        ok = s["mean"] <= 12
-        if not ok:
-            write_png(self.out / "proxy-diff.png", diff_image(ref, half))
-        self.record("proxy", "pass" if ok else "fail", {"vs_full_downscaled": s},
-                    "" if ok else "half-resolution render looks too different from full resolution")
 
     def t_speed(self):
         fu, _ = self.new_comp("speed")
         src = self.scene(fu, 1920, 1080)
         fx = self.ntscrt(fu, src)
         n = 3 if self.a.quick else 8
+        fu.render({"fx": fx}, (0, 1), "speed-warmup")  # first frames load shaders / caches
         fx.SetAttrs({"TOOLB_PassThrough": True})
+        fu.render({"fx": fx}, (2, 3), "speed-warmup-base")
         t0 = time.time()
         fu.render({"fx": fx}, (0, n - 1), "speed-base")
         base = (time.time() - t0) / n
@@ -653,21 +700,14 @@ class Suite:
 
     # -- main -------------------------------------------------------------------
     def main(self):
-        # Batch (quiet) mode: no "render completed" or other Fusion dialogs, which
-        # would block every later scripting call until someone clicks them.
-        self.fusion = self.r.Fusion()
-        if self.fusion:
-            self.fusion.SetBatch(True)
         self.open_project()
         try:
             for name, fn in (("version", self.t_version), ("alpha", self.t_alpha), ("edit", self.t_edit),
                              ("order", self.t_order), ("cli", self.t_cli), ("depth", self.t_depth),
-                             ("sizes", self.t_sizes), ("proxy", self.t_proxy), ("speed", self.t_speed)):
+                             ("sizes", self.t_sizes), ("speed", self.t_speed)):
                 self.run(name, fn)
         finally:
             self.close()
-            if self.fusion:
-                self.fusion.SetBatch(False)
         return self.report()
 
     def report(self):
@@ -690,21 +730,48 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", help="CMake build dir (finds ntscrt-cli and the bundle's resources)")
     ap.add_argument("--out", default=None, help="output folder (default: a new temp folder)")
-    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,depth,sizes,proxy,speed)")
+    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,depth,sizes,speed)")
     ap.add_argument("--quick", action="store_true", help="fewer frames")
     ap.add_argument("--keep-project", action="store_true", help="stay in the test project afterwards")
+    ap.add_argument("--headless", action="store_true",
+                    help="start Resolve with -nogui for the run and quit it afterwards (Resolve must be closed)")
+    ap.add_argument("--bundle", help="with --headless: test this NTSCRT.ofx.bundle without installing it")
     a = ap.parse_args()
     a.only = {s.strip() for s in a.only.split(",") if s.strip()}
     if not a.out:
         import tempfile
         a.out = os.path.join(tempfile.gettempdir(), "ntscrt-resolve-tests",
                              datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    proc = None
     try:
-        r = connect()
+        if a.headless:
+            Path(a.out).mkdir(parents=True, exist_ok=True)
+            proc = start_headless(a.bundle, a.out)
+            r, end = None, time.time() + 180
+            while not r and time.time() < end:  # Resolve takes a while to start
+                time.sleep(3)
+                try:
+                    r = connect()
+                except Exception:
+                    r = None
+            if not r:
+                raise RuntimeError("headless Resolve didn't answer within 3 minutes")
+        else:
+            r = connect()
     except Exception as e:
         print(f"setup: {e}", file=sys.stderr)
+        if proc:
+            proc.kill()
         return 2
-    return Suite(r, a).main()
+    try:
+        return Suite(r, a).main()
+    finally:
+        if proc:
+            r.Quit()
+            try:
+                proc.wait(60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 if __name__ == "__main__":

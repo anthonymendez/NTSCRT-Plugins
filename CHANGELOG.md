@@ -38,13 +38,20 @@ First release (will be 0.1.0).
 - Premultiplied sources no longer get dark fringes or halos at soft edges.
 - Fusion: the effect failed (black output) on sources that don't cover the frame or have no frame rate,
   such as Text+ titles.
+- CRT shaders aperture and easymode looked wrong (darker, a much stronger mask): the plug-in also sent
+  the other CRT presets' settings, and presets that share a setting name (gamma, mask strength)
+  overwrote each other's values. Now only the selected preset's settings are sent (Resolve and Final Cut).
 
 ### Developer
 - `tests/resolve/`: plug-in tests inside a running DaVinci Resolve (alpha modes, Edit page, out-of-order
-  frames, plug-in vs `ntscrt-cli`, bit depths, sizes, proxy, speed) and `launch_resolve_dev.ps1` to start
-  Resolve with a build without installing it. Work in progress: a Resolve dialog during project setup
-  still stalls the suite.
-- Set `NTSCRT_OFX_LOG=<file>` before starting Resolve to log why a render failed (e.g. a property the host
-  doesn't provide).
+  frames, plug-in vs `ntscrt-cli`, bit depths, sizes, speed) and `launch_resolve_dev.ps1` to start
+  Resolve with a build without installing it. Runs unattended: `--headless` starts Resolve with
+  `-nogui`; frames are captured through the render queue (Fusion's own renders open a dialog).
+- `scripts/ntscrt_doctor.py`: checks an install and collects a debug zip (system/GPU info, install state,
+  plug-in log, NTSCRT lines of Resolve's log, crash reports, installer logs, optional Resolve test run).
+  docs/TESTING.md walks a tester through installing, checking and reporting.
+- The Resolve plug-in keeps a small diagnostic log (load, instances, first renders, every failure):
+  `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log` / `~/Library/Logs/NTSCRT/ntscrt-ofx.log`, rotated at 1 MB.
+  `NTSCRT_OFX_LOG=<file|off>` moves or disables it, `NTSCRT_OFX_LOG_VERBOSE=1` logs every frame.
 
 [Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/commits/main

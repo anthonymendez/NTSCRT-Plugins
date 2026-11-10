@@ -168,3 +168,22 @@ TEST_CASE("model: real schema + checked-in id map are complete and valid") {
     json look = m.build_look(json::object(), [&](const Param &p) { return m.default_host_value(p); });
     CHECK(look.is_object());
 }
+
+TEST_CASE("model: only the selected CRT preset's shader params go into the look") {
+    json schema = json::parse(ntscrt_param_schema_json());
+    Model m = Model::from_schema(schema, load("fxplug/param_ids.json"), nullptr);
+    const Param *preset = m.find("crt.preset");
+    REQUIRE(preset);
+    auto look_for = [&](const char *id) {
+        json host = *m.to_host_value(*preset, json(id));
+        return m.build_look(json::object(), [&](const Param &p) {
+            return &p == preset ? host : m.default_host_value(p);
+        });
+    };
+    // aperture/easymode share GAMMA_*, easymode/hyllian share MASK_STRENGTH (different defaults)
+    json ap = look_for("aperture");
+    CHECK(ap["shader"]["params"]["GAMMA_INPUT"].get<double>() == doctest::Approx(2.4));
+    json em = look_for("easymode");
+    CHECK(em["shader"]["params"]["GAMMA_INPUT"].get<double>() == doctest::Approx(2.0));
+    CHECK(em["shader"]["params"]["MASK_STRENGTH"].get<double>() == doctest::Approx(0.3));
+}

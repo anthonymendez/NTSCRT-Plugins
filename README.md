@@ -127,6 +127,9 @@ installed version shows in the effect's **Presets → Version** field. A specifi
 
 ### Troubleshooting
 
+Testing it for someone, or something's wrong? [docs/TESTING.md](docs/TESTING.md) has a 5-minute check and a
+`ntscrt_doctor.py` command that collects a debug report (logs, install state, optional automatic tests).
+
 | Problem | Fix |
 |---|---|
 | Installer says "Couldn't replace the installed plugin" | A file in the plugin is in use. Quit Resolve completely (check the system tray and Task Manager) and run it again. The installed version is left untouched. Installing with Resolve open normally works; the new version loads on the next restart. |

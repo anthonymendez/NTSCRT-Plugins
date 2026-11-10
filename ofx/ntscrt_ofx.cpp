@@ -10,6 +10,9 @@
 #include "ofxsImageEffect.h"
 
 #include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <thread>
 #include <cfloat>
 #include <climits>
 #include <cstdlib>
@@ -160,6 +163,79 @@ bool wrap_padded(OFX::Image &im, const OfxRectI &r, ntscrt_image &out, std::vect
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// Diagnostic log, always on and small: plug-in load (version, path, host), each
+// instance, the first renders of each instance and every failure. For bug reports.
+//   Windows: %LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log    macOS: ~/Library/Logs/NTSCRT/ntscrt-ofx.log
+//   NTSCRT_OFX_LOG=<file> logs there instead ("off" disables), NTSCRT_OFX_LOG_VERBOSE=1 logs every frame.
+// Rotated to ntscrt-ofx.old.log at 1 MB.
+namespace dlog {
+std::mutex &mu() { static std::mutex m; return m; }
+std::filesystem::path path() {
+    static const std::filesystem::path p = [] {
+        namespace fs = std::filesystem;
+        if (const char *e = std::getenv("NTSCRT_OFX_LOG"); e && *e) return std::string(e) == "off" ? fs::path() : fs::u8path(e);
+#ifdef _WIN32
+        const char *base = std::getenv("LOCALAPPDATA");
+        return base ? fs::u8path(base) / "NTSCRT" / "ntscrt-ofx.log" : fs::path();
+#else
+        const char *home = std::getenv("HOME");
+        return home ? fs::u8path(home) / "Library" / "Logs" / "NTSCRT" / "ntscrt-ofx.log" : fs::path();
+#endif
+    }();
+    return p;
+}
+bool verbose() {
+    static const bool v = [] { const char *e = std::getenv("NTSCRT_OFX_LOG_VERBOSE"); return e && *e && *e != '0'; }();
+    return v;
+}
+void write(const std::string &msg) {
+    try {
+        namespace fs = std::filesystem;
+        const fs::path p = path();
+        if (p.empty()) return;
+        std::lock_guard<std::mutex> lk(mu());
+        std::error_code ec;
+        fs::create_directories(p.parent_path(), ec);
+        if (fs::exists(p, ec) && fs::file_size(p, ec) > (1u << 20)) {
+            fs::path old = p;
+            old.replace_filename("ntscrt-ofx.old.log");
+            fs::rename(p, old, ec);
+        }
+        std::ofstream f(p, std::ios::app);
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        int ms = int(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
+        char ts[32];
+        std::tm tm{};
+#ifdef _WIN32
+        localtime_s(&tm, &t);
+#else
+        localtime_r(&t, &tm);
+#endif
+        std::strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tm);
+        std::ostringstream tid;
+        tid << std::this_thread::get_id();
+        f << ts << '.' << (ms < 100 ? (ms < 10 ? "00" : "0") : "") << ms << " [" << tid.str() << "] " << msg << '\n';
+    } catch (...) {
+    }
+}
+const char *depth_name(OFX::BitDepthEnum d) {
+    switch (d) {
+    case OFX::eBitDepthUByte: return "8u";
+    case OFX::eBitDepthUShort: return "16u";
+    case OFX::eBitDepthHalf: return "16f";
+    case OFX::eBitDepthFloat: return "32f";
+    default: return "?";
+    }
+}
+std::string rect(const OfxRectI &r) {
+    std::ostringstream o;
+    o << r.x1 << ',' << r.y1 << '-' << r.x2 << ',' << r.y2 << " (" << (r.x2 - r.x1) << 'x' << (r.y2 - r.y1) << ')';
+    return o.str();
+}
+}  // namespace dlog
+
+// ---------------------------------------------------------------------------
 class NtscrtEffect : public OFX::ImageEffect {
 public:
     NtscrtEffect(OfxImageEffectHandle h) : ImageEffect(h), g_(globals()) {
@@ -187,6 +263,14 @@ public:
 
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, g_.res_dir.c_str()};
         if (ntscrt_create(&ci, &inst_) != NTSCRT_OK) inst_ = nullptr;
+        id_ = ++instance_count();
+        {
+            std::ostringstream o;
+            o << "instance #" << id_ << " created, context " << getContext() << ", core "
+              << (inst_ ? "ok" : "FAILED to initialise");
+            if (inst_ && *ntscrt_last_error(inst_)) o << " (" << ntscrt_last_error(inst_) << ")";
+            dlog::write(o.str());
+        }
         update_dependents(0.0);
     }
     ~NtscrtEffect() override {
@@ -432,6 +516,9 @@ private:
     std::mutex mu_;
     bool applying_ = false;
     bool had_error_ = false;
+    int id_ = 0;
+    long renders_ = 0, failures_ = 0;
+    static int &instance_count() { static int n = 0; return n; }
     friend struct RenderCtx;
 };
 
@@ -477,27 +564,27 @@ struct RenderCtx {
     }
 };
 
-// Diagnostics for host differences: set NTSCRT_OFX_LOG=<file> to append the
-// reason a render failed (e.g. the OFX property a host doesn't provide).
-static void debug_log(const std::string &msg) {
-    const char *path = std::getenv("NTSCRT_OFX_LOG");
-    if (!path || !*path) return;
-    std::ofstream f(std::filesystem::u8path(path), std::ios::app);
-    f << msg << '\n';
-}
-
 void NtscrtEffect::render(const OFX::RenderArguments &args) {
+    auto fail = [&](const std::string &why) {
+        ++failures_;
+        std::ostringstream o;
+        o << "instance #" << id_ << " render t=" << args.time << " FAILED: " << why;
+        dlog::write(o.str());
+    };
     try {
         render_frame(args);
     } catch (const OFX::Exception::PropertyUnknownToHost &e) {
-        debug_log(std::string("render: property unknown to host: ") + e.what());
+        fail(std::string("property unknown to host: ") + e.what());
         report_error(std::string("NTSCRT: this host doesn't provide ") + e.what());
         throw;
     } catch (const OFX::Exception::HostInadequate &e) {
-        debug_log(std::string("render: host inadequate: ") + e.what());
+        fail(std::string("host inadequate: ") + e.what());
         throw;
     } catch (const OFX::Exception::Suite &e) {
-        debug_log(std::string("render: suite error: ") + e.what());
+        fail(std::string("suite error: ") + e.what() + " (status " + std::to_string(int(e.status())) + ")");
+        throw;
+    } catch (const std::exception &e) {
+        fail(std::string("exception: ") + e.what());
         throw;
     }
 }
@@ -510,6 +597,7 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         OFX::throwSuiteStatusException(kOfxStatErrImageFormat);
 
     OfxRectI win = dst->getBounds();
+    const auto t0 = std::chrono::steady_clock::now();
     ntscrt_image s{}, d{};
     std::vector<uint8_t> src_padded;
     if (!wrap(*dst, win, d) || !wrap_padded(*src, win, s, src_padded)) {
@@ -544,6 +632,18 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         OFX::throwSuiteStatusException(kOfxStatFailed);
     }
     ntscrt_status st = ntscrt_render_cpu(inst_, &ra, &s, &d);
+    ++renders_;
+    if (renders_ <= 20 || renders_ % 500 == 0 || dlog::verbose() || st != NTSCRT_OK) {
+        std::ostringstream o;
+        o << "instance #" << id_ << " render #" << renders_ << " t=" << args.time << " frame=" << ra.frame_index
+          << " fps=" << ra.fps << " scale=" << ra.render_scale << " dst=" << dlog::rect(win)
+          << " src=" << dlog::rect(src->getBounds()) << " depth=" << dlog::depth_name(src->getPixelDepth())
+          << " premult=" << ra.source_premultiplied << " status=" << int(st)
+          << (st != NTSCRT_OK ? std::string(" error=") + ntscrt_last_error(inst_) : std::string()) << " ms="
+          << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        if (renders_ == 1) o << " look=" << look.substr(0, 400) << (look.size() > 400 ? "..." : "");
+        dlog::write(o.str());
+    }
     if (st != NTSCRT_OK && st != NTSCRT_ERR_SOURCE_UNAVAILABLE) {
         report_error(std::string("NTSCRT: ") + ntscrt_last_error(inst_));
         OFX::throwSuiteStatusException(kOfxStatFailed);
@@ -571,6 +671,13 @@ public:
 };
 
 void NtscrtFactory::describe(OFX::ImageEffectDescriptor &desc) {
+    {
+        const auto *h = OFX::getImageEffectHostDescription();
+        std::ostringstream o;
+        o << "NTSCRT " << NTSCRT_VERSION_STRING << " loaded; resources " << globals().res_dir << "; host "
+          << (h ? h->hostName + " (" + h->hostLabel + ") " + h->versionLabel : std::string("?"));
+        dlog::write(o.str());
+    }
     desc.setLabels("NTSCRT", "NTSCRT", "NTSCRT analog TV / VHS / CRT");
     desc.setPluginGrouping("NTSCRT");
     desc.setVersion(NTSCRT_OFX_VERSION_MAJOR, NTSCRT_OFX_VERSION_MINOR, NTSCRT_OFX_VERSION_PATCH, 0, NTSCRT_VERSION_STRING);

@@ -281,7 +281,14 @@ std::optional<json> Model::to_host_value(const Param &p, const json &v) const {
 json Model::build_look(const json &base_look, const std::function<json(const Param &)> &get) const {
     json look = base_look.is_object() ? base_look : json::object();
     for (const auto &p : params)
-        if (!p.feedback) set_at(look, p.pointer, to_look_value(p, get(p)));
+        if (!p.feedback && p.visible_path.empty()) set_at(look, p.pointer, to_look_value(p, get(p)));
+    // Hidden params aren't written: CRT presets share /shader/params/<NAME> keys
+    // (e.g. GAMMA_INPUT in aperture and easymode), so only the selected preset's
+    // values may go into the look (docs/params.md). Their condition reads the look
+    // built above (e.g. /shader/preset).
+    for (const auto &p : params)
+        if (!p.feedback && !p.visible_path.empty() && is_visible(p, look, json()))
+            set_at(look, p.pointer, to_look_value(p, get(p)));
     return look;
 }
 
