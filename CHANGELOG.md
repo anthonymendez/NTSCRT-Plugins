@@ -33,6 +33,11 @@ First release (will be 0.1.0).
 - Installers replace the plug-in atomically: a failed or interrupted install leaves the previous version
   working, and installing while Resolve is open works (the new version loads on restart).
 - Premultiplied sources no longer get dark fringes or halos at soft edges.
-- Fusion: sources that don't cover the frame (e.g. Text+) rendered black.
+- Fusion: the effect failed (black output) on sources that don't cover the frame or have no frame rate,
+  such as Text+ titles.
+
+### Developer
+- Set `NTSCRT_OFX_LOG=<file>` before starting Resolve to log why a render failed (e.g. a property the host
+  doesn't provide).
 
 [Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/commits/main

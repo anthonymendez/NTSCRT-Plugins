@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <climits>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -218,7 +219,7 @@ public:
     void getClipPreferences(OFX::ClipPreferencesSetter &prefs) override {
         prefs.setOutputFrameVarying(true);  // temporal stages: output differs per frame
         // Output keeps the source's alpha convention (the core writes it that way).
-        prefs.setOutputPremultiplication(src_->getPreMultiplication());
+        prefs.setOutputPremultiplication(source_premultiplication());
     }
 
     void purgeCaches() override {
@@ -257,6 +258,37 @@ public:
     }
 
     void render(const OFX::RenderArguments &args) override;
+    void render_frame(const OFX::RenderArguments &args);
+
+    // Clip properties some hosts leave out (Fusion: a Text+ input has no frame
+    // rate). Fall back to the effect's own value, then a sensible default.
+    template <class F, class T> static T optional_prop(F get, T fallback) {
+        try {
+            return get();
+        } catch (const OFX::Exception::PropertyUnknownToHost &) {
+            return fallback;
+        } catch (const OFX::Exception::Suite &) {
+            return fallback;
+        }
+    }
+    double source_frame_rate() {
+        double fps = optional_prop([&] { return src_->getFrameRate(); }, 0.0);
+        if (fps <= 0) fps = optional_prop([&] { return getFrameRate(); }, 0.0);
+        return fps > 0 ? fps : 24.0;
+    }
+    OfxRangeD source_frame_range() {
+        OfxRangeD none{0.0, 0.0};
+        OfxRangeD r = optional_prop([&] { return src_->getFrameRange(); }, none);
+        if (r.max <= r.min) {
+            double d = optional_prop([&] { return getEffectDuration(); }, 0.0);
+            if (d > 0) r = {0.0, d - 1};
+        }
+        if (r.max <= r.min) r = {0.0, 1e9};  // unknown: frame numbers = host time
+        return r;
+    }
+    OFX::PreMultiplicationEnum source_premultiplication() {
+        return optional_prop([&] { return src_->getPreMultiplication(); }, OFX::eImagePreMultiplied);
+    }
 
     // ---- values -----------------------------------------------------------
     json value_at(size_t i, double t) const {
@@ -445,7 +477,32 @@ struct RenderCtx {
     }
 };
 
+// Diagnostics for host differences: set NTSCRT_OFX_LOG=<file> to append the
+// reason a render failed (e.g. the OFX property a host doesn't provide).
+static void debug_log(const std::string &msg) {
+    const char *path = std::getenv("NTSCRT_OFX_LOG");
+    if (!path || !*path) return;
+    std::ofstream f(std::filesystem::u8path(path), std::ios::app);
+    f << msg << '\n';
+}
+
 void NtscrtEffect::render(const OFX::RenderArguments &args) {
+    try {
+        render_frame(args);
+    } catch (const OFX::Exception::PropertyUnknownToHost &e) {
+        debug_log(std::string("render: property unknown to host: ") + e.what());
+        report_error(std::string("NTSCRT: this host doesn't provide ") + e.what());
+        throw;
+    } catch (const OFX::Exception::HostInadequate &e) {
+        debug_log(std::string("render: host inadequate: ") + e.what());
+        throw;
+    } catch (const OFX::Exception::Suite &e) {
+        debug_log(std::string("render: suite error: ") + e.what());
+        throw;
+    }
+}
+
+void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     std::unique_ptr<OFX::Image> dst(dst_->fetchImage(args.time));
     std::unique_ptr<OFX::Image> src(src_->fetchImage(args.time));
     if (!dst || !src) OFX::throwSuiteStatusException(kOfxStatFailed);
@@ -465,12 +522,12 @@ void NtscrtEffect::render(const OFX::RenderArguments &args) {
     int seed = 0;
     seed_->getValueAtTime(args.time, seed);
 
-    OfxRangeD range = src_->getFrameRange();
+    OfxRangeD range = source_frame_range();
     RenderCtx ctx{this, range.min, range.max, win, {}, {}, {}};
 
     ntscrt_render_args ra{};
     ra.frame_index = int64_t(std::llround(args.time - range.min));
-    ra.fps = src_->getFrameRate();
+    ra.fps = source_frame_rate();
     ra.look_json = look.c_str();
     ra.feedback_json = fb.empty() ? nullptr : fb.c_str();
     ra.render_scale = args.renderScale.x > 0 ? args.renderScale.x : 1.0;
@@ -479,7 +536,7 @@ void NtscrtEffect::render(const OFX::RenderArguments &args) {
     ra.release_source = &RenderCtx::release;
     ra.look_at = &RenderCtx::look_at;
     ra.user = &ctx;
-    ra.source_premultiplied = src_->getPreMultiplication() == OFX::eImagePreMultiplied ? 1 : 0;
+    ra.source_premultiplied = source_premultiplication() == OFX::eImagePreMultiplied ? 1 : 0;
 
     std::lock_guard<std::mutex> lk(mu_);
     if (!inst_) {
