@@ -1,0 +1,6 @@
+# ntscrt_core is built with the static MSVC CRT (/MT); match it so the
+# staticlib doesn't pull in msvcrt/vcruntime DLL imports.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

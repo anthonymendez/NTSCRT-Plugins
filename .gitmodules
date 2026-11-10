@@ -1,3 +1,6 @@
 [submodule "upstream/NTSCRT"]
 	path = upstream/NTSCRT
 	url = https://github.com/finnmckenty/NTSCRT
+[submodule "vendor/ntsc-rs"]
+	path = vendor/ntsc-rs
+	url = https://github.com/ntsc-rs/ntsc-rs
