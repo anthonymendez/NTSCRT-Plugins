@@ -70,6 +70,12 @@ or `NTSCRT-FxPlug-macos-universal.zip`.
   `/Applications/NTSCRT.app` and `~/Movies/Motion Templates.localized/Effects.localized/NTSCRT`.
 </details>
 
+### Updating
+Run the same install line again: it installs the latest release over the old one and prints both versions.
+Your projects keep their effects and settings. See what changed in [CHANGELOG.md](CHANGELOG.md). In Resolve, the
+installed version shows in the effect's **Presets → Version** field. A specific version: `-Version v0.1.0`
+(Windows) or `--version v0.1.0` (macOS).
+
 ### Using it
 
 - **Preset** menu: pick a look (Clean VHS, Medium VHS, V Hold glitch, Webcam…). It sets every control, and you can

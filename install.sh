@@ -127,6 +127,15 @@ pick_from() {  # pick_from <name>: with --from, use it only if it contains <name
   unpack "$FROM" "$1" 2>/dev/null
 }
 
+bundle_version() {  # bundle_version <NTSCRT.ofx.bundle | NTSCRT.app> -> "v0.1.0" or ""
+  if [ -f "$1/Contents/Resources/VERSION" ]; then printf 'v%s' "$(head -n 1 "$1/Contents/Resources/VERSION" | tr -d '[:space:]')"
+  elif [ -f "$1/Contents/Info.plist" ]; then
+    v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null || true)"
+    [ -n "$v" ] && printf 'v%s' "$v"
+  fi
+  return 0
+}
+
 # install_swap <source> <dest dir> <name>: atomic replace of <dest dir>/<name>.
 # The new copy is staged next to the old one (and de-quarantined / signed there),
 # then the two are swapped with mv, rolling back if the swap fails. A failed copy
@@ -170,7 +179,8 @@ if [ -n "$WANT_RESOLVE" ]; then
   bundle="$(pick_from NTSCRT.ofx.bundle || unpack "$(download "$OFX_ASSET")" NTSCRT.ofx.bundle)"
   [ -f "$bundle/Contents/MacOS/NTSCRT.ofx" ] || die "not a macOS NTSCRT bundle: $bundle"
   if pgrep -xq Resolve; then say "DaVinci Resolve is running: the new version loads when you restart it."; fi
-  say "Installing DaVinci Resolve plugin -> $OFX_DEST/NTSCRT.ofx.bundle"
+  new_v="$(bundle_version "$bundle")"; old_v="$(bundle_version "$OFX_DEST/NTSCRT.ofx.bundle")"
+  say "Installing DaVinci Resolve plugin $new_v${old_v:+ (replacing $old_v)} -> $OFX_DEST/NTSCRT.ofx.bundle"
   install_swap "$bundle" "$OFX_DEST" NTSCRT.ofx.bundle
   say "Resolve: (re)start it, then Effects > OpenFX > Filters > NTSCRT."
 fi
@@ -178,7 +188,8 @@ fi
 if [ -n "$WANT_FCP" ]; then
   app="$(pick_from NTSCRT.app || unpack "$(download "$FCP_ASSET")" NTSCRT.app)"
   if pgrep -xq "Final Cut Pro"; then say "Final Cut Pro is running: the new version loads when you restart it."; fi
-  say "Installing Final Cut Pro plugin -> $APP_DEST/NTSCRT.app"
+  new_v="$(bundle_version "$app")"; old_v="$(bundle_version "$APP_DEST/NTSCRT.app")"
+  say "Installing Final Cut Pro plugin $new_v${old_v:+ (replacing $old_v)} -> $APP_DEST/NTSCRT.app"
   install_swap "$app" "$APP_DEST" NTSCRT.app
   # Opening the app once registers the plug-in and installs the effect template; it quits by itself.
   say "Registering with Final Cut Pro (opens NTSCRT.app once)"

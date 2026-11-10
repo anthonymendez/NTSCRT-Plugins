@@ -103,6 +103,10 @@ function Invoke-Swap([string]$Mode, [string]$BundlePath) {
     $q = { param($v) "'" + ($v -replace "'", "''") + "'" }
     Invoke-Elevated ("& {`n$SwapScript`n} -Mode $Mode -Bundle " + (& $q $BundlePath) + " -Dest " + (& $q $Dest))
 }
+function Get-BundleVersion([string]$Bundle) {
+    $f = Join-Path $Bundle "Contents\Resources\VERSION"
+    if (Test-Path -LiteralPath $f) { "v" + (Get-Content -LiteralPath $f -TotalCount 1).Trim() } else { "" }
+}
 function Show-ResolveNote([string]$What) {
     if (Get-Process -Name "Resolve" -ErrorAction SilentlyContinue) {
         Write-Warning "DaVinci Resolve is running. $What when you restart it."
@@ -179,11 +183,14 @@ try {
     }
     Get-ChildItem -Recurse $bundle | Unblock-File -ErrorAction SilentlyContinue
 
+    $newVer = Get-BundleVersion $bundle
+    $oldVer = if (Test-Path $Target) { Get-BundleVersion $Target } else { "" }
     Show-ResolveNote "The new version loads"
-    Say "Installing to $Target (administrator prompt)"
+    if ($oldVer) { Say "Installing NTSCRT $newVer (replacing $oldVer) to $Target (administrator prompt)" }
+    else { Say "Installing NTSCRT $newVer to $Target (administrator prompt)" }
     Invoke-Swap "install" $bundle
     if (-not (Test-Path (Join-Path $Target "Contents\Win64\NTSCRT.ofx"))) { throw "Install didn't complete." }
-    Say "Installed. (Re)start DaVinci Resolve: Effects > OpenFX > Filters > NTSCRT."
+    Say "Installed NTSCRT $newVer. (Re)start DaVinci Resolve: Effects > OpenFX > Filters > NTSCRT."
 } finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $work
 }

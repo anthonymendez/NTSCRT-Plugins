@@ -248,6 +248,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches VERSION
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v="$(tr -d '[:space:]' < VERSION)"
+          [ "$TAG" = "v$v" ] || { echo "::error::tag $TAG doesn't match VERSION ($v): run scripts/release.py"; exit 1; }
+          python3 scripts/release.py --notes "$TAG" > release-notes.md
+          cat release-notes.md
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -259,4 +268,4 @@ jobs:
           mapfile -t files < <(find artifacts -name 'NTSCRT-*.zip' -type f | sort)
           printf 'asset: %s\n' "${files[@]}"
           [ "${#files[@]}" -gt 0 ] || { echo "::error::no NTSCRT-*.zip artifacts"; exit 1; }
-          gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --title "NTSCRT $TAG" --generate-notes
+          gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --title "NTSCRT $TAG" --notes-file release-notes.md

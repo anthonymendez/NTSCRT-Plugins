@@ -46,6 +46,7 @@ add_library(ntscrt_ofx MODULE
   ofx_params.h)
 target_link_libraries(ntscrt_ofx PRIVATE ntscrt_ofx_support ntscrt_core nlohmann_json::nlohmann_json)
 target_compile_definitions(ntscrt_ofx PRIVATE
+  NTSCRT_VERSION_STRING="${PROJECT_VERSION}"
   NTSCRT_OFX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
   NTSCRT_OFX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
   NTSCRT_OFX_VERSION_PATCH=${PROJECT_VERSION_PATCH})
@@ -83,6 +84,7 @@ add_custom_command(TARGET ntscrt_ofx POST_BUILD
     -DSHADERS=${NTSCRT_RESOURCES_BUILD_DIR}/shaders
     -DLIBRASHADER=$<IF:$<BOOL:${NTSCRT_LIBRASHADER_LIB}>,${NTSCRT_LIBRASHADER_LIB},${NTSCRT_LIBRASHADER_BUILT}>
     -DPLIST=$<IF:$<BOOL:${APPLE}>,${CMAKE_CURRENT_BINARY_DIR}/Info.plist,>
+    -DVERSION_FILE=${NTSCRT_ROOT}/VERSION
     -P ${CMAKE_CURRENT_SOURCE_DIR}/bundle_resources.cmake
   COMMENT "Assembling NTSCRT.ofx.bundle resources"
   VERBATIM)

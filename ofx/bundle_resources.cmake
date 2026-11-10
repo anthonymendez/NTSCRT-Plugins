@@ -21,6 +21,11 @@ if(LIBRASHADER AND EXISTS "${LIBRASHADER}")
   file(COPY "${LIBRASHADER}" DESTINATION "${res}")
 endif()
 
+# Plain-text version for installers and support ("which version do I have?").
+if(VERSION_FILE AND EXISTS "${VERSION_FILE}")
+  file(COPY "${VERSION_FILE}" DESTINATION "${res}")
+endif()
+
 if(PLIST AND EXISTS "${PLIST}")
   file(COPY "${PLIST}" DESTINATION "${BUNDLE}/Contents")
 endif()

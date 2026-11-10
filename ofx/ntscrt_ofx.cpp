@@ -34,6 +34,8 @@ using namespace ntscrt_ofx;
 
 namespace {
 const char kPluginId[] = "com.ntscrt.plugins.ntscrt";
+const unsigned kOfxIdentityMajor = 1;
+const char kVersionParam[] = "host_version";
 const char kPresetParam[] = "host_preset";
 const char kLoopPresetParam[] = "host_screenloop_preset";
 const char kPresetFileParam[] = "host_preset_file";
@@ -496,7 +498,14 @@ void NtscrtEffect::render(const OFX::RenderArguments &args) {
 // ---------------------------------------------------------------------------
 class NtscrtFactory : public OFX::PluginFactoryHelper<NtscrtFactory> {
 public:
-    NtscrtFactory() : PluginFactoryHelper<NtscrtFactory>(kPluginId, NTSCRT_OFX_VERSION_MAJOR, NTSCRT_OFX_VERSION_MINOR) {}
+    // The OFX plug-in version is part of its identity: hosts keep effects in saved
+    // projects by (id, major) and load the highest minor. So the major stays at
+    // kOfxIdentityMajor (bump it only if old projects truly can't load the new
+    // plug-in), and the minor grows with every release (X.Y.Z -> X*10000+Y*100+Z).
+    NtscrtFactory()
+        : PluginFactoryHelper<NtscrtFactory>(kPluginId, kOfxIdentityMajor,
+                                             NTSCRT_OFX_VERSION_MAJOR * 10000 + NTSCRT_OFX_VERSION_MINOR * 100 +
+                                                 NTSCRT_OFX_VERSION_PATCH) {}
     void load() override {}
     void unload() override {}
     void describe(OFX::ImageEffectDescriptor &desc) override;
@@ -507,8 +516,8 @@ public:
 void NtscrtFactory::describe(OFX::ImageEffectDescriptor &desc) {
     desc.setLabels("NTSCRT", "NTSCRT", "NTSCRT analog TV / VHS / CRT");
     desc.setPluginGrouping("NTSCRT");
-    desc.setPluginDescription("Analog TV, VHS and CRT look (port of the NTSCRT macOS app).");
-    desc.setVersion(NTSCRT_OFX_VERSION_MAJOR, NTSCRT_OFX_VERSION_MINOR, NTSCRT_OFX_VERSION_PATCH, 0, "");
+    desc.setVersion(NTSCRT_OFX_VERSION_MAJOR, NTSCRT_OFX_VERSION_MINOR, NTSCRT_OFX_VERSION_PATCH, 0, NTSCRT_VERSION_STRING);
+    desc.setPluginDescription("Analog TV, VHS and CRT look (port of the NTSCRT macOS app). Version " NTSCRT_VERSION_STRING ".");
     desc.addSupportedContext(OFX::eContextFilter);
     desc.addSupportedContext(OFX::eContextGeneral);
     desc.addSupportedBitDepth(OFX::eBitDepthUByte);
@@ -651,6 +660,18 @@ void NtscrtFactory::describeInContext(OFX::ImageEffectDescriptor &desc, OFX::Con
         e->setLabel("Save preset...");
         e->setHint("Write the current look (at the playhead) to the preset file.");
         e->setParent(*hg);
+    }
+    {
+        auto *d = desc.defineStringParam(kVersionParam);
+        d->setLabel("Version");
+        d->setHint("NTSCRT plug-in version. Update by running the installer again (see the README).");
+        d->setDefault(NTSCRT_VERSION_STRING);
+        d->setStringType(OFX::eStringTypeLabel);
+        d->setIsPersistant(false);  // always shows the installed version, not the one a project was saved with
+        d->setEnabled(false);
+        d->setAnimates(false);
+        d->setEvaluateOnChange(false);
+        d->setParent(*hg);
     }
     {
         auto *d = desc.defineIntParam(kSeedParam);
