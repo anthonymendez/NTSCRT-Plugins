@@ -16,6 +16,7 @@ target_compile_definitions(ntscrt_core PRIVATE NTSCRT_BUILDING)
 target_link_libraries(ntscrt_core PUBLIC nlohmann_json::nlohmann_json)
 
 add_subdirectory(gpu)
+ntscrt_add_shaders(ntscrt_core ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/facade.slang)
 foreach(stage crop digital ntsc downscale glitch crt howlaround)
   add_subdirectory(stages/${stage})
 endforeach()

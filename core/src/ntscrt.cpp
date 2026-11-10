@@ -7,6 +7,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 
 #include "../stages/stages.h"
@@ -113,9 +114,19 @@ const char *ntscrt_bundled_presets_json(ntscrt_instance *inst) {
     return inst->presets_cache.c_str();
 }
 
-ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args *args, const ntscrt_image *src,
-                                ntscrt_image *dst) {
-    if (!inst || !args || !src || !dst || !src->data || !dst->data) return NTSCRT_ERR_INVALID_ARG;
+}  // extern "C"
+
+namespace {
+// Shared frame renderer behind ntscrt_render_cpu and ntscrt_render_metal.
+// get_src: fill `raw` (BGRA8, opaque) and `alpha` (source alpha per pixel).
+// emit:    deliver the result: `out_gpu` (BGRA8, out_w x out_h) when a GPU
+//          device exists, else `cpu_img` (CPU stages only, crop-sized).
+using SourceFn = std::function<void(ImageBGRA8 &raw, std::vector<float> &alpha)>;
+using EmitFn = std::function<void(const std::shared_ptr<gpu::Texture> &out_gpu, const ImageBGRA8 &cpu_img,
+                                  const ImageBGRA8 &raw, const std::vector<float> &alpha)>;
+
+ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args, int out_w, int out_h,
+                          const SourceFn &get_src, const EmitFn &emit) {
     json look = json::parse(args->look_json ? args->look_json : "{}", nullptr, false);
     if (look.is_discarded()) return fail(inst, NTSCRT_ERR_BAD_PARAMS, "look_json is not valid JSON");
     json feedback;
@@ -158,14 +169,14 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
 
         std::vector<float> alpha;
         ImageBGRA8 raw, img;
-        to_bgra8(*src, raw, &alpha);
+        get_src(raw, alpha);
         Crop::apply(look, raw, img);
 
         if (!inst->dev) {
             // No GPU: CPU stages only (degraded, but never a black frame).
             if (inst->digital.active(look)) inst->digital.process(img, ctx);
             if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
-            from_bgra8(img, &alpha, *dst);
+            emit(nullptr, img, raw, alpha);
             return NTSCRT_OK;
         }
         gpu::Device &dev = *inst->dev;
@@ -226,22 +237,103 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
             chain = inst->downscale->run(upload(img), ctx);
             if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
         }
-        auto out = dev.create_texture({dst->width, dst->height, gpu::Format::BGRA8, true, true});
+        auto out = dev.create_texture({out_w, out_h, gpu::Format::BGRA8, true, true});
         inst->crt->render(*chain, *out, ctx);
         dev.finish();
-        ImageBGRA8 result;
-        result.resize(dst->width, dst->height);
-        dev.download(*out, result.px.data(), ptrdiff_t(dst->width) * 4);
-        bool same = result.width == raw.width && result.height == raw.height;
-        from_bgra8(result, same ? &alpha : nullptr, *dst);
+        emit(out, img, raw, alpha);
         return NTSCRT_OK;
     } catch (const std::exception &e) {
         return fail(inst, NTSCRT_ERR_INTERNAL, e.what());
     }
 }
 
-ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_args *, void *, void *, void *) {
-    return fail(inst, NTSCRT_ERR_INTERNAL, "ntscrt_render_metal: not implemented yet (Wave 2)");
+}  // namespace
+
+extern "C" {
+
+ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args *args, const ntscrt_image *src,
+                                ntscrt_image *dst) {
+    if (!inst || !args || !src || !dst || !src->data || !dst->data) return NTSCRT_ERR_INVALID_ARG;
+    return render_impl(
+        inst, args, dst->width, dst->height,
+        [&](ImageBGRA8 &raw, std::vector<float> &alpha) { to_bgra8(*src, raw, &alpha); },
+        [&](const std::shared_ptr<gpu::Texture> &out, const ImageBGRA8 &cpu_img, const ImageBGRA8 &raw,
+            const std::vector<float> &alpha) {
+            if (!out) {
+                from_bgra8(cpu_img, &alpha, *dst);
+                return;
+            }
+            ImageBGRA8 result;
+            result.resize(dst->width, dst->height);
+            inst->dev->download(*out, result.px.data(), ptrdiff_t(dst->width) * 4);
+            bool same = result.width == raw.width && result.height == raw.height;
+            from_bgra8(result, same ? &alpha : nullptr, *dst);
+        });
+}
+
+// Metal path (FxPlug): host textures in and out, on the device given at create.
+// The CPU stages (Digital, ntsc-rs) still need the frame on the CPU, so the
+// source is read back once; everything after runs on the GPU, and the result
+// is written into the host texture by a kernel (or a blit when the host
+// texture isn't shader-writable) encoded on the host's command buffer.
+ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_args *args, void *src_texture,
+                                  void *dst_texture, void *command_buffer) {
+    if (!inst || !args || !src_texture || !dst_texture) return NTSCRT_ERR_INVALID_ARG;
+    if (!inst->dev || inst->dev->backend() != gpu::Backend::Metal)
+        return fail(inst, NTSCRT_ERR_GPU, "ntscrt_render_metal: instance has no Metal device");
+    gpu::Device &dev = *inst->dev;
+    std::shared_ptr<gpu::Texture> src, dst;
+    try {
+        src = dev.wrap_native_texture(src_texture);
+        dst = dev.wrap_native_texture(dst_texture);
+    } catch (const std::exception &e) {
+        return fail(inst, NTSCRT_ERR_INVALID_ARG, e.what());
+    }
+    const int sw = src->desc().width, sh = src->desc().height;
+    const int dw = dst->desc().width, dh = dst->desc().height;
+
+    auto get_src = [&](ImageBGRA8 &raw, std::vector<float> &alpha) {
+        // Normalise any host format to RGBA32F on the GPU, read back once.
+        auto f32 = dev.create_texture({sw, sh, gpu::Format::RGBA32F, true, false});
+        dev.copy(*src, *f32);
+        std::vector<float> px(size_t(sw) * sh * 4);
+        dev.finish();
+        dev.download(*f32, px.data(), ptrdiff_t(sw) * 16);
+        ntscrt_image im{sw, sh, ptrdiff_t(sw) * 16, NTSCRT_RGBA32F, px.data()};
+        to_bgra8(im, raw, &alpha);
+    };
+    auto emit = [&](const std::shared_ptr<gpu::Texture> &out, const ImageBGRA8 &, const ImageBGRA8 &raw,
+                    const std::vector<float> &) {
+        // render_impl only calls emit with a texture here (the device exists).
+        struct { uint32_t w, h, use_alpha, pad; } p{uint32_t(dw), uint32_t(dh),
+                                                     uint32_t(sw == dw && sh == dh && raw.width == sw), 0};
+        auto merge = [&](gpu::Texture &target) {
+            gpu::Bindings b;
+            b.constants = &p;
+            b.constants_size = sizeof p;
+            b.textures = {out.get(), p.use_alpha ? src.get() : out.get()};
+            b.out_textures = {&target};
+            dev.dispatch(dev.kernel("facade/alpha_merge"), b, dw, dh, 1);
+        };
+        std::shared_ptr<gpu::Texture> staged;
+        if (!dst->desc().shader_write) {
+            // Merge into an internal texture of the destination's format, then blit.
+            staged = dev.create_texture({dw, dh, dst->desc().format, true, false});
+            merge(*staged);
+        }
+        dev.finish();  // our work completes before the host's buffer runs (it may be another queue)
+        if (command_buffer) dev.set_external_command_buffer(command_buffer);
+        try {
+            if (staged) dev.copy(*staged, *dst);  // same format: blit
+            else merge(*dst);
+        } catch (...) {
+            if (command_buffer) dev.set_external_command_buffer(nullptr);
+            throw;
+        }
+        if (command_buffer) dev.set_external_command_buffer(nullptr);
+        else dev.finish();
+    };
+    return render_impl(inst, args, dw, dh, get_src, emit);
 }
 
 }  // extern "C"

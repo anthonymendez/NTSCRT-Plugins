@@ -681,7 +681,14 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
             id<MTLTexture> coreIn = inTex, coreOut = outTex;
             if (src_up) {  // core works top row first
                 coreIn = [NTSCRTMetal scratchTextureForDevice:device format:inTex.pixelFormat width:inTex.width height:inTex.height];
-                if (coreIn) [NTSCRTMetal encodeCopyFrom:inTex to:coreIn offsetX:0 offsetY:0 flipY:YES commandBuffer:cb];
+                if (coreIn) {
+                    // ntscrt_render_metal reads its source on its own command buffers, so the
+                    // flipped copy must have executed before the call.
+                    [NTSCRTMetal encodeCopyFrom:inTex to:coreIn offsetX:0 offsetY:0 flipY:YES commandBuffer:cb];
+                    [cb commit];
+                    [cb waitUntilCompleted];
+                    cb = [slot->queue commandBuffer];
+                }
             }
             if (dst_up || !full || outTex.pixelFormat != inTex.pixelFormat) {
                 coreOut = [NTSCRTMetal scratchTextureForDevice:device format:outTex.pixelFormat width:inTex.width height:inTex.height];

@@ -148,10 +148,14 @@ NTSCRT_API ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst,
                                            const ntscrt_image *src,
                                            ntscrt_image *dst);
 
-/* macOS only. Textures are id<MTLTexture> (BGRA8/RGBA16F/RGBA32F), on the
- * device given at create time. Work is encoded on `command_buffer`
- * (id<MTLCommandBuffer>) if non-NULL, else on the instance's queue and
- * waited on. */
+/* macOS only. Textures are id<MTLTexture> (BGRA8/RGBA8/RGBA16F/RGBA32F,
+ * top row first), on the device given at create time; src must be readable
+ * by shaders and any work producing it already COMMITTED and complete (the
+ * core reads it back on its own command buffers for the CPU stages). The
+ * final write into dst is encoded on `command_buffer` (id<MTLCommandBuffer>,
+ * the host commits it) if non-NULL, else on the instance's queue and waited
+ * on. dst need not be shader-writable (a blit is used then). Output alpha =
+ * src alpha when sizes match, else 1. */
 NTSCRT_API ntscrt_status ntscrt_render_metal(ntscrt_instance *inst,
                                              const ntscrt_render_args *args,
                                              void *src_texture,

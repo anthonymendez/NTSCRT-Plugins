@@ -1,0 +1,1 @@
+ntscrt_add_test(test_facade test_alpha_merge.cpp)
