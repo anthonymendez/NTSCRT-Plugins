@@ -1,30 +1,5594 @@
 {
-  "version": 1,
-  "note": "Wave-0 seed. Agent A generates the full list from upstream Swift param definitions + ntsc-rs descriptors. Format: docs/params.md.",
-  "groups": [
-    { "id": "downscale", "label": "Downscale" },
-    { "id": "ntsc", "label": "NTSC (TV)" },
-    { "id": "glitch", "label": "Glitch" },
-    { "id": "crt", "label": "CRT" },
-    { "id": "digital", "label": "Digital video" },
-    { "id": "crop", "label": "Crop" },
-    { "id": "screenloop", "label": "Screen Loop" }
-  ],
-  "params": [
-    { "id": "downscale.enabled", "group": "downscale", "label": "Enable", "type": "bool", "default": true, "path": "/downscale/enabled", "animatable": false },
-    { "id": "downscale.width", "group": "downscale", "label": "Width", "type": "int", "default": 320, "min": 64, "max": 1920, "path": "/downscale/width", "animatable": true },
-    { "id": "downscale.method", "group": "downscale", "label": "Method", "type": "choice", "default": "area", "options": [ { "value": "area", "label": "Smooth" }, { "value": "nearest", "label": "Chunky" } ], "path": "/downscale/method", "animatable": false },
-    { "id": "ntsc.enabled", "group": "ntsc", "label": "Enable", "type": "bool", "default": true, "path": "/ntsc/enabled", "animatable": false },
-    { "id": "glitch.enabled", "group": "glitch", "label": "Enable", "type": "bool", "default": false, "path": "/glitch/enabled", "animatable": false },
-    { "id": "crt.enabled", "group": "crt", "label": "Enable", "type": "bool", "default": true, "path": "/shader/enabled", "animatable": false },
-    { "id": "crt.preset", "group": "crt", "label": "Shader", "type": "choice", "default": "crt/crtglow_gauss.slangp", "options": [
-      { "value": "crt/crt-aperture.slangp", "label": "crt-aperture" },
-      { "value": "crt/crt-easymode.slangp", "label": "crt-easymode" },
-      { "value": "crt/crtglow_gauss.slangp", "label": "crtglow (gauss)" },
-      { "value": "crt/crtglow_lanczos.slangp", "label": "crtglow (lanczos)" },
-      { "value": "crt/crt-hyllian.slangp", "label": "crt-hyllian" },
-      { "value": "crt/crt-royale.slangp", "label": "crt-royale" },
-      { "value": "crt/crtsim.slangp", "label": "crtsim" } ], "path": "/shader/preset", "animatable": false },
-    { "id": "digital.enabled", "group": "digital", "label": "Enable", "type": "bool", "default": false, "path": "/digital/enabled", "animatable": false }
-  ]
+ "version": 1,
+ "generated_by": "tools/gen_schema.py",
+ "sources": {
+  "upstream_ntscrt": "2b3013dd33c96ed7941c294ec65587ef51f9eeb6",
+  "slang_shaders": "cb01f2f238700eed7ec1c859be1737a9fbcdcb7c",
+  "ntsc_rs": "vendor/ntsc-rs (see .gitmodules / submodule pin)"
+ },
+ "constants": {
+  "/version": 1,
+  "/ntsc/settings/version": 1,
+  "fb:/kind": "ntscrt-video-feedback",
+  "fb:/version": 2
+ },
+ "groups": [
+  {
+   "id": "crop",
+   "label": "Crop",
+   "parent": null
+  },
+  {
+   "id": "downscale",
+   "label": "Downscale",
+   "parent": null
+  },
+  {
+   "id": "digital",
+   "label": "Digital video",
+   "parent": null
+  },
+  {
+   "id": "digital.capture",
+   "label": "Capture",
+   "parent": "digital"
+  },
+  {
+   "id": "digital.picture",
+   "label": "Picture",
+   "parent": "digital"
+  },
+  {
+   "id": "digital.compression",
+   "label": "Compression",
+   "parent": "digital"
+  },
+  {
+   "id": "digital.errors",
+   "label": "Errors",
+   "parent": "digital"
+  },
+  {
+   "id": "ntsc",
+   "label": "NTSC (TV)",
+   "parent": null
+  },
+  {
+   "id": "ntsc.scale_settings",
+   "label": "Intensity",
+   "parent": "ntsc",
+   "hint": "Scale the effect by these factors."
+  },
+  {
+   "id": "ntsc.composite_noise",
+   "label": "Composite signal noise",
+   "parent": "ntsc",
+   "hint": "Noise applied to the composite NTSC signal."
+  },
+  {
+   "id": "ntsc.head_switching",
+   "label": "Head switching",
+   "parent": "ntsc",
+   "hint": "Emulate VHS head-switching artifacts at the bottom of the image."
+  },
+  {
+   "id": "ntsc.head_switching_start_mid_line",
+   "label": "Start mid-line",
+   "parent": "ntsc.head_switching",
+   "hint": "Start the head-switching artifact mid-scanline, with some static where it begins."
+  },
+  {
+   "id": "ntsc.tracking_noise",
+   "label": "Tracking noise",
+   "parent": "ntsc",
+   "hint": "Emulate noise from VHS tracking error."
+  },
+  {
+   "id": "ntsc.ringing",
+   "label": "Ringing",
+   "parent": "ntsc",
+   "hint": "Additional ringing artifacts, simulated with a notch filter."
+  },
+  {
+   "id": "ntsc.luma_noise",
+   "label": "Luma noise",
+   "parent": "ntsc",
+   "hint": "Noise applied to the luminance signal. Useful for higher-frequency noise than the \"Composite noise\" setting can provide."
+  },
+  {
+   "id": "ntsc.chroma_noise",
+   "label": "Chroma noise",
+   "parent": "ntsc",
+   "hint": "Noise applied to the chrominance (color) signal."
+  },
+  {
+   "id": "ntsc.chroma_distortion",
+   "label": "Chroma distortion",
+   "parent": "ntsc",
+   "hint": "Phase and delay errors in the color subcarrier."
+  },
+  {
+   "id": "ntsc.vhs_settings",
+   "label": "VHS emulation",
+   "parent": "ntsc",
+   "hint": null
+  },
+  {
+   "id": "ntsc.vhs_sharpen_enabled",
+   "label": "Sharpen",
+   "parent": "ntsc.vhs_settings",
+   "hint": "Sharpening of the image, as done by some VHS decks."
+  },
+  {
+   "id": "ntsc.vhs_edge_wave_enabled",
+   "label": "Edge wave",
+   "parent": "ntsc.vhs_settings",
+   "hint": "Horizontal waving of the image."
+  },
+  {
+   "id": "glitch",
+   "label": "Glitch",
+   "parent": null
+  },
+  {
+   "id": "glitch.reception",
+   "label": "Reception",
+   "parent": "glitch"
+  },
+  {
+   "id": "glitch.tape",
+   "label": "Tape",
+   "parent": "glitch"
+  },
+  {
+   "id": "crt",
+   "label": "CRT",
+   "parent": null
+  },
+  {
+   "id": "crt.aperture",
+   "label": "CRT Aperture",
+   "parent": "crt",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.easymode",
+   "label": "CRT Easymode",
+   "parent": "crt",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.glow_gauss",
+   "label": "CRT Glow (Gaussian)",
+   "parent": "crt",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos",
+   "label": "CRT Glow (Lanczos)",
+   "parent": "crt",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.hyllian",
+   "label": "CRT Hyllian",
+   "parent": "crt",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.royale",
+   "label": "CRT Royale",
+   "parent": "crt",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.sim",
+   "label": "CRT Sim",
+   "parent": "crt",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "screenloop",
+   "label": "Screen Loop",
+   "parent": null
+  },
+  {
+   "id": "screenloop.framing",
+   "label": "Framing",
+   "parent": "screenloop"
+  },
+  {
+   "id": "screenloop.movement",
+   "label": "Movement",
+   "parent": "screenloop"
+  },
+  {
+   "id": "screenloop.camera",
+   "label": "Camera",
+   "parent": "screenloop"
+  },
+  {
+   "id": "screenloop.signal",
+   "label": "Signal",
+   "parent": "screenloop"
+  }
+ ],
+ "params": [
+  {
+   "id": "crop.enabled",
+   "group": "crop",
+   "label": "Crop",
+   "hint": "Crop the picture to an aspect ratio before anything else in the chain sees it.",
+   "type": "bool",
+   "default": false,
+   "path": "/crop/enabled",
+   "animatable": false
+  },
+  {
+   "id": "crop.ratio",
+   "group": "crop",
+   "label": "Aspect ratio",
+   "type": "choice",
+   "default": "1:1",
+   "options": [
+    {
+     "value": "1:1",
+     "label": "1:1"
+    },
+    {
+     "value": "3:4",
+     "label": "3:4"
+    },
+    {
+     "value": "2:3",
+     "label": "2:3"
+    },
+    {
+     "value": "9:16",
+     "label": "9:16"
+    },
+    {
+     "value": "1:2",
+     "label": "1:2"
+    },
+    {
+     "value": "4:3",
+     "label": "4:3"
+    },
+    {
+     "value": "3:2",
+     "label": "3:2"
+    },
+    {
+     "value": "16:9",
+     "label": "16:9"
+    },
+    {
+     "value": "2:1",
+     "label": "2:1"
+    }
+   ],
+   "path": "/crop/ratio",
+   "animatable": false,
+   "enabled_if": "/crop/enabled"
+  },
+  {
+   "id": "crop.x",
+   "group": "crop",
+   "label": "Position left – right",
+   "hint": "Where the crop sits wherever there's room: 0 the left edge, 1 the right, 0.5 the middle.",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "path": "/crop/x",
+   "animatable": true,
+   "enabled_if": "/crop/enabled"
+  },
+  {
+   "id": "crop.y",
+   "group": "crop",
+   "label": "Position top – bottom",
+   "hint": "Where the crop sits wherever there's room: 0 the top edge, 1 the bottom, 0.5 the middle.",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "path": "/crop/y",
+   "animatable": true,
+   "enabled_if": "/crop/enabled"
+  },
+  {
+   "id": "crop.scale",
+   "group": "crop",
+   "label": "Zoom",
+   "hint": "1: the largest crop for the ratio; more zooms in (2: half its width and height).",
+   "type": "float",
+   "default": 1,
+   "min": 1,
+   "max": 8,
+   "step": 0.01,
+   "unit": "×",
+   "path": "/crop/scale",
+   "animatable": true,
+   "enabled_if": "/crop/enabled"
+  },
+  {
+   "id": "downscale.enabled",
+   "group": "downscale",
+   "label": "Downscale before shader",
+   "hint": "Reduce the picture to a retro horizontal resolution before the shader; the height follows the source's aspect ratio.",
+   "type": "bool",
+   "default": true,
+   "path": "/downscale/enabled",
+   "animatable": false
+  },
+  {
+   "id": "downscale.preset",
+   "group": "downscale",
+   "label": "Horizontal resolution",
+   "hint": "Console preset: sets the width. Purely a label otherwise (\"Custom\" when the width is edited).",
+   "type": "choice",
+   "default": "VGA (320px)",
+   "options": [
+    {
+     "value": "SNES (256px)",
+     "label": "SNES (256px)",
+     "applies": {
+      "/downscale/width": 256
+     }
+    },
+    {
+     "value": "NES (256px)",
+     "label": "NES (256px)",
+     "applies": {
+      "/downscale/width": 256
+     }
+    },
+    {
+     "value": "VGA (320px)",
+     "label": "VGA (320px)",
+     "applies": {
+      "/downscale/width": 320
+     }
+    },
+    {
+     "value": "Arcade (384px)",
+     "label": "Arcade (384px)",
+     "applies": {
+      "/downscale/width": 384
+     }
+    },
+    {
+     "value": "VGA² (640px)",
+     "label": "VGA² (640px)",
+     "applies": {
+      "/downscale/width": 640
+     }
+    },
+    {
+     "value": "Custom",
+     "label": "Custom"
+    }
+   ],
+   "path": "/downscale/preset",
+   "animatable": false,
+   "enabled_if": "/downscale/enabled"
+  },
+  {
+   "id": "downscale.width",
+   "group": "downscale",
+   "label": "Width",
+   "hint": "Horizontal resolution in pixels. Height follows the source's aspect ratio.",
+   "type": "int",
+   "default": 320,
+   "min": 16,
+   "max": 4096,
+   "step": 16,
+   "unit": "px",
+   "path": "/downscale/width",
+   "animatable": false,
+   "enabled_if": "/downscale/enabled"
+  },
+  {
+   "id": "downscale.method",
+   "group": "downscale",
+   "label": "Sampling",
+   "hint": "Chunky takes one source pixel per block — hard pixel edges (on detailed video they can shimmer). Smooth averages the whole block — softer, steady.",
+   "type": "choice",
+   "default": "nearest",
+   "options": [
+    {
+     "value": "nearest",
+     "label": "Chunky"
+    },
+    {
+     "value": "nearest+",
+     "label": "Nearest+",
+     "legacy": true
+    },
+    {
+     "value": "bilinear",
+     "label": "Bilinear",
+     "legacy": true
+    },
+    {
+     "value": "bicubic",
+     "label": "Bicubic",
+     "legacy": true
+    },
+    {
+     "value": "lanczos",
+     "label": "Lanczos",
+     "legacy": true
+    },
+    {
+     "value": "area",
+     "label": "Smooth"
+    }
+   ],
+   "path": "/downscale/method",
+   "animatable": false,
+   "enabled_if": "/downscale/enabled"
+  },
+  {
+   "id": "digital.enabled",
+   "group": "digital",
+   "label": "Digital video",
+   "hint": "A small video codec run for real: capture, 8×8 DCT blocks, quantization, motion-compensated prediction, data loss.",
+   "type": "bool",
+   "default": false,
+   "path": "/digital/enabled",
+   "animatable": false
+  },
+  {
+   "id": "digital.frame_rate",
+   "group": "digital.capture",
+   "label": "Frame rate",
+   "hint": "How many pictures a second the camera captures. Below the clip's own rate, frames repeat — the stutter of old webcams and video calls.",
+   "type": "float",
+   "default": 15,
+   "min": 1,
+   "max": 60,
+   "step": 0.01,
+   "unit": "fps",
+   "path": "/digital/values/frame_rate",
+   "animatable": false,
+   "enabled_if": "/digital/enabled",
+   "structure": true
+  },
+  {
+   "id": "digital.fields",
+   "group": "digital.capture",
+   "label": "Fields",
+   "hint": "Interlaced cameras like the VX1000 record each frame as two fields of alternate lines. Deinterlaced the cheap way — one field, each line doubled, as most DV reached the web — diagonals turn to stairs.",
+   "type": "choice",
+   "default": 0,
+   "options": [
+    {
+     "value": 0,
+     "label": "Progressive"
+    },
+    {
+     "value": 1,
+     "label": "One field (line-doubled)"
+    }
+   ],
+   "path": "/digital/values/fields",
+   "animatable": false,
+   "enabled_if": "/digital/enabled",
+   "structure": true
+  },
+  {
+   "id": "digital.lens_blur",
+   "group": "digital.capture",
+   "label": "Lens softness",
+   "hint": "A soft, cheap or wide-angle lens: fine detail blurs before the sensor sees it.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/lens_blur",
+   "animatable": false,
+   "enabled_if": "/digital/enabled",
+   "structure": true
+  },
+  {
+   "id": "digital.aliasing",
+   "group": "digital.capture",
+   "label": "Aliasing",
+   "hint": "The sensor reading detail it can't resolve, with nothing blurring it away first: fine stripes beat into moiré and edges into jaggies. The red and blue chips sit half a pixel either side of green, as in a 3-CCD camera, so fine patterns turn to rainbows.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/aliasing",
+   "animatable": false,
+   "enabled_if": "/digital/enabled",
+   "structure": true
+  },
+  {
+   "id": "digital.sensor_noise",
+   "group": "digital.capture",
+   "label": "Sensor noise",
+   "hint": "Grain from a small, cheap image sensor, strongest in the color. It changes every frame, so the codec spends its bits on it and blocks crawl in flat areas.",
+   "type": "float",
+   "default": 0.4,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/sensor_noise",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.noise_reduction",
+   "group": "digital.capture",
+   "label": "Noise reduction",
+   "hint": "The camera smoothing its own grain away before compressing. It flattens fine detail into a smeary, plastic look.",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/noise_reduction",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.exposure",
+   "group": "digital.picture",
+   "label": "Exposure",
+   "hint": "How much light the camera lets in. Exposing for the shadows blows out skies and highlights: each color clips at white on its own, so bright skin and sky shift hue on the way.",
+   "type": "float",
+   "default": 0,
+   "min": -2,
+   "max": 2,
+   "step": 0.01,
+   "unit": "stops",
+   "path": "/digital/values/exposure",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.white_balance",
+   "group": "digital.picture",
+   "label": "White balance",
+   "hint": "Warm (positive) or cool (negative): the camera's guess at the light, often wrong.",
+   "type": "float",
+   "default": 0,
+   "min": -1,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/white_balance",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.tint",
+   "group": "digital.picture",
+   "label": "Tint",
+   "hint": "Magenta (positive) or green (negative), the other way a camera's color can drift.",
+   "type": "float",
+   "default": 0,
+   "min": -1,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/tint",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.saturation",
+   "group": "digital.picture",
+   "label": "Saturation",
+   "hint": "Color strength. Consumer camcorders pushed it, reds and oranges most visibly.",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 2,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/saturation",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.black_level",
+   "group": "digital.picture",
+   "label": "Black level",
+   "hint": "Lifted, milky blacks. NTSC DV's 7.5 IRE setup was often handled wrong in transfers, so its blacks came out gray.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0.25,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/black_level",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.sharpening",
+   "group": "digital.picture",
+   "label": "Sharpening",
+   "hint": "The camera's detail circuit: edges get bright and dark outlines (halos), the crisp, hard-edged video look.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/sharpening",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.chroma",
+   "group": "digital.compression",
+   "label": "Color",
+   "hint": "How much color detail is kept against brightness detail. Codecs store color at lower resolution because eyes notice it less: 4:2:2 halves it across, 4:2:0 across and down, and 4:1:1, NTSC DV's choice, quarters it across, smearing color sideways.",
+   "type": "choice",
+   "default": 2,
+   "options": [
+    {
+     "value": 0,
+     "label": "4:4:4 (full)"
+    },
+    {
+     "value": 1,
+     "label": "4:2:2 (half)"
+    },
+    {
+     "value": 2,
+     "label": "4:2:0 (quarter)"
+    },
+    {
+     "value": 3,
+     "label": "4:1:1 (DV)"
+    }
+   ],
+   "path": "/digital/values/chroma",
+   "animatable": false,
+   "enabled_if": "/digital/enabled",
+   "structure": true
+  },
+  {
+   "id": "digital.quality",
+   "group": "digital.compression",
+   "label": "Quality",
+   "hint": "How finely each 8×8 block's detail is kept (the quantizer). Lower turns blocks into flat tiles and rings edges with mosquito noise.",
+   "type": "float",
+   "default": 0.22,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/quality",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.keyframe_interval",
+   "group": "digital.compression",
+   "label": "Keyframe interval",
+   "hint": "Seconds between keyframes (whole pictures). Between them the codec only sends what moved, so errors and datamoshing persist until the next one. 0 compresses every frame on its own, like Motion JPEG and DV.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 10,
+   "step": 0.01,
+   "unit": "s",
+   "path": "/digital/values/keyframe_interval",
+   "animatable": false,
+   "enabled_if": "/digital/enabled",
+   "structure": true
+  },
+  {
+   "id": "digital.fixed_bitrate",
+   "group": "digital.compression",
+   "label": "Fixed bitrate",
+   "hint": "How strictly the codec keeps to a fixed bitrate. Busy frames — motion, detail, grain — have to share the same bits, so they turn blocky, and the picture sharpens again when things settle.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/fixed_bitrate",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.deblocking",
+   "group": "digital.compression",
+   "label": "Deblocking",
+   "hint": "The decoder smoothing block edges, as H.264 does. Off keeps the hard tiles of older codecs; on trades them for smear.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/deblocking",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.data_loss",
+   "group": "digital.errors",
+   "label": "Data loss",
+   "hint": "Lost packets or tape dropouts. The decoder patches the gap from the last picture it had. Every frame on its own (DV), the patches flash and vanish; between keyframes, they smear and drift until the next keyframe.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/data_loss",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.datamosh",
+   "group": "digital.errors",
+   "label": "Datamosh",
+   "hint": "Keyframes thrown away. The changes that follow are applied to the old picture instead of the new one: motion drags the previous scene's pixels around until a keyframe gets through. Needs a keyframe interval above 0.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/datamosh",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "ntsc.enabled",
+   "group": "ntsc",
+   "label": "NTSC signal",
+   "hint": "ntsc-rs analog signal simulation (composite / VHS).",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/enabled",
+   "animatable": false
+  },
+  {
+   "id": "ntsc.scale_settings",
+   "group": "ntsc.scale_settings",
+   "label": "Intensity",
+   "hint": "Scale the effect by these factors.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/scale_settings",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.bandwidth_scale",
+   "group": "ntsc.scale_settings",
+   "label": "Horizontal intensity",
+   "hint": "Horizontally scale the effect by this amount. For 480p video, leave this at 1.0 for the most physically-accurate result.",
+   "type": "float",
+   "default": 0.3,
+   "min": 0.125,
+   "max": 8,
+   "display_min": 0.125,
+   "display_max": 3.0,
+   "step": 0.001,
+   "path": "/ntsc/settings/bandwidth_scale",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/scale_settings"
+  },
+  {
+   "id": "ntsc.vertical_scale",
+   "group": "ntsc.scale_settings",
+   "label": "Vertical intensity",
+   "hint": "Vertically scale the effect by this amount. You should probably leave this at 1.0.",
+   "type": "float",
+   "default": 0.3,
+   "min": 0.125,
+   "max": 8.8,
+   "display_min": 0.125,
+   "display_max": 3.0,
+   "step": 0.001,
+   "path": "/ntsc/settings/vertical_scale",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/scale_settings"
+  },
+  {
+   "id": "ntsc.scale_with_video_size",
+   "group": "ntsc.scale_settings",
+   "label": "Scale with video size",
+   "hint": "Multiply the scaling factors by the video's height. Prefer scaling the input video to 480p instead, which gives much more accurate-looking results.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/scale_with_video_size",
+   "animatable": false,
+   "enabled_if": "/ntsc/settings/scale_settings"
+  },
+  {
+   "id": "ntsc.random_seed",
+   "group": "ntsc",
+   "label": "Random seed",
+   "type": "int",
+   "default": 0,
+   "min": -2147483648,
+   "max": 2147483647,
+   "step": 1,
+   "path": "/ntsc/settings/random_seed",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.use_field",
+   "group": "ntsc",
+   "label": "Use field",
+   "hint": "Choose which rows (\"fields\" in NTSC parlance) of the source image will be used.",
+   "type": "choice",
+   "default": 4,
+   "options": [
+    {
+     "value": 0,
+     "label": "Alternating",
+     "hint": "Skip every other row, alternating between skipping even and odd rows."
+    },
+    {
+     "value": 1,
+     "label": "Upper only",
+     "hint": "Skip every lower row, keeping the upper ones."
+    },
+    {
+     "value": 2,
+     "label": "Lower only",
+     "hint": "Skip every upper row, keeping the lower ones."
+    },
+    {
+     "value": 4,
+     "label": "Interleaved (upper first)",
+     "hint": "Treat the video as interlaced, with the upper field as the earlier frame."
+    },
+    {
+     "value": 5,
+     "label": "Interleaved (lower first)",
+     "hint": "Treat the video as interlaced, with the lower field as the earlier frame."
+    },
+    {
+     "value": 3,
+     "label": "Both",
+     "hint": "Use all rows; don't skip any."
+    }
+   ],
+   "path": "/ntsc/settings/use_field",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.filter_type",
+   "group": "ntsc",
+   "label": "Lowpass filter type",
+   "hint": "The low-pass filter to use throughout the effect.",
+   "type": "choice",
+   "default": 0,
+   "options": [
+    {
+     "value": 0,
+     "label": "Constant K (blurry)",
+     "hint": "Simple constant-k filter. Produces longer, blurry results."
+    },
+    {
+     "value": 1,
+     "label": "Butterworth (sharper)",
+     "hint": "Filter with a sharper falloff. Produces sharpened, less blurry results."
+    }
+   ],
+   "path": "/ntsc/settings/filter_type",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.input_luma_filter",
+   "group": "ntsc",
+   "label": "Input luma filter",
+   "hint": "Filter the input luminance to decrease rainbow artifacts.",
+   "type": "choice",
+   "default": 2,
+   "options": [
+    {
+     "value": 2,
+     "label": "Notch",
+     "hint": "Apply a notch filter to the input luminance signal. Sharp, but has ringing artifacts."
+    },
+    {
+     "value": 1,
+     "label": "Box",
+     "hint": "Apply a simple box filter to the input luminance signal."
+    },
+    {
+     "value": 0,
+     "label": "None",
+     "hint": "Do not filter the luminance signal. Adds rainbow artifacts."
+    }
+   ],
+   "path": "/ntsc/settings/input_luma_filter",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.chroma_lowpass_in",
+   "group": "ntsc",
+   "label": "Chroma low-pass in",
+   "hint": "Apply a low-pass filter to the input chrominance (color) signal.",
+   "type": "choice",
+   "default": 2,
+   "options": [
+    {
+     "value": 2,
+     "label": "Full",
+     "hint": "Full-intensity low-pass filter."
+    },
+    {
+     "value": 1,
+     "label": "Light",
+     "hint": "Less intense low-pass filter."
+    },
+    {
+     "value": 0,
+     "label": "None",
+     "hint": "No low-pass filter."
+    }
+   ],
+   "path": "/ntsc/settings/chroma_lowpass_in",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.composite_preemphasis",
+   "group": "ntsc",
+   "label": "Composite signal sharpening",
+   "hint": "Boost high frequencies in the NTSC signal, sharpening the image and intensifying colors.",
+   "type": "float",
+   "default": 0.2753769054878048,
+   "min": -1,
+   "max": 2,
+   "step": 0.001,
+   "path": "/ntsc/settings/composite_preemphasis",
+   "animatable": true,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.composite_noise",
+   "group": "ntsc.composite_noise",
+   "label": "Composite signal noise",
+   "hint": "Noise applied to the composite NTSC signal.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/composite_noise",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.composite_noise_intensity",
+   "group": "ntsc.composite_noise",
+   "label": "Intensity",
+   "hint": "Intensity of the noise.",
+   "type": "float",
+   "default": 0.1391983173076923,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "scale": "log",
+   "path": "/ntsc/settings/composite_noise_intensity",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/composite_noise"
+  },
+  {
+   "id": "ntsc.composite_noise_frequency",
+   "group": "ntsc.composite_noise",
+   "label": "Frequency",
+   "hint": "Base wavelength, in pixels, of the noise.",
+   "type": "float",
+   "default": 0.8576,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "path": "/ntsc/settings/composite_noise_frequency",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/composite_noise"
+  },
+  {
+   "id": "ntsc.composite_noise_detail",
+   "group": "ntsc.composite_noise",
+   "label": "Detail",
+   "hint": "Octaves of noise.",
+   "type": "int",
+   "default": 2,
+   "min": 1,
+   "max": 5,
+   "step": 1,
+   "path": "/ntsc/settings/composite_noise_detail",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/composite_noise"
+  },
+  {
+   "id": "ntsc.snow_intensity",
+   "group": "ntsc",
+   "label": "Snow",
+   "hint": "Frequency of random speckles in the image.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 100,
+   "step": 0.001,
+   "scale": "log",
+   "path": "/ntsc/settings/snow_intensity",
+   "animatable": true,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.snow_anisotropy",
+   "group": "ntsc",
+   "label": "Snow anisotropy",
+   "hint": "Determines whether the speckles are placed truly randomly or concentrated in certain rows.",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/ntsc/settings/snow_anisotropy",
+   "animatable": true,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.video_scanline_phase_shift",
+   "group": "ntsc",
+   "label": "Scanline phase shift",
+   "hint": "Phase shift of the chrominance (color) signal each scanline. Usually 180 degrees.",
+   "type": "choice",
+   "default": 2,
+   "options": [
+    {
+     "value": 0,
+     "label": "0 degrees"
+    },
+    {
+     "value": 1,
+     "label": "90 degrees"
+    },
+    {
+     "value": 2,
+     "label": "180 degrees"
+    },
+    {
+     "value": 3,
+     "label": "270 degrees"
+    }
+   ],
+   "path": "/ntsc/settings/video_scanline_phase_shift",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.video_scanline_phase_shift_offset",
+   "group": "ntsc",
+   "label": "Scanline phase shift offset",
+   "type": "int",
+   "default": 3,
+   "min": 0,
+   "max": 3,
+   "step": 1,
+   "path": "/ntsc/settings/video_scanline_phase_shift_offset",
+   "animatable": true,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.chroma_demodulation",
+   "group": "ntsc",
+   "label": "Chroma demodulation filter",
+   "hint": "Filter used to modulate the chrominance (color) data out of the composite NTSC signal.",
+   "type": "choice",
+   "default": 1,
+   "options": [
+    {
+     "value": 0,
+     "label": "Box",
+     "hint": "Simple horizontal box blur."
+    },
+    {
+     "value": 1,
+     "label": "Notch",
+     "hint": "Notch filter. Sharper than a box blur, but with ringing artifacts."
+    },
+    {
+     "value": 2,
+     "label": "1-line comb",
+     "hint": "Average the current row with the previous one, phase-cancelling the chrominance (color) signals. Only works if the scanline phase shift is 180 degrees."
+    },
+    {
+     "value": 3,
+     "label": "2-line comb",
+     "hint": "Average the current row with the previous and next ones, phase-cancelling the chrominance (color) signals. Only works if the scanline phase shift is 180 degrees."
+    }
+   ],
+   "path": "/ntsc/settings/chroma_demodulation",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.luma_smear",
+   "group": "ntsc",
+   "label": "Luma smear",
+   "type": "float",
+   "default": 0.6692,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "path": "/ntsc/settings/luma_smear",
+   "animatable": true,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.head_switching",
+   "group": "ntsc.head_switching",
+   "label": "Head switching",
+   "hint": "Emulate VHS head-switching artifacts at the bottom of the image.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/head_switching",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.head_switching_height",
+   "group": "ntsc.head_switching",
+   "label": "Height",
+   "hint": "Total height of the head-switching artifact.",
+   "type": "int",
+   "default": 8,
+   "min": 0,
+   "max": 24,
+   "step": 1,
+   "path": "/ntsc/settings/head_switching_height",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/head_switching"
+  },
+  {
+   "id": "ntsc.head_switching_offset",
+   "group": "ntsc.head_switching",
+   "label": "Offset",
+   "hint": "How much of the head-switching artifact is off-screen.",
+   "type": "int",
+   "default": 3,
+   "min": 0,
+   "max": 24,
+   "step": 1,
+   "path": "/ntsc/settings/head_switching_offset",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/head_switching"
+  },
+  {
+   "id": "ntsc.head_switching_horizontal_shift",
+   "group": "ntsc.head_switching",
+   "label": "Horizontal shift",
+   "hint": "How much the head-switching artifact shifts rows horizontally.",
+   "type": "float",
+   "default": 41.57,
+   "min": -100,
+   "max": 100,
+   "step": 0.001,
+   "path": "/ntsc/settings/head_switching_horizontal_shift",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/head_switching"
+  },
+  {
+   "id": "ntsc.head_switching_start_mid_line",
+   "group": "ntsc.head_switching_start_mid_line",
+   "label": "Start mid-line",
+   "hint": "Start the head-switching artifact mid-scanline, with some static where it begins.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/head_switching_start_mid_line",
+   "animatable": false,
+   "enabled_if": "/ntsc/settings/head_switching"
+  },
+  {
+   "id": "ntsc.head_switching_mid_line_position",
+   "group": "ntsc.head_switching_start_mid_line",
+   "label": "Position",
+   "hint": "Horizontal position at which the head-switching starts.",
+   "type": "float",
+   "default": 0.95,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/ntsc/settings/head_switching_mid_line_position",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/head_switching_start_mid_line"
+  },
+  {
+   "id": "ntsc.head_switching_mid_line_jitter",
+   "group": "ntsc.head_switching_start_mid_line",
+   "label": "Jitter",
+   "hint": "How much the head-switching artifact \"jitters\" horizontally.",
+   "type": "float",
+   "default": 0.181,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "scale": "log",
+   "path": "/ntsc/settings/head_switching_mid_line_jitter",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/head_switching_start_mid_line"
+  },
+  {
+   "id": "ntsc.tracking_noise",
+   "group": "ntsc.tracking_noise",
+   "label": "Tracking noise",
+   "hint": "Emulate noise from VHS tracking error.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/tracking_noise",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.tracking_noise_height",
+   "group": "ntsc.tracking_noise",
+   "label": "Height",
+   "hint": "Total height of the tracking artifacts.",
+   "type": "int",
+   "default": 63,
+   "min": 0,
+   "max": 120,
+   "step": 1,
+   "path": "/ntsc/settings/tracking_noise_height",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/tracking_noise"
+  },
+  {
+   "id": "ntsc.tracking_noise_wave_intensity",
+   "group": "ntsc.tracking_noise",
+   "label": "Wave intensity",
+   "hint": "How much the affected scanlines \"wave\" back and forth.",
+   "type": "float",
+   "default": 15,
+   "min": -50,
+   "max": 50,
+   "step": 0.001,
+   "path": "/ntsc/settings/tracking_noise_wave_intensity",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/tracking_noise"
+  },
+  {
+   "id": "ntsc.tracking_noise_snow_intensity",
+   "group": "ntsc.tracking_noise",
+   "label": "Snow intensity",
+   "hint": "Frequency of speckle-type noise in the artifacts.",
+   "type": "float",
+   "default": 0.025,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "scale": "log",
+   "path": "/ntsc/settings/tracking_noise_snow_intensity",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/tracking_noise"
+  },
+  {
+   "id": "ntsc.tracking_noise_snow_anisotropy",
+   "group": "ntsc.tracking_noise",
+   "label": "Snow anisotropy",
+   "hint": "How much the speckles are clustered by scanline.",
+   "type": "float",
+   "default": 0.25,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/ntsc/settings/tracking_noise_snow_anisotropy",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/tracking_noise"
+  },
+  {
+   "id": "ntsc.tracking_noise_noise_intensity",
+   "group": "ntsc.tracking_noise",
+   "label": "Noise intensity",
+   "hint": "Intensity of non-speckle noise.",
+   "type": "float",
+   "default": 0.25,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "scale": "log",
+   "path": "/ntsc/settings/tracking_noise_noise_intensity",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/tracking_noise"
+  },
+  {
+   "id": "ntsc.ringing",
+   "group": "ntsc.ringing",
+   "label": "Ringing",
+   "hint": "Additional ringing artifacts, simulated with a notch filter.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/ringing",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.ringing_frequency",
+   "group": "ntsc.ringing",
+   "label": "Frequency",
+   "hint": "Frequency/period of the ringing, in \"rings per pixel\".",
+   "type": "float",
+   "default": 0.45,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/ntsc/settings/ringing_frequency",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/ringing"
+  },
+  {
+   "id": "ntsc.ringing_power",
+   "group": "ntsc.ringing",
+   "label": "Power",
+   "hint": "The power of the notch filter / how far out the ringing extends.",
+   "type": "float",
+   "default": 5.674,
+   "min": 1,
+   "max": 10,
+   "step": 0.001,
+   "path": "/ntsc/settings/ringing_power",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/ringing"
+  },
+  {
+   "id": "ntsc.ringing_scale",
+   "group": "ntsc.ringing",
+   "label": "Scale",
+   "hint": "Intensity of the ringing.",
+   "type": "float",
+   "default": 4.935,
+   "min": 0,
+   "max": 10,
+   "step": 0.001,
+   "path": "/ntsc/settings/ringing_scale",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/ringing"
+  },
+  {
+   "id": "ntsc.luma_noise",
+   "group": "ntsc.luma_noise",
+   "label": "Luma noise",
+   "hint": "Noise applied to the luminance signal. Useful for higher-frequency noise than the \"Composite noise\" setting can provide.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/luma_noise",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.luma_noise_intensity",
+   "group": "ntsc.luma_noise",
+   "label": "Intensity",
+   "hint": "Intensity of the noise.",
+   "type": "float",
+   "default": 0.153,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "scale": "log",
+   "path": "/ntsc/settings/luma_noise_intensity",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/luma_noise"
+  },
+  {
+   "id": "ntsc.luma_noise_frequency",
+   "group": "ntsc.luma_noise",
+   "label": "Frequency",
+   "hint": "Base wavelength, in pixels, of the noise.",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "path": "/ntsc/settings/luma_noise_frequency",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/luma_noise"
+  },
+  {
+   "id": "ntsc.luma_noise_detail",
+   "group": "ntsc.luma_noise",
+   "label": "Detail",
+   "hint": "Octaves of noise.",
+   "type": "int",
+   "default": 1,
+   "min": 1,
+   "max": 5,
+   "step": 1,
+   "path": "/ntsc/settings/luma_noise_detail",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/luma_noise"
+  },
+  {
+   "id": "ntsc.chroma_noise",
+   "group": "ntsc.chroma_noise",
+   "label": "Chroma noise",
+   "hint": "Noise applied to the chrominance (color) signal.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/chroma_noise",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.chroma_noise_intensity",
+   "group": "ntsc.chroma_noise",
+   "label": "Intensity",
+   "hint": "Intensity of the noise.",
+   "type": "float",
+   "default": 0.13054193376068376,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "scale": "log",
+   "path": "/ntsc/settings/chroma_noise_intensity",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/chroma_noise"
+  },
+  {
+   "id": "ntsc.chroma_noise_frequency",
+   "group": "ntsc.chroma_noise",
+   "label": "Frequency",
+   "hint": "Base wavelength, in pixels, of the noise.",
+   "type": "float",
+   "default": 0.0777,
+   "min": 0,
+   "max": 0.5,
+   "step": 0.001,
+   "path": "/ntsc/settings/chroma_noise_frequency",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/chroma_noise"
+  },
+  {
+   "id": "ntsc.chroma_noise_detail",
+   "group": "ntsc.chroma_noise",
+   "label": "Detail",
+   "hint": "Octaves of noise.",
+   "type": "int",
+   "default": 2,
+   "min": 1,
+   "max": 5,
+   "step": 1,
+   "path": "/ntsc/settings/chroma_noise_detail",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/chroma_noise"
+  },
+  {
+   "id": "ntsc.chroma_phase_error",
+   "group": "ntsc.chroma_distortion",
+   "label": "Chroma phase error",
+   "hint": "Phase error for the chrominance (color) signal.",
+   "type": "float",
+   "default": 0.016,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/ntsc/settings/chroma_phase_error",
+   "animatable": true,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.chroma_phase_noise_intensity",
+   "group": "ntsc.chroma_distortion",
+   "label": "Chroma phase noise",
+   "hint": "Noise applied per-scanline to the phase of the chrominance (color) signal.",
+   "type": "float",
+   "default": 0.029,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "scale": "log",
+   "path": "/ntsc/settings/chroma_phase_noise_intensity",
+   "animatable": true,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.chroma_delay_horizontal",
+   "group": "ntsc.chroma_distortion",
+   "label": "Chroma delay (horizontal)",
+   "hint": "Horizontal offset of the chrominance (color) signal.",
+   "type": "float",
+   "default": 1.7279639582876793,
+   "min": -40,
+   "max": 40,
+   "step": 0.001,
+   "path": "/ntsc/settings/chroma_delay_horizontal",
+   "animatable": true,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.chroma_delay_vertical",
+   "group": "ntsc.chroma_distortion",
+   "label": "Chroma delay (vertical)",
+   "hint": "Vertical offset of the chrominance (color) signal. Usually increases with VHS generation loss.",
+   "type": "int",
+   "default": 2,
+   "min": -20,
+   "max": 20,
+   "step": 1,
+   "path": "/ntsc/settings/chroma_delay_vertical",
+   "animatable": true,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.vhs_settings",
+   "group": "ntsc.vhs_settings",
+   "label": "VHS emulation",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/vhs_settings",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.vhs_tape_speed",
+   "group": "ntsc.vhs_settings",
+   "label": "Tape speed",
+   "hint": "Emulate cutoff of high-frequency data at various VHS recording speeds.",
+   "type": "choice",
+   "default": 3,
+   "options": [
+    {
+     "value": 1,
+     "label": "SP (Standard Play)"
+    },
+    {
+     "value": 2,
+     "label": "LP (Long Play)"
+    },
+    {
+     "value": 3,
+     "label": "EP (Extended Play)"
+    },
+    {
+     "value": 0,
+     "label": "None"
+    }
+   ],
+   "path": "/ntsc/settings/vhs_tape_speed",
+   "animatable": false,
+   "enabled_if": "/ntsc/settings/vhs_settings"
+  },
+  {
+   "id": "ntsc.vhs_chroma_loss",
+   "group": "ntsc.vhs_settings",
+   "label": "Chroma loss",
+   "hint": "Chance that the chrominance (color) signal is completely lost in each scanline.",
+   "type": "float",
+   "default": 0.003639155982905983,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "scale": "log",
+   "path": "/ntsc/settings/vhs_chroma_loss",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/vhs_settings"
+  },
+  {
+   "id": "ntsc.vhs_sharpen_enabled",
+   "group": "ntsc.vhs_sharpen_enabled",
+   "label": "Sharpen",
+   "hint": "Sharpening of the image, as done by some VHS decks.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/vhs_sharpen_enabled",
+   "animatable": false,
+   "enabled_if": "/ntsc/settings/vhs_settings"
+  },
+  {
+   "id": "ntsc.vhs_sharpen",
+   "group": "ntsc.vhs_sharpen_enabled",
+   "label": "Intensity",
+   "hint": "Amount of sharpening to apply.",
+   "type": "float",
+   "default": 0.25,
+   "min": 0,
+   "max": 5,
+   "step": 0.001,
+   "path": "/ntsc/settings/vhs_sharpen",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/vhs_sharpen_enabled"
+  },
+  {
+   "id": "ntsc.vhs_sharpen_frequency",
+   "group": "ntsc.vhs_sharpen_enabled",
+   "label": "Frequency",
+   "hint": "Frequency / radius of the sharpening, relative to the tape speed's cutoff frequency.",
+   "type": "float",
+   "default": 1,
+   "min": 0.5,
+   "max": 4,
+   "step": 0.001,
+   "path": "/ntsc/settings/vhs_sharpen_frequency",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/vhs_sharpen_enabled"
+  },
+  {
+   "id": "ntsc.vhs_edge_wave_enabled",
+   "group": "ntsc.vhs_edge_wave_enabled",
+   "label": "Edge wave",
+   "hint": "Horizontal waving of the image.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/vhs_edge_wave_enabled",
+   "animatable": false,
+   "enabled_if": "/ntsc/settings/vhs_settings"
+  },
+  {
+   "id": "ntsc.vhs_edge_wave",
+   "group": "ntsc.vhs_edge_wave_enabled",
+   "label": "Intensity",
+   "hint": "Horizontal waving of the image, in pixels.",
+   "type": "float",
+   "default": 0.34226190476190477,
+   "min": 0,
+   "max": 20,
+   "step": 0.001,
+   "path": "/ntsc/settings/vhs_edge_wave",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/vhs_edge_wave_enabled"
+  },
+  {
+   "id": "ntsc.vhs_edge_wave_speed",
+   "group": "ntsc.vhs_edge_wave_enabled",
+   "label": "Speed",
+   "hint": "Speed at which the horizontal waving occurs.",
+   "type": "float",
+   "default": 4,
+   "min": 0,
+   "max": 10,
+   "step": 0.001,
+   "path": "/ntsc/settings/vhs_edge_wave_speed",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/vhs_edge_wave_enabled"
+  },
+  {
+   "id": "ntsc.vhs_edge_wave_frequency",
+   "group": "ntsc.vhs_edge_wave_enabled",
+   "label": "Frequency",
+   "hint": "Base wavelength for the horizontal waving.",
+   "type": "float",
+   "default": 0.05,
+   "min": 0,
+   "max": 0.5,
+   "step": 0.001,
+   "path": "/ntsc/settings/vhs_edge_wave_frequency",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/vhs_edge_wave_enabled"
+  },
+  {
+   "id": "ntsc.vhs_edge_wave_detail",
+   "group": "ntsc.vhs_edge_wave_enabled",
+   "label": "Detail",
+   "hint": "Octaves of noise for the waves.",
+   "type": "int",
+   "default": 2,
+   "min": 1,
+   "max": 5,
+   "step": 1,
+   "path": "/ntsc/settings/vhs_edge_wave_detail",
+   "animatable": true,
+   "enabled_if": "/ntsc/settings/vhs_edge_wave_enabled"
+  },
+  {
+   "id": "ntsc.vhs_chroma_vert_blend",
+   "group": "ntsc",
+   "label": "Vertically blend chroma",
+   "hint": "Vertically blend each scanline's chrominance with the scanline above it.",
+   "type": "bool",
+   "default": true,
+   "path": "/ntsc/settings/vhs_chroma_vert_blend",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "ntsc.chroma_lowpass_out",
+   "group": "ntsc",
+   "label": "Chroma low-pass out",
+   "hint": "Apply a low-pass filter to the output chroma signal.",
+   "type": "choice",
+   "default": 2,
+   "options": [
+    {
+     "value": 2,
+     "label": "Full",
+     "hint": "Full-intensity low-pass filter."
+    },
+    {
+     "value": 1,
+     "label": "Light",
+     "hint": "Less intense low-pass filter."
+    },
+    {
+     "value": 0,
+     "label": "None",
+     "hint": "No low-pass filter."
+    }
+   ],
+   "path": "/ntsc/settings/chroma_lowpass_out",
+   "animatable": false,
+   "enabled_if": "/ntsc/enabled"
+  },
+  {
+   "id": "glitch.enabled",
+   "group": "glitch",
+   "label": "Glitch",
+   "hint": "TV receiver and VCR transport simulation. Defaults describe a healthy set: enabling changes nothing until a knob is turned.",
+   "type": "bool",
+   "default": true,
+   "path": "/glitch/enabled",
+   "animatable": false
+  },
+  {
+   "id": "glitch.signal_strength",
+   "group": "glitch.reception",
+   "label": "Signal strength",
+   "hint": "Antenna signal level. Lowering it brings snow first, then flickering and lost color as the color burst drowns, then broken sync as the sync pulses do — the order a real set fails in.",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/signal_strength",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.vertical_hold",
+   "group": "glitch.reception",
+   "label": "Vertical hold",
+   "hint": "The vertical oscillator's free-running speed. Near the center the sync pulses pull it into lock; past the lock range the picture rolls, with the blanking bar crossing the screen.",
+   "type": "float",
+   "default": 0,
+   "min": -1,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/vertical_hold",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.horizontal_hold",
+   "group": "glitch.reception",
+   "label": "Horizontal hold",
+   "hint": "The horizontal oscillator's free-running speed. Off center the picture slides sideways as the AFC strains to hold it; further and lock breaks — the picture tears into diagonal bands and the color goes wild.",
+   "type": "float",
+   "default": 0,
+   "min": -1,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/horizontal_hold",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.afc_speed",
+   "group": "glitch.reception",
+   "label": "AFC response",
+   "hint": "How quickly the TV's horizontal AFC follows timing changes. Slow sets ride out noise but bend at the top of the picture on VCR playback (flagging); fast ones track tape timing but jitter in noise.",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/afc_speed",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.brightness",
+   "group": "glitch.reception",
+   "label": "Brightness",
+   "hint": "Raises the picture tube's black level, as turning up a TV's brightness did. The blanking intervals and sync pulses become visible when the picture rolls or tears.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/brightness",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.ghost_level",
+   "group": "glitch.reception",
+   "label": "Ghost",
+   "hint": "A reflected copy of the signal arriving late (multipath). Negative values invert it, as reflections often did. Its color shifts with the delay, because the delayed color carrier arrives at a different phase.",
+   "type": "float",
+   "default": 0,
+   "min": -1,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/ghost_level",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.ghost_delay",
+   "group": "glitch.reception",
+   "label": "Ghost delay",
+   "hint": "How late the reflection arrives. 1 µs is about 2% of the picture width — a reflection path roughly 300 m longer than the direct one.",
+   "type": "float",
+   "default": 2,
+   "min": 0.2,
+   "max": 12,
+   "step": 0.01,
+   "unit": "µs",
+   "path": "/glitch/values/ghost_delay",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.hum",
+   "group": "glitch.reception",
+   "label": "Hum",
+   "hint": "Mains hum leaking into the video: light and dark bars that drift slowly up the picture (60 Hz hum against the 59.94 Hz color field rate), bending the picture where the sync separator is pulled off.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/hum",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.closed_captions",
+   "group": "glitch.reception",
+   "label": "Caption data",
+   "hint": "Line 21 carries closed-caption data — the row of dashes visible in the blanking bar when the picture rolls.",
+   "type": "bool",
+   "default": true,
+   "encode": "number",
+   "path": "/glitch/values/closed_captions",
+   "animatable": false,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.head_switch",
+   "group": "glitch.tape",
+   "label": "Head switching",
+   "hint": "Timing jump when the VCR changes heads, just before vertical sync. The bottom lines jump sideways and the TV's AFC chases the jump into the top of the next field — the bend called flagging.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 8,
+   "step": 0.01,
+   "unit": "µs",
+   "path": "/glitch/values/head_switch",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.timebase_jitter",
+   "group": "glitch.tape",
+   "label": "Time-base jitter",
+   "hint": "Tape stretch and transport flutter. The TV's AFC follows the slow wander; the fast jitter shows as ragged lines.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 3,
+   "step": 0.01,
+   "unit": "µs",
+   "path": "/glitch/values/timebase_jitter",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.crinkle",
+   "group": "glitch.tape",
+   "label": "Tape crinkle",
+   "hint": "Creased tape passing the heads: bands of signal loss and violent timing errors, enough to knock the TV out of lock for a moment.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/crinkle",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.head_clog",
+   "group": "glitch.tape",
+   "label": "Head clog",
+   "hint": "Debris on the video heads, lifting them off the tape: whole fields drop out to noise and lose their sync, more often as the clog worsens.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/head_clog",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.tracking",
+   "group": "glitch.tape",
+   "label": "Tracking error",
+   "hint": "The heads drifting off the recorded tracks. Well tracked, the noise band where they cross to the next track rests in the vertical interval, out of sight; as the error grows it climbs into the picture and widens.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/tracking",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.search_speed",
+   "group": "glitch.tape",
+   "label": "Search",
+   "hint": "Fast-forward picture search. The spinning heads cross from track to track, reading noise between them: one fewer noise bar than the speed, drifting as the tracking phase slides, with the picture jumping at each crossing.",
+   "type": "float",
+   "default": 1,
+   "min": 1,
+   "max": 9,
+   "step": 0.01,
+   "unit": "×",
+   "path": "/glitch/values/search_speed",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.dropouts",
+   "group": "glitch.tape",
+   "label": "Dropouts",
+   "hint": "Oxide missing from the tape: brief losses of signal, often a few lines tall. How they look depends on Dropout compensation.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/glitch/values/dropouts",
+   "animatable": true,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "glitch.dropout_compensation",
+   "group": "glitch.tape",
+   "label": "Dropout compensation",
+   "hint": "The VCR's fix for dropouts: replay the lost stretch from the line before. On, dropouts shrink to brief white ticks and short smears where one line repeats down a tall flaw; off, they show as long white streaks.",
+   "type": "bool",
+   "default": true,
+   "encode": "number",
+   "path": "/glitch/values/dropout_compensation",
+   "animatable": false,
+   "enabled_if": "/glitch/enabled"
+  },
+  {
+   "id": "crt.enabled",
+   "group": "crt",
+   "label": "CRT shader",
+   "hint": "Run the CRT shader chain (librashader). Off: the picture is scaled to the output without a shader.",
+   "type": "bool",
+   "default": true,
+   "path": "/shader/enabled",
+   "animatable": false
+  },
+  {
+   "id": "crt.preset",
+   "group": "crt",
+   "label": "Shader",
+   "type": "choice",
+   "default": "glow_gauss",
+   "options": [
+    {
+     "value": "aperture",
+     "label": "CRT Aperture",
+     "slangp": "crt/crt-aperture.slangp"
+    },
+    {
+     "value": "easymode",
+     "label": "CRT Easymode",
+     "slangp": "crt/crt-easymode.slangp"
+    },
+    {
+     "value": "glow_gauss",
+     "label": "CRT Glow (Gaussian)",
+     "slangp": "crt/crtglow_gauss.slangp"
+    },
+    {
+     "value": "glow_lanczos",
+     "label": "CRT Glow (Lanczos)",
+     "slangp": "crt/crtglow_lanczos.slangp"
+    },
+    {
+     "value": "hyllian",
+     "label": "CRT Hyllian",
+     "slangp": "crt/crt-hyllian.slangp"
+    },
+    {
+     "value": "royale",
+     "label": "CRT Royale",
+     "slangp": "crt/crt-royale.slangp"
+    },
+    {
+     "value": "sim",
+     "label": "CRT Sim",
+     "slangp": "crt/crtsim.slangp"
+    }
+   ],
+   "path": "/shader/preset",
+   "animatable": false,
+   "enabled_if": "/shader/enabled"
+  },
+  {
+   "id": "crt.aperture.SHARPNESS_IMAGE",
+   "group": "crt.aperture",
+   "label": "Sharpness Image",
+   "type": "float",
+   "default": 1,
+   "min": 1,
+   "max": 5,
+   "step": 1,
+   "path": "/shader/params/SHARPNESS_IMAGE",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.aperture.SHARPNESS_EDGES",
+   "group": "crt.aperture",
+   "label": "Sharpness Edges",
+   "type": "float",
+   "default": 3,
+   "min": 1,
+   "max": 5,
+   "step": 1,
+   "path": "/shader/params/SHARPNESS_EDGES",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.aperture.GLOW_WIDTH",
+   "group": "crt.aperture",
+   "label": "Glow Width",
+   "type": "float",
+   "default": 0.5,
+   "min": 0.05,
+   "max": 0.65,
+   "step": 0.05,
+   "path": "/shader/params/GLOW_WIDTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.GLOW_HEIGHT",
+   "group": "crt.aperture",
+   "label": "Glow Height",
+   "type": "float",
+   "default": 0.5,
+   "min": 0.05,
+   "max": 0.65,
+   "step": 0.05,
+   "path": "/shader/params/GLOW_HEIGHT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.GLOW_HALATION",
+   "group": "crt.aperture",
+   "label": "Glow Halation",
+   "type": "float",
+   "default": 0.1,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/GLOW_HALATION",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.GLOW_DIFFUSION",
+   "group": "crt.aperture",
+   "label": "Glow Diffusion",
+   "type": "float",
+   "default": 0.05,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/GLOW_DIFFUSION",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.MASK_COLORS",
+   "group": "crt.aperture",
+   "label": "Mask Colors",
+   "type": "float",
+   "default": 2,
+   "min": 2,
+   "max": 3,
+   "step": 1,
+   "path": "/shader/params/MASK_COLORS",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.aperture.MASK_STRENGTH",
+   "group": "crt.aperture",
+   "label": "Mask Strength",
+   "type": "float",
+   "default": 0.3,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/MASK_STRENGTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.MASK_SIZE",
+   "group": "crt.aperture",
+   "label": "Mask Size",
+   "type": "float",
+   "default": 1,
+   "min": 1,
+   "max": 9,
+   "step": 1,
+   "path": "/shader/params/MASK_SIZE",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.aperture.SCANLINE_SIZE_MIN",
+   "group": "crt.aperture",
+   "label": "Scanline Size Min.",
+   "type": "float",
+   "default": 0.5,
+   "min": 0.5,
+   "max": 1.5,
+   "step": 0.05,
+   "path": "/shader/params/SCANLINE_SIZE_MIN",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.SCANLINE_SIZE_MAX",
+   "group": "crt.aperture",
+   "label": "Scanline Size Max.",
+   "type": "float",
+   "default": 1.5,
+   "min": 0.5,
+   "max": 1.5,
+   "step": 0.05,
+   "path": "/shader/params/SCANLINE_SIZE_MAX",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.SCANLINE_SHAPE",
+   "group": "crt.aperture",
+   "label": "Scanline Shape",
+   "type": "float",
+   "default": 2.5,
+   "min": 1,
+   "max": 100,
+   "step": 0.1,
+   "path": "/shader/params/SCANLINE_SHAPE",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.SCANLINE_OFFSET",
+   "group": "crt.aperture",
+   "label": "Scanline Offset",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/SCANLINE_OFFSET",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.aperture.GAMMA_INPUT",
+   "group": "crt.aperture",
+   "label": "Gamma Input",
+   "type": "float",
+   "default": 2.4,
+   "min": 1,
+   "max": 5,
+   "step": 0.1,
+   "path": "/shader/params/GAMMA_INPUT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.GAMMA_OUTPUT",
+   "group": "crt.aperture",
+   "label": "Gamma Output",
+   "type": "float",
+   "default": 2.4,
+   "min": 1,
+   "max": 5,
+   "step": 0.1,
+   "path": "/shader/params/GAMMA_OUTPUT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.aperture.BRIGHTNESS",
+   "group": "crt.aperture",
+   "label": "Brightness",
+   "type": "float",
+   "default": 1.5,
+   "min": 0,
+   "max": 2,
+   "step": 0.05,
+   "path": "/shader/params/BRIGHTNESS",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "aperture"
+   }
+  },
+  {
+   "id": "crt.easymode.SHARPNESS_H",
+   "group": "crt.easymode",
+   "label": "Sharpness Horizontal",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/SHARPNESS_H",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.SHARPNESS_V",
+   "group": "crt.easymode",
+   "label": "Sharpness Vertical",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/SHARPNESS_V",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.MASK_STRENGTH",
+   "group": "crt.easymode",
+   "label": "Mask Strength",
+   "type": "float",
+   "default": 0.3,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/MASK_STRENGTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.MASK_DOT_WIDTH",
+   "group": "crt.easymode",
+   "label": "Mask Dot Width",
+   "type": "float",
+   "default": 1,
+   "min": 1,
+   "max": 100,
+   "step": 1,
+   "path": "/shader/params/MASK_DOT_WIDTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.easymode.MASK_DOT_HEIGHT",
+   "group": "crt.easymode",
+   "label": "Mask Dot Height",
+   "type": "float",
+   "default": 1,
+   "min": 1,
+   "max": 100,
+   "step": 1,
+   "path": "/shader/params/MASK_DOT_HEIGHT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.easymode.MASK_STAGGER",
+   "group": "crt.easymode",
+   "label": "Mask Stagger",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 100,
+   "step": 1,
+   "path": "/shader/params/MASK_STAGGER",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.easymode.MASK_SIZE",
+   "group": "crt.easymode",
+   "label": "Mask Size",
+   "type": "float",
+   "default": 1,
+   "min": 1,
+   "max": 100,
+   "step": 1,
+   "path": "/shader/params/MASK_SIZE",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.easymode.SCANLINE_STRENGTH",
+   "group": "crt.easymode",
+   "label": "Scanline Strength",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/SCANLINE_STRENGTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.SCANLINE_BEAM_WIDTH_MIN",
+   "group": "crt.easymode",
+   "label": "Scanline Beam Width Min.",
+   "type": "float",
+   "default": 1.5,
+   "min": 0.5,
+   "max": 5,
+   "step": 0.5,
+   "path": "/shader/params/SCANLINE_BEAM_WIDTH_MIN",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.SCANLINE_BEAM_WIDTH_MAX",
+   "group": "crt.easymode",
+   "label": "Scanline Beam Width Max.",
+   "type": "float",
+   "default": 1.5,
+   "min": 0.5,
+   "max": 5,
+   "step": 0.5,
+   "path": "/shader/params/SCANLINE_BEAM_WIDTH_MAX",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.SCANLINE_BRIGHT_MIN",
+   "group": "crt.easymode",
+   "label": "Scanline Brightness Min.",
+   "type": "float",
+   "default": 0.35,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/SCANLINE_BRIGHT_MIN",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.SCANLINE_BRIGHT_MAX",
+   "group": "crt.easymode",
+   "label": "Scanline Brightness Max.",
+   "type": "float",
+   "default": 0.65,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/SCANLINE_BRIGHT_MAX",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.SCANLINE_CUTOFF",
+   "group": "crt.easymode",
+   "label": "Scanline Cutoff",
+   "type": "float",
+   "default": 400,
+   "min": 1,
+   "max": 1000,
+   "step": 1,
+   "path": "/shader/params/SCANLINE_CUTOFF",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.easymode.GAMMA_INPUT",
+   "group": "crt.easymode",
+   "label": "Gamma Input",
+   "type": "float",
+   "default": 2,
+   "min": 0.1,
+   "max": 5,
+   "step": 0.1,
+   "path": "/shader/params/GAMMA_INPUT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.GAMMA_OUTPUT",
+   "group": "crt.easymode",
+   "label": "Gamma Output",
+   "type": "float",
+   "default": 1.8,
+   "min": 0.1,
+   "max": 5,
+   "step": 0.1,
+   "path": "/shader/params/GAMMA_OUTPUT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.BRIGHT_BOOST",
+   "group": "crt.easymode",
+   "label": "Brightness Boost",
+   "type": "float",
+   "default": 1.2,
+   "min": 1,
+   "max": 2,
+   "step": 0.01,
+   "path": "/shader/params/BRIGHT_BOOST",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   }
+  },
+  {
+   "id": "crt.easymode.DILATION",
+   "group": "crt.easymode",
+   "label": "Dilation",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/DILATION",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "easymode"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.glow_gauss.INPUT_GAMMA",
+   "group": "crt.glow_gauss",
+   "label": "Input Gamma",
+   "type": "float",
+   "default": 2.4,
+   "min": 2,
+   "max": 2.6,
+   "step": 0.02,
+   "path": "/shader/params/INPUT_GAMMA",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.BOOST",
+   "group": "crt.glow_gauss",
+   "label": "Color Boost",
+   "type": "float",
+   "default": 1.1,
+   "min": 0.5,
+   "max": 1.5,
+   "step": 0.02,
+   "path": "/shader/params/BOOST",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.GLOW_WHITEPOINT",
+   "group": "crt.glow_gauss",
+   "label": "Glow Whitepoint",
+   "type": "float",
+   "default": 1,
+   "min": 0.5,
+   "max": 1.1,
+   "step": 0.02,
+   "path": "/shader/params/GLOW_WHITEPOINT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.GLOW_ROLLOFF",
+   "group": "crt.glow_gauss",
+   "label": "Glow Rolloff",
+   "type": "float",
+   "default": 2.4,
+   "min": 1.2,
+   "max": 6,
+   "step": 0.1,
+   "path": "/shader/params/GLOW_ROLLOFF",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.BLOOM_STRENGTH",
+   "group": "crt.glow_gauss",
+   "label": "Glow Strength",
+   "type": "float",
+   "default": 0.1,
+   "min": 0,
+   "max": 0.8,
+   "step": 0.05,
+   "path": "/shader/params/BLOOM_STRENGTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.OUTPUT_GAMMA",
+   "group": "crt.glow_gauss",
+   "label": "Monitor Gamma",
+   "type": "float",
+   "default": 2.2,
+   "min": 1.8,
+   "max": 2.6,
+   "step": 0.02,
+   "path": "/shader/params/OUTPUT_GAMMA",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.CURVATURE",
+   "group": "crt.glow_gauss",
+   "label": "Curvature",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/CURVATURE",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.glow_gauss.warpX",
+   "group": "crt.glow_gauss",
+   "label": "Curvature X-Axis",
+   "type": "float",
+   "default": 0.031,
+   "min": 0,
+   "max": 0.125,
+   "step": 0.01,
+   "path": "/shader/params/warpX",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.warpY",
+   "group": "crt.glow_gauss",
+   "label": "Curvature Y-Axis",
+   "type": "float",
+   "default": 0.041,
+   "min": 0,
+   "max": 0.125,
+   "step": 0.01,
+   "path": "/shader/params/warpY",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.cornersize",
+   "group": "crt.glow_gauss",
+   "label": "Corner Size",
+   "type": "float",
+   "default": 0.01,
+   "min": 0.001,
+   "max": 1,
+   "step": 0.005,
+   "path": "/shader/params/cornersize",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.cornersmooth",
+   "group": "crt.glow_gauss",
+   "label": "Corner Smoothness",
+   "type": "float",
+   "default": 1000,
+   "min": 80,
+   "max": 2000,
+   "step": 100,
+   "path": "/shader/params/cornersmooth",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.glow_gauss.noise_amt",
+   "group": "crt.glow_gauss",
+   "label": "Noise Amount",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 5,
+   "step": 0.25,
+   "path": "/shader/params/noise_amt",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.shadowMask",
+   "group": "crt.glow_gauss",
+   "label": "Mask Effect",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 4,
+   "step": 1,
+   "path": "/shader/params/shadowMask",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.glow_gauss.maskDark",
+   "group": "crt.glow_gauss",
+   "label": "maskDark",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 2,
+   "step": 0.1,
+   "path": "/shader/params/maskDark",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_gauss.maskLight",
+   "group": "crt.glow_gauss",
+   "label": "maskLight",
+   "type": "float",
+   "default": 1.5,
+   "min": 0,
+   "max": 2,
+   "step": 0.1,
+   "path": "/shader/params/maskLight",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_gauss"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.INPUT_GAMMA",
+   "group": "crt.glow_lanczos",
+   "label": "Input Gamma",
+   "type": "float",
+   "default": 2.4,
+   "min": 2,
+   "max": 2.6,
+   "step": 0.02,
+   "path": "/shader/params/INPUT_GAMMA",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.BOOST",
+   "group": "crt.glow_lanczos",
+   "label": "Color Boost",
+   "type": "float",
+   "default": 1.1,
+   "min": 0.5,
+   "max": 1.5,
+   "step": 0.02,
+   "path": "/shader/params/BOOST",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.GLOW_WHITEPOINT",
+   "group": "crt.glow_lanczos",
+   "label": "Glow Whitepoint",
+   "type": "float",
+   "default": 1,
+   "min": 0.5,
+   "max": 1.1,
+   "step": 0.02,
+   "path": "/shader/params/GLOW_WHITEPOINT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.GLOW_ROLLOFF",
+   "group": "crt.glow_lanczos",
+   "label": "Glow Rolloff",
+   "type": "float",
+   "default": 2.4,
+   "min": 1.2,
+   "max": 6,
+   "step": 0.1,
+   "path": "/shader/params/GLOW_ROLLOFF",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.BLOOM_STRENGTH",
+   "group": "crt.glow_lanczos",
+   "label": "Glow Strength",
+   "type": "float",
+   "default": 0.1,
+   "min": 0,
+   "max": 0.8,
+   "step": 0.05,
+   "path": "/shader/params/BLOOM_STRENGTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.OUTPUT_GAMMA",
+   "group": "crt.glow_lanczos",
+   "label": "Monitor Gamma",
+   "type": "float",
+   "default": 2.2,
+   "min": 1.8,
+   "max": 2.6,
+   "step": 0.02,
+   "path": "/shader/params/OUTPUT_GAMMA",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.CURVATURE",
+   "group": "crt.glow_lanczos",
+   "label": "Curvature",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/CURVATURE",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.glow_lanczos.warpX",
+   "group": "crt.glow_lanczos",
+   "label": "Curvature X-Axis",
+   "type": "float",
+   "default": 0.031,
+   "min": 0,
+   "max": 0.125,
+   "step": 0.01,
+   "path": "/shader/params/warpX",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.warpY",
+   "group": "crt.glow_lanczos",
+   "label": "Curvature Y-Axis",
+   "type": "float",
+   "default": 0.041,
+   "min": 0,
+   "max": 0.125,
+   "step": 0.01,
+   "path": "/shader/params/warpY",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.cornersize",
+   "group": "crt.glow_lanczos",
+   "label": "Corner Size",
+   "type": "float",
+   "default": 0.01,
+   "min": 0.001,
+   "max": 1,
+   "step": 0.005,
+   "path": "/shader/params/cornersize",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.cornersmooth",
+   "group": "crt.glow_lanczos",
+   "label": "Corner Smoothness",
+   "type": "float",
+   "default": 1000,
+   "min": 80,
+   "max": 2000,
+   "step": 100,
+   "path": "/shader/params/cornersmooth",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.glow_lanczos.noise_amt",
+   "group": "crt.glow_lanczos",
+   "label": "Noise Amount",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 5,
+   "step": 0.25,
+   "path": "/shader/params/noise_amt",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.shadowMask",
+   "group": "crt.glow_lanczos",
+   "label": "Mask Effect",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 4,
+   "step": 1,
+   "path": "/shader/params/shadowMask",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.glow_lanczos.maskDark",
+   "group": "crt.glow_lanczos",
+   "label": "maskDark",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 2,
+   "step": 0.1,
+   "path": "/shader/params/maskDark",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.glow_lanczos.maskLight",
+   "group": "crt.glow_lanczos",
+   "label": "maskLight",
+   "type": "float",
+   "default": 1.5,
+   "min": 0,
+   "max": 2,
+   "step": 0.1,
+   "path": "/shader/params/maskLight",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "glow_lanczos"
+   }
+  },
+  {
+   "id": "crt.hyllian.crt_nonono",
+   "group": "crt.hyllian",
+   "label": "** CRT-HYLLIAN **",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/crt_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.non_nonono",
+   "group": "crt.hyllian",
+   "label": "non_nonono",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/non_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.col_nonono",
+   "group": "crt.hyllian",
+   "label": "COLOR SETTINGS:",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/col_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.LUT_selector_param",
+   "group": "crt.hyllian",
+   "label": "LUT [ OFF, DARK BLUE, DARK BLUE (cool) ]",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 2,
+   "step": 1,
+   "path": "/shader/params/LUT_selector_param",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.H_InputGamma",
+   "group": "crt.hyllian",
+   "label": "Input Gamma",
+   "type": "float",
+   "default": 2.4,
+   "min": 1,
+   "max": 3,
+   "step": 0.05,
+   "path": "/shader/params/H_InputGamma",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.H_OUTPUT_GAMMA",
+   "group": "crt.hyllian",
+   "label": "Output Gamma",
+   "type": "float",
+   "default": 2.2,
+   "min": 1,
+   "max": 3,
+   "step": 0.05,
+   "path": "/shader/params/H_OUTPUT_GAMMA",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.BRIGHTBOOST",
+   "group": "crt.hyllian",
+   "label": "Brightboost",
+   "type": "float",
+   "default": 1,
+   "min": 0.5,
+   "max": 2,
+   "step": 0.01,
+   "path": "/shader/params/BRIGHTBOOST",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.pre_nonono",
+   "group": "crt.hyllian",
+   "label": "PRESET OPTIONS:",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/pre_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.pre_comment1",
+   "group": "crt.hyllian",
+   "label": "// Presets greater than 0 disable options with '*'.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/pre_comment1",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.PRESET_OPTION",
+   "group": "crt.hyllian",
+   "label": "Mask Preset [CUSTOM, APERT1, APERT2, SLOT1, SLOT2, DOT]",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 5,
+   "step": 1,
+   "path": "/shader/params/PRESET_OPTION",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.pre_comment2",
+   "group": "crt.hyllian",
+   "label": "// Only affects presets greater than '0'.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/pre_comment2",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.DISPLAY_RES",
+   "group": "crt.hyllian",
+   "label": "Target Resolution [ 1080P, 4K ]",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/DISPLAY_RES",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.scan_nonono",
+   "group": "crt.hyllian",
+   "label": "SCANLINES SETTINGS:",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/scan_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.BEAM_MIN_WIDTH",
+   "group": "crt.hyllian",
+   "label": "* Min Beam Width",
+   "type": "float",
+   "default": 0.72,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/BEAM_MIN_WIDTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.BEAM_MAX_WIDTH",
+   "group": "crt.hyllian",
+   "label": "* Max Beam Width",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/BEAM_MAX_WIDTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.SCANLINES_STRENGTH",
+   "group": "crt.hyllian",
+   "label": "* Scanlines Strength",
+   "type": "float",
+   "default": 0.72,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/SCANLINES_STRENGTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.SCANLINES_SHAPE",
+   "group": "crt.hyllian",
+   "label": "* Scanlines Shape [ SHARP, SOFT ]",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/SCANLINES_SHAPE",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.VSCANLINES",
+   "group": "crt.hyllian",
+   "label": "Orientation [ HORIZONTAL, VERTICAL ]",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/VSCANLINES",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.msk_nonono",
+   "group": "crt.hyllian",
+   "label": "MASK SETTINGS:",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/msk_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.PHOSPHOR_LAYOUT",
+   "group": "crt.hyllian",
+   "label": "* Mask [1-6 APERT, 7-10 DOT, 11-14 SLOT, 15-17 LOTTES]",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 17,
+   "step": 1,
+   "path": "/shader/params/PHOSPHOR_LAYOUT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.MASK_STRENGTH",
+   "group": "crt.hyllian",
+   "label": "Mask Strength",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 0.02,
+   "path": "/shader/params/MASK_STRENGTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.H_MaskGamma",
+   "group": "crt.hyllian",
+   "label": "Mask Gamma",
+   "type": "float",
+   "default": 2.4,
+   "min": 1,
+   "max": 3,
+   "step": 0.05,
+   "path": "/shader/params/H_MaskGamma",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.MONITOR_SUBPIXELS",
+   "group": "crt.hyllian",
+   "label": "Monitor Subpixels Layout [ RGB, BGR ]",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/MONITOR_SUBPIXELS",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.scl_nonono",
+   "group": "crt.hyllian",
+   "label": "SCALING SETTINGS:",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/scl_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.SCANLINES_CUTOFF",
+   "group": "crt.hyllian",
+   "label": "Scanlines Cutoff",
+   "type": "float",
+   "default": 400,
+   "min": 0,
+   "max": 1000,
+   "step": 2,
+   "path": "/shader/params/SCANLINES_CUTOFF",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.SCANLINES_HIRES",
+   "group": "crt.hyllian",
+   "label": "High Resolution Scanlines",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/SCANLINES_HIRES",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.IR_SCALE",
+   "group": "crt.hyllian",
+   "label": "Internal Resolution Scale (downsampling)",
+   "type": "float",
+   "default": 1,
+   "min": 1,
+   "max": 10,
+   "step": 1,
+   "path": "/shader/params/IR_SCALE",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.fil_nonono",
+   "group": "crt.hyllian",
+   "label": "FILTERING SETTINGS:",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/fil_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.SHARPNESS_HACK",
+   "group": "crt.hyllian",
+   "label": "Sharpness Hack",
+   "type": "float",
+   "default": 1,
+   "min": 1,
+   "max": 4,
+   "step": 1,
+   "path": "/shader/params/SHARPNESS_HACK",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.CRT_ANTI_RINGING",
+   "group": "crt.hyllian",
+   "label": "Anti Ringing",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/CRT_ANTI_RINGING",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.glow_nonono",
+   "group": "crt.hyllian",
+   "label": "GLOW SETTINGS:",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 0,
+   "path": "/shader/params/glow_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.GLOW_ENABLE",
+   "group": "crt.hyllian",
+   "label": "Enable Glow",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/GLOW_ENABLE",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.GLOW_WHITEPOINT",
+   "group": "crt.hyllian",
+   "label": "Whitepoint",
+   "type": "float",
+   "default": 0.9,
+   "min": 0.5,
+   "max": 1.1,
+   "step": 0.02,
+   "path": "/shader/params/GLOW_WHITEPOINT",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.GLOW_ROLLOFF",
+   "group": "crt.hyllian",
+   "label": "Rolloff",
+   "type": "float",
+   "default": 2,
+   "min": 1.2,
+   "max": 6,
+   "step": 0.1,
+   "path": "/shader/params/GLOW_ROLLOFF",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.GLOW_RADIUS",
+   "group": "crt.hyllian",
+   "label": "Radius",
+   "type": "float",
+   "default": 4,
+   "min": 2,
+   "max": 4,
+   "step": 0.1,
+   "path": "/shader/params/GLOW_RADIUS",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.GLOW_STRENGTH",
+   "group": "crt.hyllian",
+   "label": "Strength",
+   "type": "float",
+   "default": 0.05,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/GLOW_STRENGTH",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.h_nonono",
+   "group": "crt.hyllian",
+   "label": "CURVATURE SETTINGS:",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0,
+   "step": 1,
+   "path": "/shader/params/h_nonono",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.h_curvature",
+   "group": "crt.hyllian",
+   "label": "Curvature Toggle",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/h_curvature",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.h_shape",
+   "group": "crt.hyllian",
+   "label": "Shape [ SPHERE, CYLINDER ]",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/h_shape",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.hyllian.h_radius",
+   "group": "crt.hyllian",
+   "label": "Radius",
+   "type": "float",
+   "default": 5,
+   "min": 1.5,
+   "max": 10,
+   "step": 0.1,
+   "path": "/shader/params/h_radius",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.h_cornersize",
+   "group": "crt.hyllian",
+   "label": "Corner Size",
+   "type": "float",
+   "default": 0.04,
+   "min": 0.01,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/h_cornersize",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.hyllian.h_cornersmooth",
+   "group": "crt.hyllian",
+   "label": "Corner Smoothness",
+   "type": "float",
+   "default": 0.5,
+   "min": 0.1,
+   "max": 1,
+   "step": 0.1,
+   "path": "/shader/params/h_cornersmooth",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "hyllian"
+   }
+  },
+  {
+   "id": "crt.royale.crt_gamma",
+   "group": "crt.royale",
+   "label": "Simulated CRT Gamma",
+   "type": "float",
+   "default": 2.5,
+   "min": 1,
+   "max": 5,
+   "step": 0.025,
+   "path": "/shader/params/crt_gamma",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.lcd_gamma",
+   "group": "crt.royale",
+   "label": "Your Display Gamma",
+   "type": "float",
+   "default": 2.2,
+   "min": 1,
+   "max": 5,
+   "step": 0.025,
+   "path": "/shader/params/lcd_gamma",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.levels_contrast",
+   "group": "crt.royale",
+   "label": "Contrast",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 4,
+   "step": 0.015625,
+   "path": "/shader/params/levels_contrast",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.halation_weight",
+   "group": "crt.royale",
+   "label": "Halation Weight",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.005,
+   "path": "/shader/params/halation_weight",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.diffusion_weight",
+   "group": "crt.royale",
+   "label": "Diffusion Weight",
+   "type": "float",
+   "default": 0.075,
+   "min": 0,
+   "max": 1,
+   "step": 0.005,
+   "path": "/shader/params/diffusion_weight",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.bloom_underestimate_levels",
+   "group": "crt.royale",
+   "label": "Bloom - Underestimate Levels",
+   "type": "float",
+   "default": 0.8,
+   "min": 0,
+   "max": 5,
+   "step": 0.01,
+   "path": "/shader/params/bloom_underestimate_levels",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.bloom_excess",
+   "group": "crt.royale",
+   "label": "Bloom - Excess",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.005,
+   "path": "/shader/params/bloom_excess",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.beam_min_sigma",
+   "group": "crt.royale",
+   "label": "Beam - Min Sigma",
+   "type": "float",
+   "default": 0.02,
+   "min": 0.005,
+   "max": 1,
+   "step": 0.005,
+   "path": "/shader/params/beam_min_sigma",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.beam_max_sigma",
+   "group": "crt.royale",
+   "label": "Beam - Max Sigma",
+   "type": "float",
+   "default": 0.3,
+   "min": 0.005,
+   "max": 1,
+   "step": 0.005,
+   "path": "/shader/params/beam_max_sigma",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.beam_spot_power",
+   "group": "crt.royale",
+   "label": "Beam - Spot Power",
+   "type": "float",
+   "default": 0.33,
+   "min": 0.01,
+   "max": 16,
+   "step": 0.01,
+   "path": "/shader/params/beam_spot_power",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.beam_min_shape",
+   "group": "crt.royale",
+   "label": "Beam - Min Shape",
+   "type": "float",
+   "default": 2,
+   "min": 2,
+   "max": 32,
+   "step": 0.1,
+   "path": "/shader/params/beam_min_shape",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.beam_max_shape",
+   "group": "crt.royale",
+   "label": "Beam - Max Shape",
+   "type": "float",
+   "default": 4,
+   "min": 2,
+   "max": 32,
+   "step": 0.1,
+   "path": "/shader/params/beam_max_shape",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.beam_shape_power",
+   "group": "crt.royale",
+   "label": "Beam - Shape Power",
+   "type": "float",
+   "default": 0.25,
+   "min": 0.01,
+   "max": 16,
+   "step": 0.01,
+   "path": "/shader/params/beam_shape_power",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.beam_horiz_filter",
+   "group": "crt.royale",
+   "label": "Beam - Horiz Filter",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 2,
+   "step": 1,
+   "path": "/shader/params/beam_horiz_filter",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.beam_horiz_sigma",
+   "group": "crt.royale",
+   "label": "Beam - Horiz Sigma",
+   "type": "float",
+   "default": 0.35,
+   "min": 0,
+   "max": 0.67,
+   "step": 0.005,
+   "path": "/shader/params/beam_horiz_sigma",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.beam_horiz_linear_rgb_weight",
+   "group": "crt.royale",
+   "label": "Beam - Horiz Linear RGB Weight",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/beam_horiz_linear_rgb_weight",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.convergence_offset_x_r",
+   "group": "crt.royale",
+   "label": "Convergence - Offset X Red",
+   "type": "float",
+   "default": 0,
+   "min": -4,
+   "max": 4,
+   "step": 0.05,
+   "path": "/shader/params/convergence_offset_x_r",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.convergence_offset_x_g",
+   "group": "crt.royale",
+   "label": "Convergence - Offset X Green",
+   "type": "float",
+   "default": 0,
+   "min": -4,
+   "max": 4,
+   "step": 0.05,
+   "path": "/shader/params/convergence_offset_x_g",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.convergence_offset_x_b",
+   "group": "crt.royale",
+   "label": "Convergence - Offset X Blue",
+   "type": "float",
+   "default": 0,
+   "min": -4,
+   "max": 4,
+   "step": 0.05,
+   "path": "/shader/params/convergence_offset_x_b",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.convergence_offset_y_r",
+   "group": "crt.royale",
+   "label": "Convergence - Offset Y Red",
+   "type": "float",
+   "default": 0,
+   "min": -2,
+   "max": 2,
+   "step": 0.05,
+   "path": "/shader/params/convergence_offset_y_r",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.convergence_offset_y_g",
+   "group": "crt.royale",
+   "label": "Convergence - Offset Y Green",
+   "type": "float",
+   "default": 0,
+   "min": -2,
+   "max": 2,
+   "step": 0.05,
+   "path": "/shader/params/convergence_offset_y_g",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.convergence_offset_y_b",
+   "group": "crt.royale",
+   "label": "Convergence - Offset Y Blue",
+   "type": "float",
+   "default": 0,
+   "min": -2,
+   "max": 2,
+   "step": 0.05,
+   "path": "/shader/params/convergence_offset_y_b",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.mask_type",
+   "group": "crt.royale",
+   "label": "Mask - Type",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 2,
+   "step": 1,
+   "path": "/shader/params/mask_type",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.mask_sample_mode_desired",
+   "group": "crt.royale",
+   "label": "Mask - Sample Mode",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 2,
+   "step": 1,
+   "path": "/shader/params/mask_sample_mode_desired",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.mask_specify_num_triads",
+   "group": "crt.royale",
+   "label": "Mask - Specify Number of Triads",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/mask_specify_num_triads",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.mask_triad_size_desired",
+   "group": "crt.royale",
+   "label": "Mask - Triad Size Desired",
+   "type": "float",
+   "default": 3,
+   "min": 1,
+   "max": 18,
+   "step": 0.125,
+   "path": "/shader/params/mask_triad_size_desired",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.mask_num_triads_desired",
+   "group": "crt.royale",
+   "label": "Mask - Number of Triads Desired",
+   "type": "float",
+   "default": 480,
+   "min": 342,
+   "max": 1920,
+   "step": 1,
+   "path": "/shader/params/mask_num_triads_desired",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.aa_subpixel_r_offset_x_runtime",
+   "group": "crt.royale",
+   "label": "AA - Subpixel R Offset X",
+   "type": "float",
+   "default": -0.333333333,
+   "min": -0.333333333,
+   "max": 0.333333333,
+   "step": 0.333333333,
+   "path": "/shader/params/aa_subpixel_r_offset_x_runtime",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.aa_subpixel_r_offset_y_runtime",
+   "group": "crt.royale",
+   "label": "AA - Subpixel R Offset Y",
+   "type": "float",
+   "default": 0,
+   "min": -0.333333333,
+   "max": 0.333333333,
+   "step": 0.333333333,
+   "path": "/shader/params/aa_subpixel_r_offset_y_runtime",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.aa_cubic_c",
+   "group": "crt.royale",
+   "label": "AA - Cubic Sharpness",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 4,
+   "step": 0.015625,
+   "path": "/shader/params/aa_cubic_c",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.aa_gauss_sigma",
+   "group": "crt.royale",
+   "label": "AA - Gaussian Sigma",
+   "type": "float",
+   "default": 0.5,
+   "min": 0.0625,
+   "max": 1,
+   "step": 0.015625,
+   "path": "/shader/params/aa_gauss_sigma",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.geom_mode_runtime",
+   "group": "crt.royale",
+   "label": "Geometry - Mode",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 3,
+   "step": 1,
+   "path": "/shader/params/geom_mode_runtime",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.geom_radius",
+   "group": "crt.royale",
+   "label": "Geometry - Radius",
+   "type": "float",
+   "default": 2,
+   "min": 0.16,
+   "max": 1024,
+   "step": 0.1,
+   "path": "/shader/params/geom_radius",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.geom_view_dist",
+   "group": "crt.royale",
+   "label": "Geometry - View Distance",
+   "type": "float",
+   "default": 2,
+   "min": 0.5,
+   "max": 1024,
+   "step": 0.25,
+   "path": "/shader/params/geom_view_dist",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.geom_tilt_angle_x",
+   "group": "crt.royale",
+   "label": "Geometry - Tilt Angle X",
+   "type": "float",
+   "default": 0,
+   "min": -3.14159265,
+   "max": 3.14159265,
+   "step": 0.017453292519943295,
+   "path": "/shader/params/geom_tilt_angle_x",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.geom_tilt_angle_y",
+   "group": "crt.royale",
+   "label": "Geometry - Tilt Angle Y",
+   "type": "float",
+   "default": 0,
+   "min": -3.14159265,
+   "max": 3.14159265,
+   "step": 0.017453292519943295,
+   "path": "/shader/params/geom_tilt_angle_y",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.geom_aspect_ratio_x",
+   "group": "crt.royale",
+   "label": "Geometry - Aspect Ratio X",
+   "type": "float",
+   "default": 432,
+   "min": 1,
+   "max": 512,
+   "step": 1,
+   "path": "/shader/params/geom_aspect_ratio_x",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.geom_aspect_ratio_y",
+   "group": "crt.royale",
+   "label": "Geometry - Aspect Ratio Y",
+   "type": "float",
+   "default": 329,
+   "min": 1,
+   "max": 512,
+   "step": 1,
+   "path": "/shader/params/geom_aspect_ratio_y",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.geom_overscan_x",
+   "group": "crt.royale",
+   "label": "Geometry - Overscan X",
+   "type": "float",
+   "default": 1,
+   "min": 0.00390625,
+   "max": 4,
+   "step": 0.00390625,
+   "path": "/shader/params/geom_overscan_x",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.geom_overscan_y",
+   "group": "crt.royale",
+   "label": "Geometry - Overscan Y",
+   "type": "float",
+   "default": 1,
+   "min": 0.00390625,
+   "max": 4,
+   "step": 0.00390625,
+   "path": "/shader/params/geom_overscan_y",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.border_size",
+   "group": "crt.royale",
+   "label": "Border - Size",
+   "type": "float",
+   "default": 0.015,
+   "min": 1e-07,
+   "max": 0.5,
+   "step": 0.005,
+   "path": "/shader/params/border_size",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.border_darkness",
+   "group": "crt.royale",
+   "label": "Border - Darkness",
+   "type": "float",
+   "default": 2,
+   "min": 0,
+   "max": 16,
+   "step": 0.0625,
+   "path": "/shader/params/border_darkness",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.border_compress",
+   "group": "crt.royale",
+   "label": "Border - Compression",
+   "type": "float",
+   "default": 2.5,
+   "min": 1,
+   "max": 64,
+   "step": 0.0625,
+   "path": "/shader/params/border_compress",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   }
+  },
+  {
+   "id": "crt.royale.interlace_detect_toggle",
+   "group": "crt.royale",
+   "label": "Interlacing - Toggle",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/interlace_detect_toggle",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.interlace_bff",
+   "group": "crt.royale",
+   "label": "Interlacing - Bottom Field First",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/interlace_bff",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.royale.interlace_1080i",
+   "group": "crt.royale",
+   "label": "Interlace - Detect 1080i",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/interlace_1080i",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "royale"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.sim.Tuning_Sharp",
+   "group": "crt.sim",
+   "label": "Composite Sharp",
+   "type": "float",
+   "default": 0.2,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/Tuning_Sharp",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Persistence_R",
+   "group": "crt.sim",
+   "label": "Red Persistence",
+   "type": "float",
+   "default": 0.065,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/Tuning_Persistence_R",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Persistence_G",
+   "group": "crt.sim",
+   "label": "Green Persistence",
+   "type": "float",
+   "default": 0.05,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/Tuning_Persistence_G",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Persistence_B",
+   "group": "crt.sim",
+   "label": "Blue Persistence",
+   "type": "float",
+   "default": 0.05,
+   "min": 0,
+   "max": 1,
+   "step": 0.01,
+   "path": "/shader/params/Tuning_Persistence_B",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Bleed",
+   "group": "crt.sim",
+   "label": "Composite Bleed",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/Tuning_Bleed",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Artifacts",
+   "group": "crt.sim",
+   "label": "Composite Artifacts",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/Tuning_Artifacts",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.NTSCLerp",
+   "group": "crt.sim",
+   "label": "NTSC Artifacts",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/NTSCLerp",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.sim.NTSCArtifactScale",
+   "group": "crt.sim",
+   "label": "NTSC Artifact Scale",
+   "type": "float",
+   "default": 255,
+   "min": 0,
+   "max": 1000,
+   "step": 5,
+   "path": "/shader/params/NTSCArtifactScale",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.sim.animate_artifacts",
+   "group": "crt.sim",
+   "label": "Animate NTSC Artifacts",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/animate_artifacts",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   },
+   "integral": true
+  },
+  {
+   "id": "crt.sim.CRTMask_Scale",
+   "group": "crt.sim",
+   "label": "CRT Mask Scale",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 10,
+   "step": 0.5,
+   "path": "/shader/params/CRTMask_Scale",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Satur",
+   "group": "crt.sim",
+   "label": "Saturation",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/Tuning_Satur",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Mask_Brightness",
+   "group": "crt.sim",
+   "label": "Mask Brightness",
+   "type": "float",
+   "default": 0.5,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/Tuning_Mask_Brightness",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Mask_Opacity",
+   "group": "crt.sim",
+   "label": "Mask Opacity",
+   "type": "float",
+   "default": 0.3,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/Tuning_Mask_Opacity",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.bloom_scale_down",
+   "group": "crt.sim",
+   "label": "Downsample Bloom Scale",
+   "type": "float",
+   "default": 0.015,
+   "min": 0,
+   "max": 0.03,
+   "step": 0.001,
+   "path": "/shader/params/bloom_scale_down",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.bloom_scale_up",
+   "group": "crt.sim",
+   "label": "Upsample Bloom Scale",
+   "type": "float",
+   "default": 0.02,
+   "min": 0,
+   "max": 0.03,
+   "step": 0.001,
+   "path": "/shader/params/bloom_scale_up",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.BloomPower",
+   "group": "crt.sim",
+   "label": "Bloom Power",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 10,
+   "step": 0.1,
+   "path": "/shader/params/BloomPower",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.BloomScalar",
+   "group": "crt.sim",
+   "label": "Bloom Scalar",
+   "type": "float",
+   "default": 0.1,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/BloomScalar",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Overscan",
+   "group": "crt.sim",
+   "label": "Overscan",
+   "type": "float",
+   "default": 0.95,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/Tuning_Overscan",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.Tuning_Barrel",
+   "group": "crt.sim",
+   "label": "Barrel Distortion",
+   "type": "float",
+   "default": 0.25,
+   "min": 0,
+   "max": 1,
+   "step": 0.05,
+   "path": "/shader/params/Tuning_Barrel",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   }
+  },
+  {
+   "id": "crt.sim.mask_toggle",
+   "group": "crt.sim",
+   "label": "Mask Toggle",
+   "type": "float",
+   "default": 1,
+   "min": 0,
+   "max": 1,
+   "step": 1,
+   "path": "/shader/params/mask_toggle",
+   "animatable": true,
+   "enabled_if": "/shader/enabled",
+   "visible_if": {
+    "path": "/shader/preset",
+    "equals": "sim"
+   },
+   "integral": true
+  },
+  {
+   "id": "screenloop.enabled",
+   "group": "screenloop",
+   "label": "Screen Loop",
+   "hint": "Video feedback: a camcorder pointed at the TV showing its own picture. Off = the host passes no feedback_json.",
+   "type": "bool",
+   "default": false,
+   "path": "fb:/enabled",
+   "animatable": false
+  },
+  {
+   "id": "screenloop.zoom",
+   "group": "screenloop.framing",
+   "label": "Zoom",
+   "hint": "How big the TV's screen is in the camera's frame — each copy is this size of the one around it. Below 100% the copies shrink into a tunnel, more of them the closer you get to 100%. Above 100% every pass grows instead, into the swirling patterns feedback is known for. 0% points the camera away from the TV.",
+   "type": "float",
+   "default": 0.87,
+   "min": 0,
+   "max": 1.4,
+   "step": 0.001,
+   "percent": true,
+   "path": "fb:/values/zoom",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.center_x",
+   "group": "screenloop.framing",
+   "label": "Vanishing point left – right",
+   "hint": "Where the tunnel converges across the frame — the point the copies shrink toward (past 100% zoom, the point they grow away from). It stays put as you change the zoom and angles; the camera is re-aimed at the TV to keep it there. Set by the green dot on the preview.",
+   "type": "float",
+   "default": -0.2,
+   "min": -0.5,
+   "max": 0.5,
+   "step": 0.001,
+   "path": "fb:/values/center_x",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "position": true,
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.center_y",
+   "group": "screenloop.framing",
+   "label": "Vanishing point up – down",
+   "hint": "Where the tunnel converges up and down the frame. Set by the green dot on the preview.",
+   "type": "float",
+   "default": -0.22,
+   "min": -0.5,
+   "max": 0.5,
+   "step": 0.001,
+   "path": "fb:/values/center_y",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "position": true,
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.roll",
+   "group": "screenloop.framing",
+   "label": "Roll",
+   "hint": "The TV turned against the camera. Every pass turns the picture again, so the tunnel becomes a spiral.",
+   "type": "float",
+   "default": 0,
+   "min": -45,
+   "max": 45,
+   "step": 0.01,
+   "unit": "°",
+   "path": "fb:/values/roll",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.turn",
+   "group": "screenloop.framing",
+   "label": "Side angle",
+   "hint": "The camera looking at the screen from one side, so the screen's far edge is narrower. Every pass skews the picture again. At high zoom a steep angle magnifies the near side of the screen enough that part of the picture smears outward instead of forming copies.",
+   "type": "float",
+   "default": -4,
+   "min": -45,
+   "max": 45,
+   "step": 0.01,
+   "unit": "°",
+   "path": "fb:/values/turn",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.tilt",
+   "group": "screenloop.framing",
+   "label": "Vertical angle",
+   "hint": "The camera looking at the screen from above or below.",
+   "type": "float",
+   "default": 0,
+   "min": -45,
+   "max": 45,
+   "step": 0.01,
+   "unit": "°",
+   "path": "fb:/values/tilt",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.shake",
+   "group": "screenloop.movement",
+   "label": "Handheld",
+   "hint": "The camera operator's hands: a slow sway with a little tremor. Every copy is one trip round the loop older than the one around it, so the tunnel follows the camera a moment late and snakes.",
+   "type": "float",
+   "default": 0.4,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "fb:/values/shake",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.seed",
+   "group": "screenloop.movement",
+   "label": "Random seed",
+   "hint": "Picks the handheld motion. The same seed always moves the same way — so the draft matches the render, and motion you like can always be found again.",
+   "type": "int",
+   "default": 1,
+   "min": 1,
+   "max": 99,
+   "step": 1,
+   "path": "fb:/values/seed",
+   "animatable": false,
+   "enabled_if": "fb:/enabled",
+   "neutral": 1
+  },
+  {
+   "id": "screenloop.drift_x",
+   "group": "screenloop.movement",
+   "label": "Drift left – right",
+   "hint": "How far the vanishing point slides across the frame over the render, easing in and out. Set by the blue ring on the preview.",
+   "type": "float",
+   "default": 0,
+   "min": -1,
+   "max": 1,
+   "step": 0.001,
+   "path": "fb:/values/drift_x",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "position": true,
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.drift_y",
+   "group": "screenloop.movement",
+   "label": "Drift up – down",
+   "hint": "How far the vanishing point slides up or down over the render. Set by the blue ring on the preview.",
+   "type": "float",
+   "default": 0,
+   "min": -1,
+   "max": 1,
+   "step": 0.001,
+   "path": "fb:/values/drift_y",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "position": true,
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.push",
+   "group": "screenloop.movement",
+   "label": "Push",
+   "hint": "Zooming in or out over the render, from the Zoom you set.",
+   "type": "float",
+   "default": 0,
+   "min": -0.5,
+   "max": 0.5,
+   "step": 0.001,
+   "percent": true,
+   "path": "fb:/values/push",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.spin",
+   "group": "screenloop.movement",
+   "label": "Spin",
+   "hint": "Rolling the camera over the render, from the Roll you set.",
+   "type": "float",
+   "default": 0,
+   "min": -180,
+   "max": 180,
+   "step": 0.01,
+   "unit": "°",
+   "path": "fb:/values/spin",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.loop",
+   "group": "screenloop.movement",
+   "label": "Seamless loop",
+   "hint": "The move goes out and comes back, and the shake repeats over the length — so the file loops without a jump. Made for GIFs.",
+   "type": "bool",
+   "default": false,
+   "encode": "number",
+   "path": "fb:/values/loop",
+   "animatable": false,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.focus",
+   "group": "screenloop.camera",
+   "label": "Softness",
+   "hint": "The camera's focus on the screen. A little softness on every pass melts the deep copies first; sharp focus keeps the moiré of the screen's dot pattern.",
+   "type": "float",
+   "default": 0.2,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "fb:/values/focus",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.brightness",
+   "group": "screenloop.camera",
+   "label": "Screen brightness",
+   "hint": "How bright the TV looks to the camera — the loop's gain. Below 100% the deep copies fade to black; above, they burn to white.",
+   "type": "float",
+   "default": 1,
+   "min": 0.5,
+   "max": 1.5,
+   "step": 0.001,
+   "percent": true,
+   "path": "fb:/values/brightness",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 1
+  },
+  {
+   "id": "screenloop.contrast",
+   "group": "screenloop.camera",
+   "label": "Contrast",
+   "hint": "The TV's contrast as the camera sees it, applied again on every pass — so the deep copies get harsher (or flatter) than the outer ones.",
+   "type": "float",
+   "default": 1.05,
+   "min": 0.6,
+   "max": 1.6,
+   "step": 0.001,
+   "percent": true,
+   "path": "fb:/values/contrast",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 1
+  },
+  {
+   "id": "screenloop.color_drift",
+   "group": "screenloop.camera",
+   "label": "Color drift",
+   "hint": "The camera's white balance against the TV's color temperature. The tint compounds on every pass: cool turns the deep copies teal and blue, warm turns them orange.",
+   "type": "float",
+   "default": -0.3,
+   "min": -1,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "fb:/values/color_drift",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.hue_drift",
+   "group": "screenloop.camera",
+   "label": "Hue drift",
+   "hint": "A tint error that turns the hue a little on every pass, so the tunnel cycles through the colors.",
+   "type": "float",
+   "default": 0,
+   "min": -30,
+   "max": 30,
+   "step": 0.01,
+   "unit": "° per pass",
+   "path": "fb:/values/hue_drift",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.auto_exposure",
+   "group": "screenloop.camera",
+   "label": "Auto exposure",
+   "hint": "The camcorder's automatic exposure. It reacts to the brightness of its own picture a moment late, so the whole loop pulses.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "fb:/values/auto_exposure",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.key",
+   "group": "screenloop.signal",
+   "label": "Luma key",
+   "hint": "A video mixer between the camera and the TV keys your picture over the camera's: its bright parts sit on top, and the feedback shows through the darker parts — so your subject stays solid while the tunnel trails around it. Turn it up to key in darker tones too. Off, the TV shows only what the camera sees.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "fb:/values/key",
+   "animatable": true,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.key_invert",
+   "group": "screenloop.signal",
+   "label": "Key the dark parts",
+   "hint": "Key your picture's dark parts on top instead, with the feedback showing through the bright ones — for dark subjects on light backgrounds.",
+   "type": "bool",
+   "default": false,
+   "encode": "number",
+   "path": "fb:/values/key_invert",
+   "animatable": false,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.delay",
+   "group": "screenloop.signal",
+   "label": "Delay",
+   "hint": "How long one trip around the loop takes. Each copy is that much older than the one around it, so anything moving — the camera included — echoes down the tunnel.",
+   "type": "int",
+   "default": 1,
+   "min": 1,
+   "max": 20,
+   "step": 1,
+   "unit": "frames",
+   "path": "fb:/values/delay",
+   "animatable": false,
+   "enabled_if": "fb:/enabled",
+   "neutral": 1
+  },
+  {
+   "id": "screenloop.counter",
+   "group": "screenloop.signal",
+   "label": "Camcorder counter",
+   "hint": "The camcorder's elapsed-time counter, burned into its picture — so it's filmed again with everything else and repeats down the tunnel.",
+   "type": "bool",
+   "default": false,
+   "encode": "number",
+   "path": "fb:/values/counter",
+   "animatable": false,
+   "enabled_if": "fb:/enabled",
+   "neutral": 0
+  },
+  {
+   "id": "screenloop.seconds",
+   "group": "screenloop.movement",
+   "label": "Length",
+   "hint": "How long the move (drift, push, spin, seamless loop) takes, in seconds. Upstream uses the clip's duration for video and this for stills; hosts may set it to the effect's duration.",
+   "type": "float",
+   "default": 5,
+   "min": 0.5,
+   "max": 60,
+   "step": 0.1,
+   "unit": "s",
+   "path": "fb:/seconds",
+   "animatable": false,
+   "enabled_if": "fb:/enabled"
+  }
+ ],
+ "digital_formats": [
+  {
+   "id": "webcam",
+   "name": "Webcam (2005)",
+   "width": 320,
+   "hint": "320 × 240, 15 fps, a noisy sensor, each frame compressed on its own.",
+   "applies": {
+    "/digital/values": {
+     "frame_rate": 15,
+     "fields": 0,
+     "lens_blur": 0.35,
+     "aliasing": 0.15,
+     "sensor_noise": 0.4,
+     "noise_reduction": 0.5,
+     "exposure": 0.4,
+     "white_balance": -0.15,
+     "tint": 0,
+     "saturation": 0.85,
+     "black_level": 0.04,
+     "sharpening": 0.25,
+     "chroma": 2,
+     "quality": 0.22,
+     "keyframe_interval": 0,
+     "fixed_bitrate": 0,
+     "deblocking": 0,
+     "data_loss": 0,
+     "datamosh": 0
+    },
+    "/downscale/enabled": true,
+    "/downscale/width": 320,
+    "/downscale/preset": "Webcam (2005) (320px)"
+   }
+  },
+  {
+   "id": "video_call",
+   "name": "Video call",
+   "width": 320,
+   "hint": "A squeezed bitrate and lost packets that smear until the next keyframe.",
+   "applies": {
+    "/digital/values": {
+     "frame_rate": 15,
+     "fields": 0,
+     "lens_blur": 0.3,
+     "aliasing": 0,
+     "sensor_noise": 0.25,
+     "noise_reduction": 0.6,
+     "exposure": 0.2,
+     "white_balance": 0,
+     "tint": 0,
+     "saturation": 0.9,
+     "black_level": 0,
+     "sharpening": 0,
+     "chroma": 2,
+     "quality": 0.22,
+     "keyframe_interval": 4,
+     "fixed_bitrate": 0.8,
+     "deblocking": 0.6,
+     "data_loss": 0.15,
+     "datamosh": 0
+    },
+    "/downscale/enabled": true,
+    "/downscale/width": 320,
+    "/downscale/preset": "Video call (320px)"
+   }
+  },
+  {
+   "id": "minidv",
+   "name": "MiniDV",
+   "width": 720,
+   "hint": "The VX1000 skate-video look: one field line-doubled, hard sharpening, aliasing and color moiré, blown highlights, warm saturated color, gray blacks, color at a quarter width (4:1:1).",
+   "applies": {
+    "/digital/values": {
+     "frame_rate": 30,
+     "fields": 1,
+     "lens_blur": 0.25,
+     "aliasing": 0.6,
+     "sensor_noise": 0.12,
+     "noise_reduction": 0,
+     "exposure": 0.3,
+     "white_balance": 0.4,
+     "tint": 0.2,
+     "saturation": 1.15,
+     "black_level": 0.08,
+     "sharpening": 0.6,
+     "chroma": 3,
+     "quality": 0.7,
+     "keyframe_interval": 0,
+     "fixed_bitrate": 0.3,
+     "deblocking": 0,
+     "data_loss": 0,
+     "datamosh": 0
+    },
+    "/downscale/enabled": true,
+    "/downscale/width": 720,
+    "/downscale/preset": "MiniDV (720px)"
+   }
+  },
+  {
+   "id": "early_web",
+   "name": "Early web video",
+   "width": 320,
+   "hint": "240p streaming: few bits, coarse blocks, and keyframes that pump.",
+   "applies": {
+    "/digital/values": {
+     "frame_rate": 15,
+     "fields": 0,
+     "lens_blur": 0,
+     "aliasing": 0,
+     "sensor_noise": 0,
+     "noise_reduction": 0,
+     "exposure": 0,
+     "white_balance": 0,
+     "tint": 0,
+     "saturation": 1,
+     "black_level": 0,
+     "sharpening": 0,
+     "chroma": 2,
+     "quality": 0.12,
+     "keyframe_interval": 5,
+     "fixed_bitrate": 0.7,
+     "deblocking": 0,
+     "data_loss": 0,
+     "datamosh": 0
+    },
+    "/downscale/enabled": true,
+    "/downscale/width": 320,
+    "/downscale/preset": "Early web video (320px)"
+   }
+  },
+  {
+   "id": "datamosh",
+   "name": "Datamosh",
+   "width": 480,
+   "hint": "Keyframes removed: motion drags the old picture around.",
+   "applies": {
+    "/digital/values": {
+     "frame_rate": 30,
+     "fields": 0,
+     "lens_blur": 0,
+     "aliasing": 0,
+     "sensor_noise": 0,
+     "noise_reduction": 0,
+     "exposure": 0,
+     "white_balance": 0,
+     "tint": 0,
+     "saturation": 1,
+     "black_level": 0,
+     "sharpening": 0,
+     "chroma": 2,
+     "quality": 0.4,
+     "keyframe_interval": 1,
+     "fixed_bitrate": 0.3,
+     "deblocking": 0,
+     "data_loss": 0,
+     "datamosh": 1
+    },
+    "/downscale/enabled": true,
+    "/downscale/width": 480,
+    "/downscale/preset": "Datamosh (480px)"
+   }
+  }
+ ]
 }

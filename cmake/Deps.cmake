@@ -15,3 +15,6 @@ FetchContent_MakeAvailable(nlohmann_json doctest stb)
 
 add_library(ntscrt_stb INTERFACE)
 target_include_directories(ntscrt_stb INTERFACE ${stb_SOURCE_DIR})
+
+# ntsc-rs C ABI (agent A): Rust staticlib built by cargo -> imported target `ntscrs_capi`.
+add_subdirectory(${NTSCRT_ROOT}/rust/ntscrs-capi ${CMAKE_BINARY_DIR}/ntscrs-capi)

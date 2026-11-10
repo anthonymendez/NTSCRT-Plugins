@@ -1,0 +1,21 @@
+[package]
+name = "ntscrs-capi"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal C ABI around the ntsc-rs core library (port of NTSCRT Vendor/ntscrs-capi)"
+license = "MIT OR ISC OR Apache-2.0"
+
+[lib]
+name = "ntscrs_capi"
+# Static library linked into ntscrt_core (OFX bundle, FxPlug service, CLI).
+crate-type = ["staticlib"]
+
+[dependencies]
+ntsc-rs = { path = "../../vendor/ntsc-rs/crates/ntscrs" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# Standalone crate — do not join any enclosing workspace.
+[workspace]
