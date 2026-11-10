@@ -1,3 +1,9 @@
 [submodule "upstream/NTSCRT"]
 	path = upstream/NTSCRT
 	url = https://github.com/finnmckenty/NTSCRT
+[submodule "vendor/librashader"]
+	path = vendor/librashader
+	url = https://github.com/SnowflakePowered/librashader.git
+[submodule "vendor/slang-shaders"]
+	path = vendor/slang-shaders
+	url = https://github.com/libretro/slang-shaders.git

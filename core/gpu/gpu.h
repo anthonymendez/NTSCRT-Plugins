@@ -14,6 +14,26 @@
 //   RWTexture2D outputs     : register(u0..u7)
 //   RWStructuredBuffer      : register(u8..u15)
 //   SamplerState linear     : register(s0), point : register(s1)
+// (both samplers clamp to edge; the HAL always binds them).
+//
+// Portability notes (Wave 1, agent D):
+//  - Write outputs with RWTexture2D<float4> (or WTexture2D<float4> + Store).
+//    Only READ an RWTexture2D when its format is R32F: D3D11 FL11_0 has no
+//    typed UAV loads for other formats, and Metal tier-1 read_write textures
+//    are R32-only. Read inputs through Texture2D SRVs instead. The toolchain
+//    declares never-read RWTexture2Ds access::write on Metal automatically.
+//  - Metal argument indices are derived from these registers at build time
+//    (cmake/Shaders.cmake): b0->buffer(0), t8..15->buffer(8..15),
+//    u8..15->buffer(16..23), t0..7->texture(0..7), u0..7->texture(8..15),
+//    s0/s1->sampler(0/1).
+//  - Put parameters in the one ConstantBuffer at b0 (no loose `uniform`s),
+//    built from 4-byte scalars and 2-/4-vectors (no float3: HLSL cbuffer
+//    packing and Metal struct layout differ for it).
+//  - Buffers carry no stride: the D3D11 backend takes each StructuredBuffer's
+//    element stride from the kernel's reflection at bind time.
+//  - BGRA8 textures with shader_write may be stored as RGBA8 on D3D11 GPUs
+//    without typed BGRA UAV stores; shaders see the same float4 and
+//    upload/download keep BGRA byte order, so callers don't notice.
 #pragma once
 
 #include <cstddef>
@@ -63,7 +83,10 @@ struct Bindings {
 class Device {
 public:
     // native_device/native_queue: see ntscrt_create_info. NULL = own device.
+    // Never throws: returns nullptr when the backend can't start (no GPU,
+    // wrong platform); last_create_error() then says why.
     static std::unique_ptr<Device> create(Backend backend, void *native_device, void *native_queue);
+    static const char *last_create_error();
     virtual ~Device() = default;
 
     virtual Backend backend() const = 0;
