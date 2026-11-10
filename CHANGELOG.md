@@ -14,7 +14,9 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
-First release (will be 0.1.0).
+## [0.3.0] - 2026-11-10
+
+First public release. (0.1 and 0.2 were internal milestones and were never tagged.)
 
 ### Added
 - DaVinci Resolve 21.1.2+ OpenFX plug-in (Windows x64 with Direct3D 11, macOS universal with Metal) and
@@ -54,4 +56,5 @@ First release (will be 0.1.0).
   `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log` / `~/Library/Logs/NTSCRT/ntscrt-ofx.log`, rotated at 1 MB.
   `NTSCRT_OFX_LOG=<file|off>` moves or disables it, `NTSCRT_OFX_LOG_VERBOSE=1` logs every frame.
 
-[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/commits/main
+[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/anthonymendez/NTSCRT-Plugins/releases/tag/v0.3.0

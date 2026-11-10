@@ -74,7 +74,7 @@ same line to update. You can read them first: [install.ps1](install.ps1), [insta
 | | Windows (`install.ps1`) | macOS (`install.sh`) |
 |---|---|---|
 | Uninstall | `-Uninstall` | `--uninstall` |
-| Specific release | `-Version v0.1.0` | `--version v0.1.0` |
+| Specific release | `-Version v0.3.0` | `--version v0.3.0` |
 | Only one app | (Resolve only on Windows) | `--resolve` or `--fcp` |
 | Install a zip you downloaded | `-From path\to.zip` | `--from path/to.zip` |
 
@@ -106,8 +106,8 @@ or `NTSCRT-FxPlug-macos-universal.zip`.
 Run the installer or the same install line again (on Windows, also **Update NTSCRT plug-in** in the Start
 menu): it installs the latest release over the old one and prints both versions.
 Your projects keep their effects and settings. See what changed in [CHANGELOG.md](CHANGELOG.md). In Resolve, the
-installed version shows in the effect's **Presets → Version** field. A specific version: `-Version v0.1.0`
-(Windows) or `--version v0.1.0` (macOS).
+installed version shows in the effect's **Presets → Version** field. A specific version: `-Version v0.3.0`
+(Windows) or `--version v0.3.0` (macOS).
 
 ### Using it
 

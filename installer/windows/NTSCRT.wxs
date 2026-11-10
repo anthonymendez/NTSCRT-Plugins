@@ -8,11 +8,11 @@
   bundle into C:\Program Files\Common Files\OFX\Plugins, so this MSI never goes stale.
 
   Build (see installer/windows/build-msi.ps1):
-    wix build installer/windows/NTSCRT.wxs -arch x64 -d Version=0.1.0
+    wix build installer/windows/NTSCRT.wxs -arch x64 -d Version=0.3.0
       -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext -o NTSCRT-Installer-windows.msi
 
   Public properties (msiexec ... NAME=value):
-    NTSCRT_VERSION  release tag to install (default: latest), e.g. v0.1.0
+    NTSCRT_VERSION  release tag to install (default: latest), e.g. v0.3.0
     NTSCRT_FROM     a local NTSCRT-OFX-windows-x64.zip (or bundle folder) instead of downloading
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"

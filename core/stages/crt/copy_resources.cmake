@@ -1,3 +1,5 @@
+# Script mode (cmake -P) starts with old policies: use modern ones (IN_LIST etc.).
+cmake_policy(VERSION 3.24)
 # cmake -DMANIFEST= -DSRC= -DDST= -DPRESETS= -DPRESETS_DST= -P copy_resources.cmake
 # Copies the manifest's files from SRC to DST keeping relative paths (and
 # removes files no longer listed), then mirrors PRESETS into PRESETS_DST.

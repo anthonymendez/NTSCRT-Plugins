@@ -4,7 +4,7 @@
 #   irm https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.ps1 | iex
 #
 # Or with options (save the script first, or use the scriptblock form):
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.ps1))) -Version v0.1.0
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.ps1))) -Version v0.3.0
 #   .\install.ps1 -From .\NTSCRT-OFX-windows-x64.zip     # install a zip / bundle you already have
 #   .\install.ps1 -Uninstall
 #
@@ -15,7 +15,7 @@
 # (GitHub CLI, signed in) or the GITHUB_TOKEN environment variable.
 # Works in Windows PowerShell 5.1 and PowerShell 7.
 param(
-    [string]$Version = "latest",          # release tag, e.g. v0.1.0
+    [string]$Version = "latest",          # release tag, e.g. v0.3.0
     [string]$From = "",                   # local .zip or NTSCRT.ofx.bundle folder instead of downloading
     [string]$Repo = $(if ($env:NTSCRT_REPO) { $env:NTSCRT_REPO } else { "anthonymendez/NTSCRT-Plugins" }),
     [string]$Dest = (Join-Path $env:CommonProgramFiles "OFX\Plugins"),   # OpenFX folder (override for testing)

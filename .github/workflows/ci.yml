@@ -127,7 +127,7 @@ jobs:
 
   macos:
     name: macos (universal, Release)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -214,7 +214,7 @@ jobs:
   fxplug:
     name: fxplug (Final Cut Pro, universal)
     needs: macos
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       # Secrets can't be used in job-level `if:`; expose it to steps instead.

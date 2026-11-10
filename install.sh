@@ -7,7 +7,7 @@
 # Options (pass after `sh -s --` when piping):
 #   curl -fsSL .../install.sh | sh -s -- --resolve          # only DaVinci Resolve
 #   curl -fsSL .../install.sh | sh -s -- --fcp              # only Final Cut Pro
-#   curl -fsSL .../install.sh | sh -s -- --version v0.1.0   # a specific release
+#   curl -fsSL .../install.sh | sh -s -- --version v0.3.0   # a specific release
 #   sh install.sh --from ~/Downloads/NTSCRT-OFX-macos-universal.zip   # a zip you already have
 #   sh install.sh --uninstall
 #
@@ -147,7 +147,7 @@ pick_from() {  # pick_from <name>: with --from, use it only if it contains <name
   unpack "$FROM" "$1" 2>/dev/null
 }
 
-bundle_version() {  # bundle_version <NTSCRT.ofx.bundle | NTSCRT.app> -> "v0.1.0" or ""
+bundle_version() {  # bundle_version <NTSCRT.ofx.bundle | NTSCRT.app> -> "v0.3.0" or ""
   if [ -f "$1/Contents/Resources/VERSION" ]; then printf 'v%s' "$(head -n 1 "$1/Contents/Resources/VERSION" | tr -d '[:space:]')"
   elif [ -f "$1/Contents/Info.plist" ]; then
     v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null || true)"

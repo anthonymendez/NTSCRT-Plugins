@@ -1,3 +1,5 @@
+# Script mode (cmake -P) starts with old policies: use modern ones (IN_LIST etc.).
+cmake_policy(VERSION 3.24)
 # Run at build time (POST_BUILD of ntscrt_ofx) so whatever exists in
 # resources/shaders *now* lands in the bundle.
 #   -DBUNDLE=<.../NTSCRT.ofx.bundle> -DPRESETS=<dir> -DSHADERS=<dir>

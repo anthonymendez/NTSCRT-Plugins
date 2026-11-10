@@ -46,4 +46,4 @@ smoke-tests them against the freshly built zips (`NTSCRT_FROM`): MSI install + u
 pkg's `postinstall` on macOS. Build locally: `installer/windows/build-msi.ps1` or
 `sh installer/macos/build-pkg.sh`. Both are unsigned for now (see the README's first-run steps).
 MSI properties for testing / offline installs: `msiexec /i NTSCRT-Installer-windows.msi NTSCRT_FROM=C:\path\NTSCRT-OFX-windows-x64.zip`
-or `NTSCRT_VERSION=v0.1.0`; the pkg's `postinstall` reads the same two environment variables.
+or `NTSCRT_VERSION=v0.3.0`; the pkg's `postinstall` reads the same two environment variables.
