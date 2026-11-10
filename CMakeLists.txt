@@ -36,3 +36,8 @@ if(NTSCRT_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+# FxPlug 4 / Final Cut Pro (agent F): portable param model + its test on every
+# platform; the plug-in bundle itself only on macOS with the FxPlug SDK installed.
+if(EXISTS ${NTSCRT_ROOT}/fxplug/CMakeLists.txt)
+  add_subdirectory(fxplug)
+endif()

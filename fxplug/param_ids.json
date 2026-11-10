@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "ids": {
+    "group:downscale": 100,
+    "group:ntsc": 101,
+    "group:glitch": 102,
+    "group:crt": 103,
+    "group:digital": 104,
+    "group:crop": 105,
+    "group:screenloop": 106,
+    "downscale.enabled": 107,
+    "downscale.width": 108,
+    "downscale.method": 109,
+    "ntsc.enabled": 110,
+    "glitch.enabled": 111,
+    "crt.enabled": 112,
+    "crt.preset": 113,
+    "digital.enabled": 114
+  },
+  "retired": [],
+  "note": "APPEND-ONLY. FxPlug parameter IDs saved in FCP/Motion projects. Never edit or reuse an id; regenerate with fxplug/tools/update_param_ids.py."
+}
