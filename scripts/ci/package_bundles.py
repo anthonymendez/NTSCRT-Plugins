@@ -44,6 +44,8 @@ def main():
     ap.add_argument("--ext", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--allow-empty", action="store_true")
+    ap.add_argument("--extra", nargs="*", default=[],
+                    help="files added at the zip root (install scripts, INSTALL.md); .sh/.command keep +x")
     a = ap.parse_args()
 
     found = []
@@ -66,6 +68,15 @@ def main():
         for name, p in sorted(by_name.items()):
             print(f"adding {p}")
             add_tree(zf, p, "")
+        for f in a.extra:
+            info = zipfile.ZipInfo(os.path.basename(f))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            mode = 0o755 if f.endswith((".sh", ".command")) else 0o644
+            info.external_attr = (stat.S_IFREG | mode) << 16
+            with open(f, "rb") as fh:
+                zf.writestr(info, fh.read())
+            print(f"adding {f}")
     print(f"wrote {a.out}")
 
 

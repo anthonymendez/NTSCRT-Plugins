@@ -6,6 +6,8 @@ circuits, RetroArch CRT shaders via librashader, digital codec, Screen Loop) as 
 - **DaVinci Resolve 21.1.2+** — OpenFX plugin, Windows and macOS
 - **Final Cut Pro 12.4+** — FxPlug 4 plugin, macOS
 
+**Install:** see [INSTALL.md](INSTALL.md). It takes about a minute per app.
+
 Status: in development. See `docs/` for architecture and contracts.
 
 ## Credits
