@@ -37,6 +37,10 @@ First release (will be 0.1.0).
   such as Text+ titles.
 
 ### Developer
+- `tests/resolve/`: plug-in tests inside a running DaVinci Resolve (alpha modes, Edit page, out-of-order
+  frames, plug-in vs `ntscrt-cli`, bit depths, sizes, proxy, speed) and `launch_resolve_dev.ps1` to start
+  Resolve with a build without installing it. Work in progress: a Resolve dialog during project setup
+  still stalls the suite.
 - Set `NTSCRT_OFX_LOG=<file>` before starting Resolve to log why a render failed (e.g. a property the host
   doesn't provide).
 
