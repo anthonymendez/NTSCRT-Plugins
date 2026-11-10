@@ -117,6 +117,43 @@ bool wrap(OFX::Image &im, const OfxRectI &r, ntscrt_image &out) {
     out.data = im.getPixelAddress(r.x1, r.y2 - 1);  // top row
     return out.data != nullptr;
 }
+
+size_t pixel_bytes(ntscrt_pixel_format f) {
+    switch (f) {
+    case NTSCRT_RGBA8:
+    case NTSCRT_BGRA8: return 4;
+    case NTSCRT_RGBA16:
+    case NTSCRT_RGBA16F: return 8;
+    default: return 16;
+    }
+}
+
+// Like wrap, but `r` may extend past the image's bounds (Fusion hands over only
+// the source's domain of definition, e.g. a Text+ title's bounding box): the
+// image is then copied into `buf`, transparent everywhere outside its bounds.
+bool wrap_padded(OFX::Image &im, const OfxRectI &r, ntscrt_image &out, std::vector<uint8_t> &buf) {
+    if (wrap(im, r, out)) return true;
+    if (im.getPixelComponents() != OFX::ePixelComponentRGBA) return false;
+    ntscrt_pixel_format f = to_format(im.getPixelDepth());
+    if (int(f) < 0 || r.x2 <= r.x1 || r.y2 <= r.y1) return false;
+    const size_t pb = pixel_bytes(f);
+    out.width = r.x2 - r.x1;
+    out.height = r.y2 - r.y1;
+    out.format = f;
+    out.row_bytes = ptrdiff_t(size_t(out.width) * pb);
+    buf.assign(size_t(out.height) * size_t(out.row_bytes), 0);
+    out.data = buf.data();
+    const OfxRectI b = im.getBounds();
+    const int x1 = std::max(r.x1, b.x1), x2 = std::min(r.x2, b.x2);
+    const int y1 = std::max(r.y1, b.y1), y2 = std::min(r.y2, b.y2);
+    for (int y = y1; y < y2 && x1 < x2; ++y) {
+        const void *src = im.getPixelAddress(x1, y);
+        if (!src) continue;
+        uint8_t *dst = buf.data() + size_t(r.y2 - 1 - y) * size_t(out.row_bytes) + size_t(x1 - r.x1) * pb;
+        std::memcpy(dst, src, size_t(x2 - x1) * pb);
+    }
+    return true;
+}
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -151,6 +188,29 @@ public:
     }
     ~NtscrtEffect() override {
         if (inst_) ntscrt_destroy(inst_);
+    }
+
+    // The output covers the whole frame (project size, or the source's area if
+    // larger), not just the source's: Fusion sources such as Text+ only define
+    // their bounding box, and the effect (glow, ghosting, spill) reaches past it.
+    bool getRegionOfDefinition(const OFX::RegionOfDefinitionArguments &args, OfxRectD &rod) override {
+        rod = src_->getRegionOfDefinition(args.time);
+        const OfxPointD off = getProjectOffset(), ext = getProjectExtent();
+        if (ext.x > 0 && ext.y > 0) {
+            rod.x1 = std::min(rod.x1, off.x);
+            rod.y1 = std::min(rod.y1, off.y);
+            rod.x2 = std::max(rod.x2, off.x + ext.x);
+            rod.y2 = std::max(rod.y2, off.y + ext.y);
+        }
+        return true;
+    }
+    void getRegionsOfInterest(const OFX::RegionsOfInterestArguments &args, OFX::RegionOfInterestSetter &rois) override {
+        OfxRectD rod;
+        OFX::RegionOfDefinitionArguments ra;
+        ra.time = args.time;
+        ra.renderScale = args.renderScale;
+        getRegionOfDefinition(ra, rod);
+        rois.setRegionOfInterest(*src_, rod);  // non-local effect: always the whole frame
     }
 
     void getClipPreferences(OFX::ClipPreferencesSetter &prefs) override {
@@ -346,7 +406,13 @@ struct RenderCtx {
     NtscrtEffect *fx;
     double start;  // clip time of frame_index 0
     double end;
-    std::map<const ntscrt_image *, std::pair<std::unique_ptr<OFX::Image>, std::unique_ptr<ntscrt_image>>> live;
+    OfxRectI frame;  // pixel rect every fetched frame is padded / cropped to (the output's)
+    struct Live {
+        std::unique_ptr<OFX::Image> image;
+        std::unique_ptr<ntscrt_image> view;
+        std::vector<uint8_t> padded;
+    };
+    std::map<const ntscrt_image *, Live> live;
     std::string look_buf, fb_buf;
 
     static const ntscrt_image *fetch(void *u, int64_t frame) {
@@ -356,10 +422,10 @@ struct RenderCtx {
         try {
             std::unique_ptr<OFX::Image> im(c->fx->src_->fetchImage(t));
             if (!im) return nullptr;
-            auto ni = std::make_unique<ntscrt_image>();
-            if (!wrap(*im, im->getBounds(), *ni)) return nullptr;
-            const ntscrt_image *key = ni.get();
-            c->live[key] = {std::move(im), std::move(ni)};
+            Live l{std::move(im), std::make_unique<ntscrt_image>(), {}};
+            if (!wrap_padded(*l.image, c->frame, *l.view, l.padded)) return nullptr;
+            const ntscrt_image *key = l.view.get();
+            c->live[key] = std::move(l);
             return key;
         } catch (...) {
             return nullptr;
@@ -386,7 +452,8 @@ void NtscrtEffect::render(const OFX::RenderArguments &args) {
 
     OfxRectI win = dst->getBounds();
     ntscrt_image s{}, d{};
-    if (!wrap(*dst, win, d) || !wrap(*src, win, s)) {
+    std::vector<uint8_t> src_padded;
+    if (!wrap(*dst, win, d) || !wrap_padded(*src, win, s, src_padded)) {
         report_error("NTSCRT: unsupported image format or bounds");
         OFX::throwSuiteStatusException(kOfxStatErrImageFormat);
     }
@@ -397,7 +464,7 @@ void NtscrtEffect::render(const OFX::RenderArguments &args) {
     seed_->getValueAtTime(args.time, seed);
 
     OfxRangeD range = src_->getFrameRange();
-    RenderCtx ctx{this, range.min, range.max, {}, {}, {}};
+    RenderCtx ctx{this, range.min, range.max, win, {}, {}, {}};
 
     ntscrt_render_args ra{};
     ra.frame_index = int64_t(std::llround(args.time - range.min));
