@@ -98,7 +98,9 @@ const char *ntscrt_bundled_presets_json(ntscrt_instance *inst) {
         auto rel = fs::relative(it->path(), dir);
         rel.replace_extension();
         bool fb = j.is_object() && j.value("kind", std::string()) == "ntscrt-video-feedback";
-        arr.push_back({{"name", rel.generic_u8string()}, {"kind", fb ? "feedback" : "look"}, {"json", j}});
+        auto u8 = rel.generic_u8string();  // std::u8string in C++20; nlohmann would emit it as a number array
+        std::string name(reinterpret_cast<const char *>(u8.data()), u8.size());
+        arr.push_back({{"name", name}, {"kind", fb ? "feedback" : "look"}, {"json", j}});
     }
     std::sort(arr.begin(), arr.end(), [](const json &a, const json &b) { return a["name"] < b["name"]; });
     inst->presets_cache = arr.dump();

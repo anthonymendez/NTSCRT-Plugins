@@ -16,6 +16,7 @@ TEST_CASE("bundled presets load") {
     REQUIRE(ntscrt_create(&ci, &inst) == NTSCRT_OK);
     auto j = nlohmann::json::parse(ntscrt_bundled_presets_json(inst));
     CHECK(j.size() >= 20);
+    CHECK(j[0]["name"].is_string());
     ntscrt_destroy(inst);
 }
 
