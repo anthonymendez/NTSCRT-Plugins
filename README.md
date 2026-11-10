@@ -8,6 +8,12 @@ circuits, RetroArch CRT shaders via librashader, digital codec, Screen Loop) as 
 
 Status: in development. See `docs/` for architecture and contracts.
 
+![Before/after: a test scene untouched on the left, through NTSCRT's default look on the right](docs/images/hero-before-after.jpg)
+*Before / after with the default look: chroma bleed, noise, scanlines and CRT glow.*
+
+![Four NTSCRT looks: V Hold glitch, Obliterated, Webcam (low quality) and a close-up of the CRT Royale shader](docs/images/looks-grid.jpg)
+*A few of the bundled looks and CRT shaders (rendered with `scripts/make_previews.ps1`).*
+
 ## Install
 
 | App | Supported |
