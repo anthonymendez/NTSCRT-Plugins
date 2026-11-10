@@ -45,7 +45,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--allow-empty", action="store_true")
     ap.add_argument("--extra", nargs="*", default=[],
-                    help="files added at the zip root (install scripts, INSTALL.md); .sh/.command keep +x")
+                    help="files added at the zip root (install scripts, README.md); .sh/.command keep +x")
     a = ap.parse_args()
 
     found = []
