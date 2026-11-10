@@ -746,16 +746,26 @@ def main():
     try:
         if a.headless:
             Path(a.out).mkdir(parents=True, exist_ok=True)
-            proc = start_headless(a.bundle, a.out)
-            r, end = None, time.time() + 180
-            while not r and time.time() < end:  # Resolve takes a while to start
-                time.sleep(3)
-                try:
-                    r = connect()
-                except Exception:
-                    r = None
+            r = None
+            for attempt in (1, 2):  # Resolve's script server occasionally fails to start: retry once
+                proc = start_headless(a.bundle, a.out)
+                end = time.time() + 180
+                while not r and time.time() < end and proc.poll() is None:  # Resolve takes a while to start
+                    time.sleep(3)
+                    try:
+                        r = connect()
+                    except Exception:
+                        r = None
+                if r:
+                    break
+                print(f"headless Resolve didn't answer (attempt {attempt}); restarting it", flush=True)
+                proc.kill()
+                proc.wait(60)
+                time.sleep(5)
             if not r:
-                raise RuntimeError("headless Resolve didn't answer within 3 minutes")
+                proc = None
+                raise RuntimeError("headless Resolve didn't answer twice (its scripting server didn't start: "
+                                   "see davinci_resolve.log, 'script server')")
         else:
             r = connect()
     except Exception as e:

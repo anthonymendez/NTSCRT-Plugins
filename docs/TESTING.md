@@ -21,6 +21,8 @@ Then restart Resolve / Final Cut.
    The picture should get the VHS/CRT look within a second or two.
 2. In the Inspector, *Presets → Version* shows the installed version. Pick a few presets
    (V Hold glitch, Webcam, …) and a few *CRT → Preset* shaders; each should change the look.
+   On a Mac, please include the **sim** CRT preset: it's the heaviest shader and hasn't run on real
+   Mac hardware yet (CI's virtual GPU times out on it).
 3. Scrub around and play: no black frames, no error banner over the viewer.
 4. Add a *Text+* title on a track above the clip and put NTSCRT on the title. *Transparency →
    Transparent areas*: **Clip to element** keeps the effect inside the letters; **Let effect spill**
