@@ -4,6 +4,7 @@
 #include <ntscrt/ntscrt.h>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -22,6 +23,7 @@ struct ntscrt_instance {
     std::unique_ptr<Downscaler> downscale;
     std::unique_ptr<GlitchStage> glitch;
     std::unique_ptr<CrtStage> crt;
+    std::unique_ptr<CrtStage> howl_crt;  // Screen Loop's own CRT chain (upstream HowlaroundFeedback)
     std::unique_ptr<Howlaround> howl;
     std::string last_error;
     std::string presets_cache;
@@ -63,7 +65,10 @@ ntscrt_status ntscrt_create(const ntscrt_create_info *info, ntscrt_instance **ou
         inst->downscale = std::make_unique<Downscaler>(*inst->dev);
         inst->glitch = std::make_unique<GlitchStage>(*inst->dev);
         inst->crt = std::make_unique<CrtStage>(*inst->dev, inst->resource_dir);
+        inst->howl_crt = std::make_unique<CrtStage>(*inst->dev, inst->resource_dir);
         inst->howl = std::make_unique<Howlaround>(*inst->dev);
+    } else if (inst->last_error.empty()) {
+        inst->last_error = std::string("GPU unavailable: ") + gpu::Device::last_create_error();
     }
     *out = inst.release();
     return NTSCRT_OK;
@@ -79,6 +84,7 @@ void ntscrt_flush_caches(ntscrt_instance *inst) {
     inst->digital.flush();
     if (inst->glitch) inst->glitch->flush();
     if (inst->crt) inst->crt->flush();
+    if (inst->howl_crt) inst->howl_crt->flush();
     if (inst->howl) inst->howl->flush();
 }
 
@@ -155,24 +161,73 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
         to_bgra8(*src, raw, &alpha);
         Crop::apply(look, raw, img);
 
-        if (inst->digital.active(look)) inst->digital.process(img, ctx);
-        if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
-
         if (!inst->dev) {
-            // Stub / no-GPU path: emit the CPU result (same size when crop is off).
+            // No GPU: CPU stages only (degraded, but never a black frame).
+            if (inst->digital.active(look)) inst->digital.process(img, ctx);
+            if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
             from_bgra8(img, &alpha, *dst);
             return NTSCRT_OK;
         }
         gpu::Device &dev = *inst->dev;
-        auto tex = dev.create_texture({img.width, img.height, gpu::Format::BGRA8, true, false});
-        dev.upload(*tex, img.px.data(), ptrdiff_t(img.width) * 4);
-        bool howl_on = inst->howl->active(args->feedback_json ? &feedback : nullptr);
-        if (howl_on) tex = inst->howl->camera(tex, feedback, ctx);
-        auto chain = inst->downscale->run(tex, ctx);
-        if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
+        const bool howl_on = inst->howl->active(args->feedback_json ? &feedback : nullptr);
+
+        // Upstream order (Mp4Exporter.exportStill / video path):
+        //   no Screen Loop:  crop -> Digital -> NTSC -> upload -> Downscale -> Glitch -> CRT
+        //   Screen Loop on:  crop -> upload -> camera -> download -> NTSC -> upload -> Downscale
+        //                    -> Glitch -> CRT; Digital is OFF whenever Screen Loop is on.
+        auto upload = [&](const ImageBGRA8 &im) {
+            auto t = dev.create_texture({im.width, im.height, gpu::Format::BGRA8, true, false});
+            dev.upload(*t, im.px.data(), ptrdiff_t(im.width) * 4);
+            return t;
+        };
+        auto download = [&](const gpu::Texture &t) {
+            ImageBGRA8 im;
+            im.resize(t.desc().width, t.desc().height);
+            dev.finish();
+            dev.download(t, im.px.data(), ptrdiff_t(im.width) * 4);
+            return im;
+        };
+
+        std::shared_ptr<gpu::Texture> chain;
+        if (howl_on) {
+            // Context whose stage counters (internal.h helpers) yield the pass's counters.
+            auto at = [&](int64_t counter_frame, const HowlPass &p) {
+                FrameContext c = ctx;
+                c.frame = counter_frame;
+                c.look = &ctx.look_at(p.frame);
+                return c;
+            };
+            HowlHooks h;
+            h.chain_input = [&](const std::shared_ptr<gpu::Texture> &cam, const HowlPass &p) {
+                ImageBGRA8 im = download(*cam);
+                FrameContext c = at(p.frame, p);
+                FrameContext cn = at(p.ntsc_frame - 1, p);  // ntsc_frame(cn) == p.ntsc_frame
+                if (inst->ntsc.active(*c.look)) inst->ntsc.process(im, cn);
+                auto ch = inst->downscale->run(upload(im), c);
+                FrameContext cg = c;
+                cg.frame = int64_t(std::llround(p.glitch_time * ctx.fps));  // glitch_time(cg)
+                if (inst->glitch->active(*c.look)) ch = inst->glitch->run(ch, cg);
+                return ch;
+            };
+            h.render_tv = [&](const gpu::Texture &ch, gpu::Texture &tv, const HowlPass &p) {
+                inst->howl_crt->render(ch, tv, at(p.shader_frame - 1, p));  // shader_frame == p.shader_frame
+            };
+            inst->howl->set_hooks(std::move(h));  // lambdas capture this call's locals: re-set every render
+
+            auto cam = inst->howl->camera(upload(img), feedback, ctx);
+            ImageBGRA8 im = download(*cam);
+            if (inst->ntsc.active(look)) inst->ntsc.process(im, ctx);
+            chain = inst->downscale->run(upload(im), ctx);
+            if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
+            inst->howl->after_frame(*chain, feedback, ctx);  // feeds the loop the chain input
+        } else {
+            if (inst->digital.active(look)) inst->digital.process(img, ctx);
+            if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
+            chain = inst->downscale->run(upload(img), ctx);
+            if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
+        }
         auto out = dev.create_texture({dst->width, dst->height, gpu::Format::BGRA8, true, true});
         inst->crt->render(*chain, *out, ctx);
-        if (howl_on) inst->howl->after_frame(*out, feedback, ctx);
         dev.finish();
         ImageBGRA8 result;
         result.resize(dst->width, dst->height);
