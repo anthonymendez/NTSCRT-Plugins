@@ -69,7 +69,7 @@ jobs:
         shell: bash
         run: |
           strict=""; [ -f ofx/CMakeLists.txt ] || strict="--allow-empty"
-          python scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-windows-x64.zip $strict --extra "ofx/Install NTSCRT.cmd" ofx/install-windows.ps1 README.md
+          python scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-windows-x64.zip $strict --extra "ofx/Install NTSCRT.cmd" install.ps1 README.md
 
       - uses: actions/upload-artifact@v4
         with:
@@ -130,7 +130,7 @@ jobs:
         run: |
           strict=""; [ -f ofx/CMakeLists.txt ] || strict="--allow-empty"
           find build -name '*.ofx' -type f -path '*.ofx.bundle/*' -exec sh -c 'echo "$1: $(lipo -archs "$1")"' _ {} \;
-          python3 scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-macos-universal.zip $strict --extra ofx/install-macos.sh README.md
+          python3 scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-macos-universal.zip $strict --extra install.sh README.md
 
       - uses: actions/upload-artifact@v4
         with:

@@ -54,11 +54,6 @@ Passing options to a one-liner:
 curl -fsSL https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.sh | sh -s -- --fcp
 ```
 
-> **While the repository is private** these URLs need GitHub access. Download `install.ps1` / `install.sh`
-> from the repo, sign in with the [GitHub CLI](https://cli.github.com) (`gh auth login`), and run the
-> script locally (`.\install.ps1` or `sh install.sh`). It then downloads the release through `gh`.
-> A `GITHUB_TOKEN` environment variable also works.
-
 <details><summary>Manual install from the zip (no scripts)</summary>
 
 Download from the repo's **Releases** page: `NTSCRT-OFX-windows-x64.zip`, `NTSCRT-OFX-macos-universal.zip`
@@ -91,7 +86,8 @@ or `NTSCRT-FxPlug-macos-universal.zip`.
 
 | Problem | Fix |
 |---|---|
-| Windows installer stops with "Resolve is still running" | Quit Resolve completely (check the system tray and Task Manager), then run it again. It never replaces the plugin while Resolve has it open. |
+| Installer says "Couldn't replace the installed plugin" | A file in the plugin is in use. Quit Resolve completely (check the system tray and Task Manager) and run it again. The installed version is left untouched. Installing with Resolve open normally works; the new version loads on the next restart. |
+| Folders named `NTSCRT.ofx.bundle.old-…` next to the plugin | The previous version, kept while Resolve still had it loaded. Resolve ignores them, and the next install or uninstall deletes them. |
 | Effect doesn't show up in Resolve | Restart Resolve fully. Check that the bundle is in the OFX folder above and that its whole folder was copied (`Contents\Win64\NTSCRT.ofx` on Windows, `Contents/MacOS/NTSCRT.ofx` on macOS). |
 | Resolve skips the plugin at startup | Resolve marks plugins that crashed as disabled. Re-enable it in *Preferences → Video Plugins* and send us the log. |
 | macOS: "NTSCRT.ofx is damaged / can't be verified" | Run the install line again: it clears the quarantine. For a manual copy, run the `xattr` command above. |

@@ -14,7 +14,7 @@
 # Default: installs for every app it finds (/Applications/DaVinci Resolve,
 # /Applications/Final Cut Pro.app), or for both if it finds neither.
 # Asks for your password once (sudo) to write /Library/OFX/Plugins and /Applications.
-# Private repo / no public release yet: falls back to `gh release download`
+# If the direct download fails it falls back to `gh release download`
 # (GitHub CLI, signed in) or the GITHUB_TOKEN environment variable.
 set -eu
 
@@ -47,6 +47,12 @@ done
 
 [ "$(uname -s)" = "Darwin" ] || die "this installer is for macOS; on Windows use install.ps1"
 
+# Run from an unzipped release (script file next to the plugin)? Install that copy.
+if [ -z "$FROM" ] && [ -f "$0" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  if [ -d "$here/NTSCRT.ofx.bundle" ] || [ -d "$here/NTSCRT.app" ]; then FROM="$here"; fi
+fi
+
 # Nothing chosen: pick by what's installed (both if neither is found).
 if [ -z "$WANT_RESOLVE$WANT_FCP" ]; then
   [ -d "/Applications/DaVinci Resolve" ] || [ -d "/Applications/DaVinci Resolve.app" ] && WANT_RESOLVE=1
@@ -60,7 +66,7 @@ SUDO=""
 if [ -n "$UNINSTALL" ]; then
   if [ -n "$WANT_RESOLVE" ]; then
     say "Removing $OFX_DEST/NTSCRT.ofx.bundle"
-    $SUDO rm -rf "$OFX_DEST/NTSCRT.ofx.bundle"
+    $SUDO rm -rf "$OFX_DEST/NTSCRT.ofx.bundle" "$OFX_DEST/.NTSCRT.ofx.bundle.new-"* "$OFX_DEST/.NTSCRT.ofx.bundle.old-"*
   fi
   if [ -n "$WANT_FCP" ]; then
     say "Removing $APP_DEST/NTSCRT.app and its effect template"
@@ -121,6 +127,40 @@ pick_from() {  # pick_from <name>: with --from, use it only if it contains <name
   unpack "$FROM" "$1" 2>/dev/null
 }
 
+# install_swap <source> <dest dir> <name>: atomic replace of <dest dir>/<name>.
+# The new copy is staged next to the old one (and de-quarantined / signed there),
+# then the two are swapped with mv, rolling back if the swap fails. A failed copy
+# never touches the installed version. The staging names (.<name>.new-PID /
+# .<name>.old-PID) don't end in .ofx.bundle / .app, so no host loads them.
+install_swap() {
+  src="$1"; dir="$2"; name="$3"
+  new="$dir/.$name.new-$$"; old="$dir/.$name.old-$$"
+  $SUDO mkdir -p "$dir"
+  $SUDO rm -rf "$dir/.$name.new-"* "$dir/.$name.old-"* 2>/dev/null || true   # leftovers of an interrupted run
+  if ! $SUDO ditto "$src" "$new"; then $SUDO rm -rf "$new"; die "copy to $dir failed; the installed version is untouched"; fi
+  $SUDO xattr -dr com.apple.quarantine "$new" 2>/dev/null || true
+  case "$name" in *.ofx.bundle) $SUDO codesign --force --deep --sign - "$new" 2>/dev/null || true ;; esac
+  if [ -e "$dir/$name" ] && ! $SUDO mv "$dir/$name" "$old"; then
+    $SUDO rm -rf "$new"; die "couldn't move the old $name aside; it is untouched"
+  fi
+  if ! $SUDO mv "$new" "$dir/$name"; then
+    [ -e "$old" ] && $SUDO mv "$old" "$dir/$name"   # roll back
+    $SUDO rm -rf "$new"; die "couldn't put the new $name in place; the previous version was restored"
+  fi
+  $SUDO rm -rf "$old"
+}
+
+# With --from, install only what the given zip/folder contains (never download).
+if [ -n "$FROM" ]; then
+  if [ -n "$WANT_RESOLVE" ] && ! (pick_from NTSCRT.ofx.bundle) >/dev/null 2>&1; then
+    say "No Resolve plugin in $FROM: skipping Resolve."; WANT_RESOLVE=""
+  fi
+  if [ -n "$WANT_FCP" ] && ! (pick_from NTSCRT.app) >/dev/null 2>&1; then
+    say "No Final Cut Pro app in $FROM: skipping Final Cut Pro."; WANT_FCP=""
+  fi
+  [ -n "$WANT_RESOLVE$WANT_FCP" ] || die "nothing to install from $FROM"
+fi
+
 if [ -n "$SUDO" ]; then
   say "Administrator password needed to install into $OFX_DEST / $APP_DEST"
   sudo -v || die "sudo failed"
@@ -129,23 +169,17 @@ fi
 if [ -n "$WANT_RESOLVE" ]; then
   bundle="$(pick_from NTSCRT.ofx.bundle || unpack "$(download "$OFX_ASSET")" NTSCRT.ofx.bundle)"
   [ -f "$bundle/Contents/MacOS/NTSCRT.ofx" ] || die "not a macOS NTSCRT bundle: $bundle"
-  pgrep -xq Resolve && say "DaVinci Resolve is running: restart it after this finishes."
+  if pgrep -xq Resolve; then say "DaVinci Resolve is running: the new version loads when you restart it."; fi
   say "Installing DaVinci Resolve plugin -> $OFX_DEST/NTSCRT.ofx.bundle"
-  $SUDO mkdir -p "$OFX_DEST"
-  $SUDO rm -rf "$OFX_DEST/NTSCRT.ofx.bundle"
-  $SUDO ditto "$bundle" "$OFX_DEST/NTSCRT.ofx.bundle"
-  $SUDO xattr -dr com.apple.quarantine "$OFX_DEST/NTSCRT.ofx.bundle" 2>/dev/null || true
-  $SUDO codesign --force --deep --sign - "$OFX_DEST/NTSCRT.ofx.bundle" 2>/dev/null || true
-  say "Resolve: restart it, then Effects > OpenFX > Filters > NTSCRT."
+  install_swap "$bundle" "$OFX_DEST" NTSCRT.ofx.bundle
+  say "Resolve: (re)start it, then Effects > OpenFX > Filters > NTSCRT."
 fi
 
 if [ -n "$WANT_FCP" ]; then
   app="$(pick_from NTSCRT.app || unpack "$(download "$FCP_ASSET")" NTSCRT.app)"
-  pgrep -xq "Final Cut Pro" && say "Final Cut Pro is running: restart it after this finishes."
+  if pgrep -xq "Final Cut Pro"; then say "Final Cut Pro is running: the new version loads when you restart it."; fi
   say "Installing Final Cut Pro plugin -> $APP_DEST/NTSCRT.app"
-  $SUDO rm -rf "$APP_DEST/NTSCRT.app"
-  $SUDO ditto "$app" "$APP_DEST/NTSCRT.app"
-  $SUDO xattr -dr com.apple.quarantine "$APP_DEST/NTSCRT.app" 2>/dev/null || true
+  install_swap "$app" "$APP_DEST" NTSCRT.app
   # Opening the app once registers the plug-in and installs the effect template; it quits by itself.
   say "Registering with Final Cut Pro (opens NTSCRT.app once)"
   open -g "$APP_DEST/NTSCRT.app" 2>/dev/null || open "$APP_DEST/NTSCRT.app" || true
