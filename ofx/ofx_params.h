@@ -39,6 +39,7 @@ struct ParamDef {
     std::string path;   // JSON pointer, without "fb:" prefix
     bool feedback = false;  // path was "fb:/..."
     bool animatable = true;
+    bool in_presets = true;  // schema "preset": false = presets never set or reset it
     std::optional<Cond> enabled_if, visible_if;
     int color_n = 3;
     bool color_hex = false;

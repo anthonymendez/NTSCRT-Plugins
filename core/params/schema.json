@@ -232,6 +232,11 @@
    "id": "screenloop.signal",
    "label": "Signal",
    "parent": "screenloop"
+  },
+  {
+   "id": "alpha",
+   "label": "Transparency",
+   "parent": null
   }
  ],
  "params": [
@@ -5427,6 +5432,27 @@
    "path": "fb:/seconds",
    "animatable": false,
    "enabled_if": "fb:/enabled"
+  },
+  {
+   "id": "alpha.mode",
+   "group": "alpha",
+   "label": "Transparent areas",
+   "hint": "For titles and clips that don't fill the frame. Clip to element: the effect stays inside the element's shape. Let effect spill: ghosting, smear and glow extend past the element and show as light over what's underneath (like a Screen blend). No difference on full-frame video.",
+   "type": "choice",
+   "default": "clip",
+   "options": [
+    {
+     "value": "clip",
+     "label": "Clip to element"
+    },
+    {
+     "value": "spill",
+     "label": "Let effect spill"
+    }
+   ],
+   "path": "/alpha/mode",
+   "animatable": false,
+   "preset": false
   }
  ],
  "digital_formats": [

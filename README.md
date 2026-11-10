@@ -79,6 +79,10 @@ or `NTSCRT-FxPlug-macos-universal.zip`.
   compatible with ntsc-rs presets.
 - Apply it to the clip at its **native resolution**. On a low-res clip in a high-res timeline, the analog artifacts get
   scaled up with the picture.
+- **Titles and clips that don't fill the frame**: *Transparency → Transparent areas* picks how the effect treats
+  the empty parts. **Clip to element** (default) keeps the effect inside the element's shape with clean
+  edges. **Let effect spill** lets ghosting, smear and glow extend past it, shown as light over the video
+  underneath (like a Screen blend). Presets don't change this setting.
 - Screen Loop and the Digital-video codec depend on earlier frames, so the first render after jumping far
   into a clip can take a moment.
 

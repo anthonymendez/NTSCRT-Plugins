@@ -97,3 +97,9 @@ migrated). NTSCRT-Plugins extensions, all optional:
 - 2026-11-10, agent D, `cmake/Shaders.cmake`: signature unchanged (`ntscrt_add_shaders(<target> <file.slang>...)`).
   Kernel names are `"<file stem>/<entry point>"`; every `[shader("compute")]` function is an entry point;
   stems must be unique per target.
+
+- 2026-11-10, coordinator, `ntscrt.h` + docs/params.md: alpha handling. `ntscrt_render_args` gains
+  `source_premultiplied` (appended; zero-initialised args = straight alpha, the old behaviour for opaque
+  sources). Look gains `"alpha": {"mode": "clip"|"spill"}` (schema `alpha.mode`, `"preset": false`, a new
+  optional schema field hosts honour when applying presets). OFX sets output premultiplication = source's;
+  FxPlug passes premultiplied. `facade/alpha_merge` params gained `mode`, `premult` (32-byte cbuffer).

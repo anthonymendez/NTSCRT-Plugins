@@ -12,6 +12,7 @@ The host passes the upstream NTSCRT **look preset format** (see `presets/*.json`
   "glitch":    {"enabled": true, "values": {"<GlitchParam id>": 0.0}},     // toggles stored as 0/1 numbers
   "digital":   {"enabled": false, "values": {"<DigitalParam id>": 0.0}},   // choices stored as index numbers
   "crop":      {"enabled": false, "ratio": "1:1", "x": 0.5, "y": 0.5, "scale": 1.0},
+  "alpha":     {"mode": "clip"},   // NTSCRT-Plugins addition: "clip" | "spill" (see below)
   "timeline":  { /* ignored: hosts keyframe instead */ },
   "view":      { /* ignored */ }
 }
@@ -35,6 +36,18 @@ centered), `scale` 1…8 (zoom inside the largest crop). Legacy `position` sets 
 object only when the crop is on, so **a crop object without `enabled` counts as on**; hosts write `enabled`
 explicitly. The Wave-0 spellings `aspect` / `center` / `zoom` are still accepted. Output = the cropped region
 at source pixel density (SourceCrop.swift geometry, even sizes).
+
+**alpha.mode** (no upstream equivalent; matters only for sources with transparency, e.g. titles):
+- `"clip"` (default): the chain sees the element's own colours (unpremultiplied; fully transparent areas are
+  filled with the nearest edge colour so blurs and smears don't pull black into the edges). Output alpha =
+  source alpha.
+- `"spill"`: the chain sees the element over black. Output alpha = max(source alpha, brightest output
+  channel): ghosts, smear, glow and noise outside the element show as light over what's underneath, like a
+  Screen blend of the element-over-black render.
+The host says whether its RGB is premultiplied (`ntscrt_render_args.source_premultiplied`) and must keep
+the output's convention equal to the source's. With crop on, source alpha no longer lines up with the
+picture: Clip outputs opaque, Spill uses the brightness term only. CRT curvature / Screen Loop geometry
+moves the picture but not the source alpha, so Clip cuts the warped picture at the unwarped shape.
 
 ## Param schema (`core/params/schema.json`, returned by `ntscrt_param_schema_json()`)
 Drives both host UIs. Hosts create one host param per entry, then build the look JSON by
@@ -76,7 +89,8 @@ choices write the option's `value`, which may be a string or a number). Also wri
 top-level `"constants"` map (`/version`, `/ntsc/settings/version`, `fb:/kind`, `fb:/version`). Params
 whose `visible_if` is false are **not** written: CRT presets share `/shader/params/<NAME>` keys
 (e.g. both glow presets have `BOOST`), so only the selected preset's params go into the look.
-`enabled_if` is UI-only (grey out); still write the value.
+`enabled_if` is UI-only (grey out); still write the value. `"preset": false` = applying or loading a
+preset leaves that param alone (presets describe a look, not how the clip's transparency is used).
 
 Optional fields (hosts may ignore them):
 `unit` (display suffix), `percent` (display value×100 as %), `scale: "log"` (slider mapping),

@@ -128,6 +128,7 @@ Model Model::from_schema(const json &schema, const json &id_map, std::vector<std
         P.feedback = fb;
         P.pointer = ptr;
         P.animatable = q.value("animatable", P.kind == Kind::Float || P.kind == Kind::Int || P.kind == Kind::Color);
+        P.in_presets = q.value("preset", true);
         if (q.contains("enabled_if") && q["enabled_if"].is_string()) P.enabled_if = q["enabled_if"];
         if (q.contains("visible_if") && q["visible_if"].is_object()) {
             P.visible_path = q["visible_if"].value("path", "");
@@ -296,7 +297,7 @@ std::optional<json> Model::build_feedback(bool on, const json &base, const std::
 std::map<uint32_t, json> Model::host_values_from_preset(const json &preset, bool feedback) const {
     std::map<uint32_t, json> out;
     for (const auto &p : params) {
-        if (p.feedback != feedback) continue;
+        if (p.feedback != feedback || !p.in_presets) continue;
         json v = value_at(preset, p.pointer);
         std::optional<json> h = v.is_null() ? std::nullopt : to_host_value(p, v);
         out[p.host_id] = h ? *h : default_host_value(p);

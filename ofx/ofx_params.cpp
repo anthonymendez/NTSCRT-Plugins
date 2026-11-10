@@ -115,6 +115,7 @@ Schema Schema::parse(const char *schema_json) {
         p.has_dmax = num(pj, "display_max", p.dmax);
         p.has_step = num(pj, "step", p.step);
         p.animatable = pj.value("animatable", true);
+        p.in_presets = pj.value("preset", true);
         if (pj.contains("enabled_if")) p.enabled_if = parse_cond(pj["enabled_if"]);
         if (pj.contains("visible_if")) p.visible_if = parse_cond(pj["visible_if"]);
         if (p.type == PType::Choice) {
@@ -272,7 +273,7 @@ void build_look(const Schema &s, const ValueFn &value, json &look, json &feedbac
 }
 
 std::optional<json> preset_value(const ParamDef &p, const json &preset, bool feedback_preset) {
-    if (p.feedback != feedback_preset) return std::nullopt;
+    if (p.feedback != feedback_preset || !p.in_presets) return std::nullopt;
     if (auto v = lookup(preset, p.path)) {
         if (auto c = coerce(p, *v)) return c;
     }

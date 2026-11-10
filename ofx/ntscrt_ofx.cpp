@@ -155,6 +155,8 @@ public:
 
     void getClipPreferences(OFX::ClipPreferencesSetter &prefs) override {
         prefs.setOutputFrameVarying(true);  // temporal stages: output differs per frame
+        // Output keeps the source's alpha convention (the core writes it that way).
+        prefs.setOutputPremultiplication(src_->getPreMultiplication());
     }
 
     void purgeCaches() override {
@@ -408,6 +410,7 @@ void NtscrtEffect::render(const OFX::RenderArguments &args) {
     ra.release_source = &RenderCtx::release;
     ra.look_at = &RenderCtx::look_at;
     ra.user = &ctx;
+    ra.source_premultiplied = src_->getPreMultiplication() == OFX::eImagePreMultiplied ? 1 : 0;
 
     std::lock_guard<std::mutex> lk(mu_);
     if (!inst_) {

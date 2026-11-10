@@ -256,7 +256,7 @@ class Schema:
         self._ids.add(p["id"])
         order = ["id", "group", "label", "hint", "type", "default", "min", "max", "display_min",
                  "display_max", "step", "unit", "percent", "scale", "encode", "options", "path",
-                 "animatable", "enabled_if", "visible_if"]
+                 "animatable", "enabled_if", "visible_if", "preset"]
         out = {k: p[k] for k in order if k in p and p[k] is not None}
         for k in p:
             if k not in out and p[k] is not None:
@@ -565,6 +565,20 @@ def gen_digital(S: Schema, up: Path, schema_extra: dict):
     return count, len(fl)
 
 
+def gen_alpha(S: Schema):
+    """NTSCRT-Plugins addition (no upstream equivalent): how the effect uses the
+    clip's transparency. "preset": False = presets never set or reset it."""
+    S.group("alpha", "Transparency")
+    S.param(id="alpha.mode", group="alpha", label="Transparent areas",
+            hint="For titles and clips that don't fill the frame. Clip to element: the effect stays inside "
+                 "the element's shape. Let effect spill: ghosting, smear and glow extend past the element "
+                 "and show as light over what's underneath (like a Screen blend). No difference on full-frame video.",
+            type="choice", default="clip",
+            options=[{"value": "clip", "label": "Clip to element"},
+                     {"value": "spill", "label": "Let effect spill"}],
+            path="/alpha/mode", animatable=False, preset=False)
+
+
 def gen_screenloop(S: Schema, up: Path):
     t = read(up / "Sources/CrtCore/Howlaround.swift")
     group_labels = dict(re.findall(r'case\s+(\w+)\s*=\s*"([^"]+)"', t[t.index("enum Group"):t.index("enum Kind")]))
@@ -778,6 +792,7 @@ def main():
         n_glitch = gen_glitch(S, up)
         crt = gen_crt(S, up, src)
         n_fb = gen_screenloop(S, up)
+        gen_alpha(S)  # appended last: keeps existing UI / host param order
     finally:
         src.close()
 

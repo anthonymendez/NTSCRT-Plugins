@@ -344,7 +344,9 @@
     "screenloop.key_invert": 440,
     "screenloop.delay": 441,
     "screenloop.counter": 442,
-    "screenloop.seconds": 443
+    "screenloop.seconds": 443,
+    "group:alpha": 444,
+    "alpha.mode": 445
   },
   "retired": [],
   "note": "APPEND-ONLY. FxPlug parameter IDs saved in FCP/Motion projects. Never edit or reuse an id; regenerate with fxplug/tools/update_param_ids.py."

@@ -61,8 +61,8 @@ typedef enum ntscrt_pixel_format {
 /* CPU image. `data` points at the first byte of the TOP row. Bottom-up hosts
  * (OpenFX) pass a pointer to their last row and a negative row_bytes.
  * Float/16-bit inputs are converted to the pipeline's internal 8-bit BGRA at
- * the boundary (clamped, no transfer-function change); alpha passes through
- * unchanged from the source. */
+ * the boundary (clamped, no transfer-function change). Alpha: see the look's
+ * "alpha" mode and ntscrt_render_args.source_premultiplied. */
 typedef struct ntscrt_image {
     int32_t width;
     int32_t height;
@@ -124,6 +124,13 @@ typedef struct ntscrt_render_args {
     ntscrt_release_source_fn release_source; /* required if fetch_source set */
     ntscrt_look_at_fn look_at;               /* may be NULL */
     void *user;
+
+    /* Alpha convention of the source images AND the destination (hosts keep
+     * the output's premultiplication equal to the source's): 1 = RGB is
+     * premultiplied by alpha, 0 = straight. Irrelevant for opaque sources.
+     * How alpha is used comes from the look's "alpha": {"mode": "clip"|"spill"}
+     * (docs/params.md). */
+    int32_t source_premultiplied;
 } ntscrt_render_args;
 
 /* ---- API ---------------------------------------------------------------- */
@@ -154,8 +161,8 @@ NTSCRT_API ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst,
  * core reads it back on its own command buffers for the CPU stages). The
  * final write into dst is encoded on `command_buffer` (id<MTLCommandBuffer>,
  * the host commits it) if non-NULL, else on the instance's queue and waited
- * on. dst need not be shader-writable (a blit is used then). Output alpha =
- * src alpha when sizes match, else 1. */
+ * on. dst need not be shader-writable (a blit is used then). Output alpha
+ * follows the look's alpha mode (see ntscrt_render_args.source_premultiplied). */
 NTSCRT_API ntscrt_status ntscrt_render_metal(ntscrt_instance *inst,
                                              const ntscrt_render_args *args,
                                              void *src_texture,

@@ -56,6 +56,7 @@ struct Param {
     double min = 0, max = 1, slider_min = 0, slider_max = 1, step = 0.01;
     std::vector<Option> options;
     bool animatable = true;
+    bool in_presets = true;  // schema "preset": false = presets never set or reset it
     bool feedback = false;   // path was "fb:/..." -> writes into feedback_json
     std::string pointer;     // RFC 6901 pointer (without "fb:")
     std::string enabled_if;  // pointer; may start with "fb:"

@@ -118,12 +118,14 @@ const char *ntscrt_bundled_presets_json(ntscrt_instance *inst) {
 
 namespace {
 // Shared frame renderer behind ntscrt_render_cpu and ntscrt_render_metal.
-// get_src: fill `raw` (BGRA8, opaque) and `alpha` (source alpha per pixel).
+// get_src: fill `raw` (BGRA8, opaque, prepared for `mode`: to_bgra8) and
+//          `alpha` (source alpha per pixel).
 // emit:    deliver the result: `out_gpu` (BGRA8, out_w x out_h) when a GPU
 //          device exists, else `cpu_img` (CPU stages only, crop-sized).
-using SourceFn = std::function<void(ImageBGRA8 &raw, std::vector<float> &alpha)>;
+//          `alpha` is NULL when it doesn't line up with the result (crop on).
+using SourceFn = std::function<void(ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode)>;
 using EmitFn = std::function<void(const std::shared_ptr<gpu::Texture> &out_gpu, const ImageBGRA8 &cpu_img,
-                                  const ImageBGRA8 &raw, const std::vector<float> &alpha)>;
+                                  const ImageBGRA8 &raw, const std::vector<float> *alpha, AlphaMode mode)>;
 
 ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args, int out_w, int out_h,
                           const SourceFn &get_src, const EmitFn &emit) {
@@ -134,6 +136,8 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
         feedback = json::parse(args->feedback_json, nullptr, false);
         if (feedback.is_discarded()) return fail(inst, NTSCRT_ERR_BAD_PARAMS, "feedback_json is not valid JSON");
     }
+    const AlphaMode mode = alpha_mode(look);
+    const bool premult = args->source_premultiplied != 0;
     try {
         std::map<int64_t, json> look_hist;
         FrameContext ctx;
@@ -158,7 +162,7 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
             const ntscrt_image *im = args->fetch_source(args->user, f);
             if (!im) return nullptr;
             ImageBGRA8 raw, cropped;
-            to_bgra8(*im, raw, nullptr);
+            to_bgra8(*im, raw, nullptr, mode, premult);
             if (args->release_source) args->release_source(args->user, im);
             Crop::apply(ctx.look_at(f), raw, cropped);
             auto p = std::make_shared<const ImageBGRA8>(std::move(cropped));
@@ -169,14 +173,16 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
 
         std::vector<float> alpha;
         ImageBGRA8 raw, img;
-        get_src(raw, alpha);
+        get_src(raw, alpha, mode);
         Crop::apply(look, raw, img);
+        const std::vector<float> *aligned_alpha =
+            img.width == raw.width && img.height == raw.height ? &alpha : nullptr;
 
         if (!inst->dev) {
             // No GPU: CPU stages only (degraded, but never a black frame).
             if (inst->digital.active(look)) inst->digital.process(img, ctx);
             if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
-            emit(nullptr, img, raw, alpha);
+            emit(nullptr, img, raw, aligned_alpha, mode);
             return NTSCRT_OK;
         }
         gpu::Device &dev = *inst->dev;
@@ -240,7 +246,7 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
         auto out = dev.create_texture({out_w, out_h, gpu::Format::BGRA8, true, true});
         inst->crt->render(*chain, *out, ctx);
         dev.finish();
-        emit(out, img, raw, alpha);
+        emit(out, img, raw, aligned_alpha, mode);
         return NTSCRT_OK;
     } catch (const std::exception &e) {
         return fail(inst, NTSCRT_ERR_INTERNAL, e.what());
@@ -254,20 +260,23 @@ extern "C" {
 ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args *args, const ntscrt_image *src,
                                 ntscrt_image *dst) {
     if (!inst || !args || !src || !dst || !src->data || !dst->data) return NTSCRT_ERR_INVALID_ARG;
+    const bool premult = args->source_premultiplied != 0;
     return render_impl(
         inst, args, dst->width, dst->height,
-        [&](ImageBGRA8 &raw, std::vector<float> &alpha) { to_bgra8(*src, raw, &alpha); },
+        [&](ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode) {
+            to_bgra8(*src, raw, &alpha, mode, premult);
+        },
         [&](const std::shared_ptr<gpu::Texture> &out, const ImageBGRA8 &cpu_img, const ImageBGRA8 &raw,
-            const std::vector<float> &alpha) {
+            const std::vector<float> *alpha, AlphaMode mode) {
             if (!out) {
-                from_bgra8(cpu_img, &alpha, *dst);
+                from_bgra8(cpu_img, alpha, *dst, mode, premult);
                 return;
             }
             ImageBGRA8 result;
             result.resize(dst->width, dst->height);
             inst->dev->download(*out, result.px.data(), ptrdiff_t(dst->width) * 4);
             bool same = result.width == raw.width && result.height == raw.height;
-            from_bgra8(result, same ? &alpha : nullptr, *dst);
+            from_bgra8(result, same ? alpha : nullptr, *dst, mode, premult);
         });
 }
 
@@ -292,7 +301,8 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
     const int sw = src->desc().width, sh = src->desc().height;
     const int dw = dst->desc().width, dh = dst->desc().height;
 
-    auto get_src = [&](ImageBGRA8 &raw, std::vector<float> &alpha) {
+    const bool premult = args->source_premultiplied != 0;
+    auto get_src = [&](ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode) {
         // Normalise any host format to RGBA32F on the GPU, read back once.
         auto f32 = dev.create_texture({sw, sh, gpu::Format::RGBA32F, true, false});
         dev.copy(*src, *f32);
@@ -300,13 +310,15 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         dev.finish();
         dev.download(*f32, px.data(), ptrdiff_t(sw) * 16);
         ntscrt_image im{sw, sh, ptrdiff_t(sw) * 16, NTSCRT_RGBA32F, px.data()};
-        to_bgra8(im, raw, &alpha);
+        to_bgra8(im, raw, &alpha, mode, premult);
     };
     auto emit = [&](const std::shared_ptr<gpu::Texture> &out, const ImageBGRA8 &, const ImageBGRA8 &raw,
-                    const std::vector<float> &) {
+                    const std::vector<float> *alpha, AlphaMode mode) {
         // render_impl only calls emit with a texture here (the device exists).
-        struct { uint32_t w, h, use_alpha, pad; } p{uint32_t(dw), uint32_t(dh),
-                                                     uint32_t(sw == dw && sh == dh && raw.width == sw), 0};
+        // Layout matches facade.slang MergeParams.
+        struct { uint32_t w, h, use_alpha, mode, premult, pad[3]; } p{
+            uint32_t(dw), uint32_t(dh), uint32_t(alpha && sw == dw && sh == dh && raw.width == sw),
+            uint32_t(mode == AlphaMode::Spill), uint32_t(premult), {0, 0, 0}};
         auto merge = [&](gpu::Texture &target) {
             gpu::Bindings b;
             b.constants = &p;

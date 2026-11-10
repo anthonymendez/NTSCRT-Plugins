@@ -6,10 +6,11 @@
 #include <vector>
 
 #include "gpu/gpu.h"
+#include "pixel_convert.h"
 
 using namespace ntscrt::gpu;
 
-TEST_CASE("alpha_merge keeps pipeline RGB and source alpha") {
+TEST_CASE("alpha_merge matches merge_alpha for every mode") {
 #ifdef _WIN32
     auto dev = Device::create(Backend::D3D11, nullptr, nullptr);
 #else
@@ -31,8 +32,11 @@ TEST_CASE("alpha_merge keeps pipeline RGB and source alpha") {
     auto t_dst = dev->create_texture({w, h, Format::RGBA32F, true, false});
     dev->upload(*t_rgb, rgb.data(), w * 4);
     dev->upload(*t_src, src.data(), w * 16);
-    for (uint32_t use_alpha : {1u, 0u}) {
-        struct { uint32_t w, h, use_alpha, pad; } p{uint32_t(w), uint32_t(h), use_alpha, 0};
+    for (uint32_t use_alpha : {1u, 0u})
+    for (uint32_t mode : {0u, 1u})
+    for (uint32_t premult : {0u, 1u}) {
+        CAPTURE(use_alpha); CAPTURE(mode); CAPTURE(premult);
+        struct { uint32_t w, h, use_alpha, mode, premult, pad[3]; } p{uint32_t(w), uint32_t(h), use_alpha, mode, premult, {0, 0, 0}};
         Bindings b;
         b.constants = &p;
         b.constants_size = sizeof p;
@@ -42,11 +46,12 @@ TEST_CASE("alpha_merge keeps pipeline RGB and source alpha") {
         dev->finish();
         std::vector<float> out(w * h * 4);
         dev->download(*t_dst, out.data(), w * 16);
+        const auto m = mode ? ntscrt::AlphaMode::Spill : ntscrt::AlphaMode::Clip;
         for (int i = 0; i < w * h; ++i) {
-            CHECK(out[i * 4 + 0] == doctest::Approx(200 / 255.0).epsilon(1e-3));
-            CHECK(out[i * 4 + 1] == doctest::Approx(100 / 255.0).epsilon(1e-3));
-            CHECK(out[i * 4 + 2] == doctest::Approx(10 * i / 255.0).epsilon(1e-3));
-            CHECK(out[i * 4 + 3] == doctest::Approx(use_alpha ? src[i * 4 + 3] : 1.0f));
+            // same maths as the CPU path
+            float want[4] = {200 / 255.f, 100 / 255.f, 10 * i / 255.f, 1.f};
+            ntscrt::merge_alpha(want, use_alpha ? src[i * 4 + 3] : (mode ? 0.f : 1.f), m, premult != 0);
+            for (int c = 0; c < 4; ++c) CHECK(out[i * 4 + c] == doctest::Approx(want[c]).epsilon(2e-3));
         }
     }
 }

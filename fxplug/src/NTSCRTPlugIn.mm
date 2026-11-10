@@ -664,6 +664,7 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
     ra.fetch_source = FetchSource;
     ra.release_source = ReleaseSource;
     ra.look_at = LookAt;
+    ra.source_premultiplied = 1;  // FxPlug / Motion images carry premultiplied alpha
     ra.user = &ctx;
 
     const bool src_up = BottomUp(src), dst_up = BottomUp(destinationImage);
