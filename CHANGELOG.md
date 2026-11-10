@@ -18,6 +18,10 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 First public release. (0.1 and 0.2 were internal milestones and were never tagged.)
 
+**This release contains the DaVinci Resolve plug-in for Windows and macOS.** The Final Cut Pro plug-in is
+in the source but not in this release: CI builds it only when Apple's FxPlug SDK is available to it.
+The macOS installer skips Final Cut Pro until a release includes it.
+
 ### Added
 - DaVinci Resolve 21.1.2+ OpenFX plug-in (Windows x64 with Direct3D 11, macOS universal with Metal) and
   Final Cut Pro 12.4+ FxPlug 4 plug-in (macOS universal), sharing one C++ core ported from the NTSCRT app:

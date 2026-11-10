@@ -20,7 +20,7 @@ set -eu
 
 REPO="${NTSCRT_REPO:-anthonymendez/NTSCRT-Plugins}"
 VERSION="latest"
-WANT_RESOLVE=""; WANT_FCP=""; UNINSTALL=""; FROM=""
+WANT_RESOLVE=""; WANT_FCP=""; FCP_EXPLICIT=""; UNINSTALL=""; FROM=""
 OFX_ASSET="NTSCRT-OFX-macos-universal.zip"
 FCP_ASSET="NTSCRT-FxPlug-macos-universal.zip"
 OFX_DEST="/Library/OFX/Plugins"
@@ -33,8 +33,8 @@ die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --resolve) WANT_RESOLVE=1 ;;
-    --fcp|--finalcut) WANT_FCP=1 ;;
-    --all) WANT_RESOLVE=1; WANT_FCP=1 ;;
+    --fcp|--finalcut) WANT_FCP=1; FCP_EXPLICIT=1 ;;
+    --all) WANT_RESOLVE=1; WANT_FCP=1; FCP_EXPLICIT=1 ;;
     --version) shift; VERSION="${1:?--version needs a tag}" ;;
     --from) shift; FROM="${1:?--from needs a path}" ;;
     --repo) shift; REPO="${1:?--repo needs owner/name}" ;;
@@ -205,8 +205,21 @@ if [ -n "$WANT_RESOLVE" ]; then
   say "Resolve: (re)start it, then Effects > OpenFX > Filters > NTSCRT."
 fi
 
+if [ -n "$WANT_FCP" ] && [ -z "$FROM" ]; then
+  # A release can come without the Final Cut plug-in (it's built only when the FxPlug SDK is
+  # available to CI). Found Final Cut by itself? Then skip it instead of failing the whole install.
+  if fcp_zip="$(download "$FCP_ASSET" 2>/dev/null)"; then
+    :
+  elif [ -n "$FCP_EXPLICIT" ]; then
+    die "this release ($VERSION) has no Final Cut Pro plug-in ($FCP_ASSET)"
+  else
+    say "This release ($VERSION) has no Final Cut Pro plug-in yet: skipping Final Cut Pro."
+    WANT_FCP=""
+  fi
+fi
+
 if [ -n "$WANT_FCP" ]; then
-  app="$(pick_from NTSCRT.app || unpack "$(download "$FCP_ASSET")" NTSCRT.app)"
+  app="$(pick_from NTSCRT.app || unpack "$fcp_zip" NTSCRT.app)"
   if pgrep -xq "Final Cut Pro"; then say "Final Cut Pro is running: the new version loads when you restart it."; fi
   new_v="$(bundle_version "$app")"; old_v="$(bundle_version "$APP_DEST/NTSCRT.app")"
   say "Installing Final Cut Pro plugin $new_v${old_v:+ (replacing $old_v)} -> $APP_DEST/NTSCRT.app"
