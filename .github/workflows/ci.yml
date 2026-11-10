@@ -1,0 +1,238 @@
+# Build + test the core, tools and plug-ins on Windows (MSVC) and macOS (universal),
+# package the OpenFX bundles, and build the Final Cut Pro FxPlug plug-in when the
+# FXPLUG_SDK_URL secret is configured (see fxplug/README.md).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  windows:
+    name: windows (MSVC, Release)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # top-level submodules only (vendor/*, upstream/NTSCRT); upstream's own nested
+          # submodules are only needed by the golden workflow
+          submodules: true
+
+      - name: Rust stable (x86_64-pc-windows-msvc)
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+          rustc --version && cargo --version
+
+      - name: Cache cargo + FetchContent
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            build/_deps
+          key: win-deps-${{ hashFiles('cmake/*.cmake', '**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: win-deps-
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release -- -m
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Check FxPlug parameter IDs cover the schema
+        continue-on-error: true
+        run: python fxplug/tools/update_param_ids.py --check
+
+      - name: Package OFX bundle
+        shell: bash
+        run: |
+          strict=""; [ -f ofx/CMakeLists.txt ] || strict="--allow-empty"
+          python scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-windows-x64.zip $strict
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NTSCRT-OFX-windows-x64
+          path: dist/*.zip
+          if-no-files-found: warn
+
+      - name: Upload golden mismatches
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-mismatch-windows
+          path: build/tests/golden/golden-out
+          if-no-files-found: ignore
+
+  macos:
+    name: macos (universal, Release)
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Metal available?
+        run: xcrun swift scripts/ci/metal_check.swift
+
+      - name: Rust stable (aarch64 + x86_64)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustc --version && cargo --version
+
+      - name: Cache cargo + FetchContent
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            build/_deps
+          key: mac-deps-${{ hashFiles('cmake/*.cmake', '**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: mac-deps-
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build --parallel "$(sysctl -n hw.ncpu)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package OFX bundle (universal)
+        run: |
+          strict=""; [ -f ofx/CMakeLists.txt ] || strict="--allow-empty"
+          find build -name '*.ofx' -type f -path '*.ofx.bundle/*' -exec sh -c 'echo "$1: $(lipo -archs "$1")"' _ {} \;
+          python3 scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-macos-universal.zip $strict
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NTSCRT-OFX-macos-universal
+          path: dist/*.zip
+          if-no-files-found: warn
+
+      - name: Upload golden mismatches
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-mismatch-macos
+          path: build/tests/golden/golden-out
+          if-no-files-found: ignore
+
+  fxplug:
+    name: fxplug (Final Cut Pro, universal)
+    needs: macos
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      # Secrets can't be used in job-level `if:`; expose it to steps instead.
+      FXPLUG_SDK_URL: ${{ secrets.FXPLUG_SDK_URL }}
+      FXPLUG_SDK_SHA256: ${{ secrets.FXPLUG_SDK_SHA256 }}
+    steps:
+      - name: FxPlug SDK configured?
+        id: sdk
+        run: |
+          if [ -n "$FXPLUG_SDK_URL" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=FxPlug skipped::Repository secret FXPLUG_SDK_URL is not set, so the Final Cut Pro plug-in was not built. See fxplug/README.md (CI section) to enable it."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.sdk.outputs.available == 'true'
+        with:
+          submodules: true
+
+      - name: Install FxPlug SDK
+        if: steps.sdk.outputs.available == 'true'
+        run: bash scripts/ci/install_fxplug_sdk.sh
+
+      - name: Rust stable (aarch64 + x86_64)
+        if: steps.sdk.outputs.available == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache cargo + FetchContent
+        if: steps.sdk.outputs.available == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            build/_deps
+          key: mac-deps-${{ hashFiles('cmake/*.cmake', '**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: mac-deps-
+
+      - name: Configure
+        if: steps.sdk.outputs.available == 'true'
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          -DNTSCRT_BUILD_FXPLUG=ON -DNTSCRT_BUILD_TESTS=OFF
+          -DNTSCRT_FXPLUG_SDK_DIR=/Library/Developer
+
+      - name: Build FxPlug bundle
+        if: steps.sdk.outputs.available == 'true'
+        run: |
+          grep -q 'NTSCRT_FXPLUG_FRAMEWORK_DIR:PATH=.*Frameworks' build/CMakeCache.txt || {
+            echo "::error::CMake did not find FxPlug.framework (see configure log)"; exit 1; }
+          cmake --build build --target ntscrt_fxplug --parallel "$(sysctl -n hw.ncpu)"
+
+      - name: Verify bundle
+        if: steps.sdk.outputs.available == 'true'
+        run: |
+          app=build/fxplug/dist/NTSCRT.app
+          pk="$app/Contents/PlugIns/NTSCRT Renderer.pluginkit"
+          plutil -lint "$app/Contents/Info.plist" "$pk/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$pk/Contents/Info.plist")" = 'XPC!'
+          test -f "$app/Contents/Resources/Motion Templates/NTSCRT/NTSCRT.moef"
+          xmllint --noout "$app/Contents/Resources/Motion Templates/NTSCRT/NTSCRT.moef"
+          archs="$(lipo -archs "$pk/Contents/MacOS/NTSCRTRenderer")"; echo "renderer: $archs"
+          case "$archs" in *arm64*x86_64*|*x86_64*arm64*) ;; *) echo "::error::renderer is not universal ($archs)"; exit 1;; esac
+          otool -L "$pk/Contents/MacOS/NTSCRTRenderer"
+          otool -l "$pk/Contents/MacOS/NTSCRTRenderer" | grep -A2 LC_RPATH
+          for fw in FxPlug PluginManager; do test -d "$pk/Contents/Frameworks/$fw.framework"; done
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --entitlements - "$pk"
+
+      - name: Zip
+        if: steps.sdk.outputs.available == 'true'
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent build/fxplug/dist/NTSCRT.app dist/NTSCRT-FxPlug-macos-universal.zip
+
+      - uses: actions/upload-artifact@v4
+        if: steps.sdk.outputs.available == 'true'
+        with:
+          name: NTSCRT-FxPlug-macos-universal
+          path: dist/NTSCRT-FxPlug-macos-universal.zip

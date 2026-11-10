@@ -1,0 +1,140 @@
+# Golden reference renders from UPSTREAM NTSCRT (the macOS app this repo ports).
+#
+# Builds upstream's crt-smoke exactly as its DEVELOPMENT.md describes
+# (librashader pinned to 76462c03 built with `cargo --features stable`, the
+# slang-shaders + ntsc-rs submodules, scripts/build-ntscrs.sh), renders every
+# entry of tests/golden/manifest.json and uploads the PNG + JSON sidecars as
+# the "golden-refs" artifact. Commit its contents to tests/golden/ref/; then
+# test_golden compares ntscrt_core against them on every CI run.
+#
+# Run it from the Actions tab ("golden" -> Run workflow) or by changing the
+# manifest. Needs a working Metal device (checked first, fails loudly).
+name: golden
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Render only this manifest entry id (blank = all)"
+        required: false
+        default: ""
+  push:
+    paths:
+      - tests/golden/manifest.json
+      - scripts/ci/render_golden.py
+      - .github/workflows/golden.yml
+  pull_request:
+    paths:
+      - tests/golden/manifest.json
+      - scripts/ci/render_golden.py
+      - .github/workflows/golden.yml
+
+permissions:
+  contents: read
+
+env:
+  LIBRASHADER_COMMIT: 76462c03
+  CARGO_TERM_COLOR: always
+
+jobs:
+  references:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Upstream submodules (ntsc-rs, slang-shaders)
+        run: |
+          git -C upstream/NTSCRT submodule update --init --recursive --depth 1 Vendor/ntsc-rs Vendor/slang-shaders
+          echo "UPSTREAM_SHA=$(git -C upstream/NTSCRT rev-parse HEAD)" >> "$GITHUB_ENV"
+          git -C upstream/NTSCRT log -1 --oneline
+
+      - name: Metal available?
+        run: xcrun swift scripts/ci/metal_check.swift
+
+      - name: Rust stable (aarch64 + x86_64, rustup like upstream expects)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add --toolchain stable aarch64-apple-darwin x86_64-apple-darwin
+          rustc --version
+
+      - name: Cache cargo, librashader build, SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ runner.temp }}/librashader-src
+            upstream/NTSCRT/Vendor/ntscrs-capi/target
+            upstream/NTSCRT/.build
+          key: golden-${{ env.LIBRASHADER_COMMIT }}-${{ env.UPSTREAM_SHA }}
+
+      - name: Build librashader ${{ env.LIBRASHADER_COMMIT }} (universal, --features stable)
+        run: |
+          src="$RUNNER_TEMP/librashader-src"
+          if [ ! -d "$src/.git" ]; then
+            git clone https://github.com/SnowflakePowered/librashader.git "$src"
+          fi
+          git -C "$src" fetch --quiet origin || true
+          git -C "$src" checkout --quiet "$LIBRASHADER_COMMIT"
+          TC="$(rustup run stable rustc --print sysroot)"
+          (cd "$src" && RUSTC="$TC/bin/rustc" "$TC/bin/cargo" build --release -p librashader-capi --features stable --target aarch64-apple-darwin)
+          (cd "$src" && RUSTC="$TC/bin/rustc" "$TC/bin/cargo" build --release -p librashader-capi --features stable --target x86_64-apple-darwin)
+          mkdir -p upstream/NTSCRT/Vendor/librashader
+          lipo -create "$src/target/aarch64-apple-darwin/release/liblibrashader_capi.dylib" \
+                       "$src/target/x86_64-apple-darwin/release/liblibrashader_capi.dylib" \
+               -output upstream/NTSCRT/Vendor/librashader/librashader.dylib
+          install_name_tool -id @rpath/librashader.dylib upstream/NTSCRT/Vendor/librashader/librashader.dylib
+          lipo -archs upstream/NTSCRT/Vendor/librashader/librashader.dylib
+
+      - name: Build ntscrs-capi (scripts/build-ntscrs.sh)
+        run: ./upstream/NTSCRT/scripts/build-ntscrs.sh
+
+      - name: Build crt-smoke (swift build -c release)
+        working-directory: upstream/NTSCRT
+        run: |
+          swift --version
+          swift build -c release --product crt-smoke
+          echo "SMOKE=$(swift build -c release --show-bin-path)/crt-smoke" >> "$GITHUB_ENV"
+
+      - name: Render references
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          only=()
+          if [ -n "$ONLY" ]; then only=(--only "$ONLY"); fi
+          python3 scripts/ci/render_golden.py \
+            --manifest tests/golden/manifest.json \
+            --upstream upstream/NTSCRT \
+            --smoke "$SMOKE" \
+            --out golden-refs "${only[@]}"
+          ls -la golden-refs
+
+      - name: Sanity-check references aren't blank
+        run: |
+          python3 - <<'EOF'
+          import glob, struct, sys, zlib
+          bad = []
+          for p in sorted(glob.glob("golden-refs/*.png")):
+              data = open(p, "rb").read()
+              # concatenate IDAT chunks and check the decompressed scanlines vary
+              i, idat = 8, b""
+              while i < len(data):
+                  n = struct.unpack(">I", data[i:i+4])[0]; t = data[i+4:i+8]
+                  if t == b"IDAT": idat += data[i+8:i+8+n]
+                  i += 12 + n
+              raw = zlib.decompress(idat)
+              if len(set(raw[::97])) < 8: bad.append(p)
+          print("\n".join("::error::%s looks blank" % b for b in bad))
+          sys.exit(1 if bad else 0)
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: golden-refs
+          path: golden-refs/
+          if-no-files-found: error

@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- FxPlug 4 XPC service (.pluginkit) Info.plist. Keys follow Apple's
+     "Editing property lists for FxPlug plug-ins" and the shipping FxPlug 4
+     plug-ins that work in Final Cut Pro: CFBundlePackageType XPC!,
+     PlugInKit Protocol PROXPCProtocol + PrincipalClass FxPrincipal,
+     XPCService RunLoopType _NSApplicationMain / JoinExistingSession /
+     _AdditionalSubServices viewbridge, static registration. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>@FX_PLUGIN_NAME@</string>
+	<key>CFBundleExecutable</key>
+	<string>@FX_PLUGIN_EXE@</string>
+	<key>CFBundleIdentifier</key>
+	<string>@NTSCRT_FXPLUG_BUNDLE_ID@.Renderer</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>@FX_PLUGIN_NAME@</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@FX_VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@FX_VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>NTSCRT Plugins. Look by NTSCRT (Finn McKenty), ntsc-rs, librashader, libretro slang-shaders.</string>
+	<key>PlugInKit</key>
+	<dict>
+		<key>Attributes</key>
+		<dict>
+			<key>com.apple.protocol</key>
+			<string>FxPlug</string>
+			<key>com.apple.version</key>
+			<string>1.1</string>
+		</dict>
+		<key>PrincipalClass</key>
+		<string>FxPrincipal</string>
+		<key>Protocol</key>
+		<string>PROXPCProtocol</string>
+		<key>Subsystems</key>
+		<array>
+			<string>NSViewService_PKSubsystem</string>
+		</array>
+	</dict>
+	<key>ProPlugDictionaryVersion</key>
+	<string>1.0</string>
+	<key>ProPlugDynamicRegistration</key>
+	<false/>
+	<key>ProPlugPlugInGroupList</key>
+	<array>
+		<dict>
+			<key>groupName</key>
+			<string>NTSCRT</string>
+			<key>uuid</key>
+			<string>@FX_GROUP_UUID@</string>
+		</dict>
+	</array>
+	<key>ProPlugPlugInList</key>
+	<array>
+		<dict>
+			<key>className</key>
+			<string>NTSCRTPlugIn</string>
+			<key>displayName</key>
+			<string>NTSCRT</string>
+			<key>group</key>
+			<string>@FX_GROUP_UUID@</string>
+			<key>infoString</key>
+			<string>Analog TV / VHS / CRT look (ntsc-rs + RetroArch CRT shaders)</string>
+			<key>protocolNames</key>
+			<array>
+				<string>FxFilter</string>
+			</array>
+			<key>uuid</key>
+			<string>@FX_PLUGIN_UUID@</string>
+			<key>version</key>
+			<string>1</string>
+		</dict>
+	</array>
+	<key>XPCService</key>
+	<dict>
+		<key>JoinExistingSession</key>
+		<true/>
+		<key>RunLoopType</key>
+		<string>_NSApplicationMain</string>
+		<key>ServiceType</key>
+		<string>Application</string>
+		<key>_AdditionalSubServices</key>
+		<dict>
+			<key>viewbridge</key>
+			<true/>
+		</dict>
+	</dict>
+</dict>
+</plist>
