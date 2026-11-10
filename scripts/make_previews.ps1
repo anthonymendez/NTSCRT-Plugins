@@ -3,13 +3,17 @@
 #   powershell.exe -NoProfile -File scripts/make_previews.ps1 [-Cli path\to\ntscrt-cli.exe] [-Resources DIR]
 #
 # Draws a synthetic test scene (no third-party footage), renders it through ntscrt-cli with a few looks,
-# and composites a before/after hero image plus a labelled grid of looks (JPEG, 960 px wide).
+# and composites an animated before/after GIF (the scene scrolls, so the temporal effects show),
+# and a labelled grid of looks (JPEG, 960 px wide). The GIF needs ffmpeg on PATH.
 param(
     [string]$Cli = 'C:/ntb/main/tools/ntscrt-cli/Release/ntscrt-cli.exe',
     [string]$Resources = 'C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle/Contents/Resources',
     [string]$OutDir = '',
     [string]$WorkDir = '',
-    [int]$Quality = 85
+    [int]$Quality = 85,
+    [int]$GifFrames = 60,
+    [int]$GifWidth = 640,
+    [int]$GifFps = 30
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -26,7 +30,9 @@ function New-Color([string]$hex, [int]$a = 255) {
 }
 
 # ---- 1. Source scene ---------------------------------------------------------------------------
-function New-Scene([string]$path) {
+function New-Scene([string]$path, [int]$t = 0, [int]$period = 60) {
+    $anim = $PSBoundParameters.ContainsKey('t')
+    $phase = ($t % $period) / [double]$period   # 0..1, loops seamlessly
     $bmp = [Drawing.Bitmap]::new($W, $H)
     $g = [Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = 'AntiAlias'; $g.TextRenderingHint = 'AntiAliasGridFit'
@@ -44,7 +50,8 @@ function New-Scene([string]$path) {
     # stars
     $rnd = [Random]::new(7)
     for ($i = 0; $i -lt 90; $i++) {
-        $x = $rnd.Next(0, $W); $y = $rnd.Next(0, 200); $s = $rnd.Next(1, 3)
+        $x = $rnd.Next(0, $W); $y = $rnd.Next(0, 200); $s = $rnd.Next(1, 3); $tw = $rnd.Next(0, 4)
+        if ($anim -and (($t + $i) % 15) -lt $tw) { continue }   # twinkle
         $g.FillRectangle([Drawing.Brushes]::White, [Drawing.Rectangle]::new($x, $y, $s, $s))
     }
 
@@ -55,9 +62,9 @@ function New-Scene([string]$path) {
     $clip = [Drawing.Drawing2D.GraphicsPath]::new(); $clip.AddEllipse($sunRect)
     $g.SetClip($clip)
     $g.FillEllipse($sun, $sunRect)
-    $y = $cy; $t = 3
+    $y = $cy - 18 + [int](18 * $phase); $sw = 2
     while ($y -lt $cy + $sunR) {
-        $g.FillRectangle($sky, [Drawing.Rectangle]::new(0, $y, $W, $t)); $y += 18; $t += 2
+        $g.FillRectangle($sky, [Drawing.Rectangle]::new(0, $y, $W, $sw)); $y += 18; $sw += 2
     }
     $g.ResetClip()
 
@@ -72,10 +79,13 @@ function New-Scene([string]$path) {
     $g.FillRectangle([Drawing.SolidBrush]::new((New-Color '#12001f')), [Drawing.Rectangle]::new(0, $horizon, $W, $H - $horizon))
     $pen = [Drawing.Pen]::new((New-Color '#ff3cac'), 2)
     for ($k = -12; $k -le 12; $k++) { $g.DrawLine($pen, 480 + $k * 12, $horizon, 480 + $k * 140, $H) }
-    $d = 4.0
-    while ($true) {
-        $yy = $horizon + [int](2600 / (14 - $d)); if ($yy -ge $H) { break }
-        $g.DrawLine($pen, 0, $yy, $W, $yy); $d += 1.4
+    # rows at depth z = k - phase: they scroll toward the viewer and the set repeats every loop
+    for ($k = 1; $k -le 80; $k++) {
+        $z = $k - $phase; if ($z -le 0) { continue }
+        $yy = $horizon + [int](300 / $z)
+        if ($yy -ge $H) { continue }
+        if ($yy - $horizon -lt 10) { break }
+        $g.DrawLine($pen, 0, $yy, $W, $yy)
     }
     $g.DrawLine([Drawing.Pen]::new((New-Color '#ffb3e6'), 2), 0, $horizon, $W, $horizon)
 
@@ -89,6 +99,10 @@ function New-Scene([string]$path) {
     $osd = [Drawing.Font]::new('Consolas', 34, [Drawing.FontStyle]::Bold, [Drawing.GraphicsUnit]::Pixel)
     $g.DrawString([string][char]0x25B6 + ' PLAY', $osd, [Drawing.Brushes]::White, 34, 28)
     $g.DrawString('CH 03', $osd, [Drawing.Brushes]::White, 810, 28)
+    if ($anim) {
+        $sec = [int][Math]::Floor($t / 30)
+        $g.DrawString(('SP 0:00:{0:D2}' -f $sec), $osd, [Drawing.Brushes]::White, 34, 72)
+    }
 
     # colour bars (bottom right)
     $bars = '#c0c0c0', '#c0c000', '#00c0c0', '#00c000', '#c000c0', '#c00000', '#0000c0'
@@ -109,6 +123,13 @@ function Invoke-Render([string]$src, [string]$out, [string]$look, [int]$frame = 
     if ($look) { $a += @('--look', $look) }
     & $Cli @a
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $out)) { throw "ntscrt-cli failed for $out" }
+}
+
+function Invoke-RenderSeq([string]$pattern, [string]$outPattern, [string]$look, [int]$frames) {
+    $a = @('--seq', $pattern, '--out', $outPattern, '--resources', $Resources, '--fps', '30', '--frame', '0', '--frames', "$frames")
+    if ($look) { $a += @('--look', $look) }
+    & $Cli @a
+    if ($LASTEXITCODE -ne 0) { throw "ntscrt-cli failed for $outPattern" }
 }
 
 # ---- 3. Compositing ------------------------------------------------------------------------------
@@ -133,7 +154,7 @@ function Save-Jpeg($bmp, [string]$path) {
 }
 
 # Hero: left half original, right half processed, split line + labels.
-function New-Hero([string]$before, [string]$after, [string]$path) {
+function New-Hero([string]$before, [string]$after, [string]$path, [string]$format = 'jpeg') {
     $b = [Drawing.Image]::FromFile($before); $a = [Drawing.Image]::FromFile($after)
     $canvas = [Drawing.Bitmap]::new($W, $H)
     $g = [Drawing.Graphics]::FromImage($canvas)
@@ -145,7 +166,24 @@ function New-Hero([string]$before, [string]$after, [string]$path) {
     Add-Label $g 'Original' 16 ($H - 56) 24
     Add-Label $g 'NTSCRT (default look)' ($half + 16) ($H - 56) 24
     $g.Dispose(); $b.Dispose(); $a.Dispose()
-    Save-Jpeg $canvas $path; $canvas.Dispose()
+    if ($format -eq 'png') { $canvas.Save($path, [Drawing.Imaging.ImageFormat]::Png) } else { Save-Jpeg $canvas $path }
+    $canvas.Dispose()
+}
+
+# Animated before/after: render a looping scene sequence, split-screen each frame, encode a GIF.
+function New-HeroGif([string]$look, [string]$path) {
+    $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+    if (-not $ffmpeg) { Write-Warning 'ffmpeg not found: skipping the animated preview'; return }
+    $seq = Join-Path $WorkDir 'seq'; Remove-Item -Recurse -Force $seq -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $seq | Out-Null
+    for ($f = 0; $f -lt $GifFrames; $f++) { New-Scene (Join-Path $seq ('in_{0:D4}.png' -f $f)) $f $GifFrames }
+    Invoke-RenderSeq (Join-Path $seq 'in_%04d.png') (Join-Path $seq 'out_%04d.png') $look $GifFrames
+    for ($f = 0; $f -lt $GifFrames; $f++) {
+        New-Hero (Join-Path $seq ('in_{0:D4}.png' -f $f)) (Join-Path $seq ('out_{0:D4}.png' -f $f)) (Join-Path $seq ('hero_{0:D4}.png' -f $f)) 'png'
+    }
+    $vf = "fps=$GifFps,scale=${GifWidth}:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=full[p];[b][p]paletteuse=dither=sierra2_4a"
+    & $ffmpeg -hide_banner -loglevel error -y -framerate 30 -i (Join-Path $seq 'hero_%04d.png') -vf $vf -loop 0 $path
+    if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed' }
 }
 
 # Grid: tiles of 480x270 (2 columns), each labelled.
@@ -193,6 +231,6 @@ foreach ($l in $looks) {
     Invoke-Render $src $l.Path $l.Look $l.Frame
 }
 
-New-Hero $src $looks[0].Path (Join-Path $OutDir 'hero-before-after.jpg')
+New-HeroGif $looks[0].Look (Join-Path $OutDir 'hero-before-after.gif')
 New-Grid $looks[1..4] (Join-Path $OutDir 'looks-grid.jpg')
 Get-ChildItem $OutDir | Select-Object Name, Length | Format-Table -AutoSize

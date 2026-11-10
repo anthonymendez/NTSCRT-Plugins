@@ -14,6 +14,9 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Changed
+- README: the before/after preview is now an animated GIF (`scripts/make_previews.ps1` renders it with ffmpeg).
+
 ## [0.3.0] - 2026-11-10
 
 First public release. (0.1 and 0.2 were internal milestones and were never tagged.)
