@@ -1,0 +1,19 @@
+#!/bin/sh
+# NTSCRT .pkg postinstall (runs as root after the payload-free package "installs").
+# Runs the install.sh that build-pkg.sh copied next to this script: it downloads the
+# LATEST GitHub release and installs the DaVinci Resolve and/or Final Cut Pro plug-in.
+# Optional environment (CI / offline): NTSCRT_FROM=<zip or folder>, NTSCRT_VERSION=<tag>.
+# A non-zero exit makes Installer report the installation as failed.
+here="$(cd "$(dirname "$0")" && pwd)"
+LOG=/tmp/ntscrt-install.log
+set --
+[ -n "${NTSCRT_FROM:-}" ] && set -- --from "$NTSCRT_FROM"
+[ -n "${NTSCRT_VERSION:-}" ] && set -- "$@" --version "$NTSCRT_VERSION"
+echo "NTSCRT installer $(date): install.sh $*" >>"$LOG"
+/bin/sh "$here/install.sh" "$@" >>"$LOG.run" 2>&1
+rc=$?
+cat "$LOG.run"            # stdout goes to /var/log/install.log
+cat "$LOG.run" >>"$LOG"
+rm -f "$LOG.run"
+echo "exit $rc" >>"$LOG"
+exit "$rc"

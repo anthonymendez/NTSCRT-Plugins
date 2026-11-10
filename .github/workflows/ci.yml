@@ -77,6 +77,46 @@ jobs:
           path: dist/*.zip
           if-no-files-found: warn
 
+      # MSI that runs install.ps1 (downloads the latest release when users run it).
+      - name: Build MSI installer
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          wix extension add -g WixToolset.Util.wixext/5.0.2 WixToolset.UI.wixext/5.0.2
+          ./installer/windows/build-msi.ps1 -Out dist/installer/NTSCRT-Installer-windows.msi
+
+      # The runner is admin, so msiexec runs without a prompt. NTSCRT_FROM points the
+      # script at the zip built above instead of the latest published release.
+      - name: Smoke-test MSI (install + uninstall)
+        if: hashFiles('dist/NTSCRT-OFX-windows-x64.zip') != ''
+        run: |
+          $msi = (Resolve-Path dist/installer/NTSCRT-Installer-windows.msi).Path
+          $zip = (Resolve-Path dist/NTSCRT-OFX-windows-x64.zip).Path
+          $bundle = Join-Path $env:CommonProgramFiles "OFX\Plugins\NTSCRT.ofx.bundle"
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/i", "`"$msi`"", "/qn", "NTSCRT_FROM=`"$zip`"", "/l*v", "msi-install.log"
+          if ($p.ExitCode -ne 0) { Get-Content msi-install.log -Tail 80; throw "msiexec /i exit $($p.ExitCode)" }
+          Select-String -Path msi-install.log -Pattern "==>" | ForEach-Object { $_.Line }
+          if (-not (Test-Path (Join-Path $bundle "Contents\Win64\NTSCRT.ofx"))) { throw "bundle not installed: $bundle" }
+          Get-Content (Join-Path $bundle "Contents\Resources\VERSION")
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/x", "`"$msi`"", "/qn", "/l*v", "msi-uninstall.log"
+          if ($p.ExitCode -ne 0) { Get-Content msi-uninstall.log -Tail 80; throw "msiexec /x exit $($p.ExitCode)" }
+          if (Test-Path $bundle) { throw "bundle still installed after uninstall: $bundle" }
+          if (Test-Path (Join-Path ${env:ProgramFiles} "NTSCRT Installer\install.ps1")) { throw "installer files left behind" }
+          Write-Host "MSI install + uninstall OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NTSCRT-Installer-windows
+          path: dist/installer/NTSCRT-Installer-windows.msi
+
+      - name: Upload MSI logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-logs
+          path: msi-*.log
+          if-no-files-found: ignore
+
       - name: Upload golden mismatches
         if: failure()
         uses: actions/upload-artifact@v4
@@ -137,6 +177,31 @@ jobs:
           name: NTSCRT-OFX-macos-universal
           path: dist/*.zip
           if-no-files-found: warn
+
+      # Payload-free .pkg whose postinstall runs install.sh (latest release at run time).
+      - name: Build .pkg installer
+        run: sh installer/macos/build-pkg.sh dist/installer/NTSCRT-Installer-macos.pkg
+
+      # `installer -pkg` can't pass --from, so run the built pkg's own postinstall
+      # (as root, like Installer does) with NTSCRT_FROM = the zip built above.
+      - name: Smoke-test .pkg postinstall
+        if: hashFiles('dist/NTSCRT-OFX-macos-universal.zip') != ''
+        run: |
+          x="$RUNNER_TEMP/pkg-x"; rm -rf "$x"
+          pkgutil --expand-full dist/installer/NTSCRT-Installer-macos.pkg "$x"
+          ls -R "$x"
+          post="$(find "$x" -name postinstall -path '*Scripts*' | head -n 1)"
+          [ -n "$post" ] && [ -f "$(dirname "$post")/install.sh" ] || { echo "::error::postinstall/install.sh missing in pkg"; exit 1; }
+          sudo NTSCRT_FROM="$PWD/dist/NTSCRT-OFX-macos-universal.zip" sh "$post"
+          test -f /Library/OFX/Plugins/NTSCRT.ofx.bundle/Contents/MacOS/NTSCRT.ofx
+          cat /Library/OFX/Plugins/NTSCRT.ofx.bundle/Contents/Resources/VERSION
+          sudo sh install.sh --resolve --uninstall
+          test ! -e /Library/OFX/Plugins/NTSCRT.ofx.bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NTSCRT-Installer-macos
+          path: dist/installer/NTSCRT-Installer-macos.pkg
 
       - name: Upload golden mismatches
         if: failure()
@@ -265,7 +330,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          mapfile -t files < <(find artifacts -name 'NTSCRT-*.zip' -type f | sort)
+          mapfile -t files < <(find artifacts -type f \( -name 'NTSCRT-*.zip' -o -name 'NTSCRT-*.msi' -o -name 'NTSCRT-*.pkg' \) | sort)
           printf 'asset: %s\n' "${files[@]}"
-          [ "${#files[@]}" -gt 0 ] || { echo "::error::no NTSCRT-*.zip artifacts"; exit 1; }
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no NTSCRT-* artifacts"; exit 1; }
           gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --title "NTSCRT $TAG" --notes-file release-notes.md

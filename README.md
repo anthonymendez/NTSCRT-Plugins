@@ -22,7 +22,33 @@ Status: in development. See `docs/` for architecture and contracts.
 | DaVinci Resolve (macOS) | 21.1.2 and later, Apple silicon + Intel |
 | Final Cut Pro (macOS) | 12.4 and later, Apple silicon + Intel |
 
-**Quit DaVinci Resolve / Final Cut Pro first**, then paste one line.
+**Quit DaVinci Resolve / Final Cut Pro first.**
+
+### Download the installer
+
+From the [latest release](https://github.com/anthonymendez/NTSCRT-Plugins/releases/latest):
+
+- **Windows:** `NTSCRT-Installer-windows.msi` (DaVinci Resolve)
+- **macOS:** `NTSCRT-Installer-macos.pkg` (DaVinci Resolve and/or Final Cut Pro, whichever you have)
+
+Double-click it and follow the steps. The installer is small: when it runs it downloads the **latest release**
+from GitHub and installs that, so an old installer still gets you the newest plug-in (it needs an internet
+connection).
+
+The installers aren't signed yet, so the first run needs one extra click:
+
+- **Windows:** if SmartScreen says "Windows protected your PC", click **More info → Run anyway**. Then accept the
+  admin prompt.
+- **macOS:** if it says the package "can't be opened" / is from an unidentified developer, open
+  *System Settings → Privacy & Security*, scroll down and click **Open Anyway** next to the NTSCRT message, then
+  open the package again. Enter your password when asked.
+
+**Updating:** run the installer again, or on Windows use **Update NTSCRT plug-in** in the Start menu. Both
+install the latest release.
+**Uninstalling:** Windows: remove *NTSCRT plug-in installer* in *Settings → Apps* (this removes the plug-in too).
+macOS: the `--uninstall` line below.
+
+### Or paste one line
 
 **Windows** (PowerShell): installs the DaVinci Resolve plugin
 ```powershell
@@ -77,7 +103,8 @@ or `NTSCRT-FxPlug-macos-universal.zip`.
 </details>
 
 ### Updating
-Run the same install line again: it installs the latest release over the old one and prints both versions.
+Run the installer or the same install line again (on Windows, also **Update NTSCRT plug-in** in the Start
+menu): it installs the latest release over the old one and prints both versions.
 Your projects keep their effects and settings. See what changed in [CHANGELOG.md](CHANGELOG.md). In Resolve, the
 installed version shows in the effect's **Presets → Version** field. A specific version: `-Version v0.1.0`
 (Windows) or `--version v0.1.0` (macOS).

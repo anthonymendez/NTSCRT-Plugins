@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  NTSCRT plug-in installer (Windows MSI, WiX v5).
+
+  A thin wrapper around the repo's install.ps1: the MSI installs the script to
+  "C:\Program Files\NTSCRT Installer\" and runs it elevated (deferred custom action,
+  as SYSTEM). The script downloads the LATEST GitHub release and swaps the OpenFX
+  bundle into C:\Program Files\Common Files\OFX\Plugins, so this MSI never goes stale.
+
+  Build (see installer/windows/build-msi.ps1):
+    wix build installer/windows/NTSCRT.wxs -arch x64 -d Version=0.1.0
+      -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext -o NTSCRT-Installer-windows.msi
+
+  Public properties (msiexec ... NAME=value):
+    NTSCRT_VERSION  release tag to install (default: latest), e.g. v0.1.0
+    NTSCRT_FROM     a local NTSCRT-OFX-windows-x64.zip (or bundle folder) instead of downloading
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="NTSCRT plug-in installer"
+           Manufacturer="NTSCRT-Plugins"
+           Version="$(Version)"
+           UpgradeCode="6B2E3C1A-6E0F-4E8B-9D3B-2F6A8C4E7D51"
+           Scope="perMachine"
+           Compressed="yes">
+    <SummaryInformation Description="Downloads and installs the latest NTSCRT OpenFX plug-in for DaVinci Resolve" />
+    <MajorUpgrade DowngradeErrorMessage="A newer NTSCRT installer is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="NTSCRT_VERSION" Value="latest" Secure="yes" />
+    <Property Id="NTSCRT_FROM" Secure="yes" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/anthonymendez/NTSCRT-Plugins" />
+    <Property Id="ARPCOMMENTS" Value="Installs the NTSCRT OpenFX plug-in for DaVinci Resolve. Uninstalling removes the plug-in." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="NTSCRT Installer" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="InstallerFiles" Directory="INSTALLFOLDER">
+      <Component Id="InstallScript" Guid="3F1C9B52-8A4D-4C27-B0E6-7D2A5E9F1C38">
+        <File Id="install.ps1" Source="$(sys.SOURCEFILEDIR)..\..\install.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="UpdateCmd" Guid="A7D4E2F0-1B3C-4E56-8F9A-0C2D4E6F8A1B">
+        <File Id="UpdateNTSCRT.cmd" Name="Update NTSCRT.cmd" Source="$(sys.SOURCEFILEDIR)Update NTSCRT.cmd" KeyPath="yes">
+          <Shortcut Id="UpdateShortcut" Directory="ProgramMenuFolder" Name="Update NTSCRT plug-in"
+                    Description="Download and install the latest NTSCRT plug-in release"
+                    WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+        </File>
+      </Component>
+    </ComponentGroup>
+    <Feature Id="Main" Title="NTSCRT">
+      <ComponentGroupRef Id="InstallerFiles" />
+    </Feature>
+
+    <!-- -From only when NTSCRT_FROM is set: powershell.exe -File mishandles an empty "" argument. -->
+    <SetProperty Id="NTSCRT_FROM_ARG" Value="-From &quot;[NTSCRT_FROM]&quot;"
+                 After="CostFinalize" Sequence="execute" Condition="NTSCRT_FROM" />
+
+    <!-- Deferred actions read their command line from a property named after the action. -->
+    <SetProperty Id="NtscrtInstall" Sequence="execute" Before="NtscrtInstall"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install.ps1&quot; -Version &quot;[NTSCRT_VERSION]&quot; [NTSCRT_FROM_ARG]" />
+    <SetProperty Id="NtscrtUninstall" Sequence="execute" Before="NtscrtUninstall"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install.ps1&quot; -Uninstall" />
+
+    <!-- Runs install.ps1 as SYSTEM; its output goes to the MSI log. A non-zero exit
+         (no network, no release, bad zip) fails the install and rolls it back. The
+         script's own swap is atomic, so a failure leaves the installed plug-in untouched. -->
+    <CustomAction Id="NtscrtInstall" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec64"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <!-- Removes the plug-in. Ignored on failure so the installer can always be uninstalled. -->
+    <CustomAction Id="NtscrtUninstall" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec64"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="NtscrtInstall" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="NtscrtUninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <ui:WixUI Id="WixUI_Minimal" />
+    <!-- WixUI_Minimal shows this text on its first page (there's no separate license). -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)welcome.rtf" />
+  </Package>
+</Wix>

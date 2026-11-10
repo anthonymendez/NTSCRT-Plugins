@@ -34,3 +34,16 @@ The script dates the Unreleased section as the new version and sets `VERSION`. T
 which checks the tag matches `VERSION`, builds Windows + macOS (+ Final Cut when the FxPlug SDK secret is
 set), and publishes a GitHub Release with that CHANGELOG section as its notes. The installers' default
 (`latest`) then picks it up: users update by running the install line again.
+
+## Installers (MSI / pkg)
+Each release also carries `NTSCRT-Installer-windows.msi` (`installer/windows/`, WiX v5) and
+`NTSCRT-Installer-macos.pkg` (`installer/macos/`, payload-free `pkgbuild` + `productbuild`). They are
+versioned with `VERSION` (the MSI's version drives Windows upgrades) but contain no plug-in: they embed
+`install.ps1` / `install.sh` from the same commit and run it elevated, which downloads the **latest**
+release when the user runs the installer. So an older installer still installs the newest plug-in, and a
+fix to the install scripts only reaches installer users with the next release. CI builds both and
+smoke-tests them against the freshly built zips (`NTSCRT_FROM`): MSI install + uninstall on Windows, the
+pkg's `postinstall` on macOS. Build locally: `installer/windows/build-msi.ps1` or
+`sh installer/macos/build-pkg.sh`. Both are unsigned for now (see the README's first-run steps).
+MSI properties for testing / offline installs: `msiexec /i NTSCRT-Installer-windows.msi NTSCRT_FROM=C:\path\NTSCRT-OFX-windows-x64.zip`
+or `NTSCRT_VERSION=v0.1.0`; the pkg's `postinstall` reads the same two environment variables.

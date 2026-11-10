@@ -23,6 +23,9 @@ First release (will be 0.1.0).
   (librashader, 7 presets) and Screen Loop video feedback.
 - Every parameter keyframable; bundled look and Screen Loop presets; load/save NTSCRT preset files.
 - Random-access rendering matches sequential playback for the temporal stages.
+- Double-click installers: `NTSCRT-Installer-windows.msi` (Windows, with an "Update NTSCRT plug-in" Start-menu
+  item; uninstalling it removes the plug-in) and `NTSCRT-Installer-macos.pkg` (macOS). They always download and
+  install the latest release.
 - **Transparency → Transparent areas** for titles and clips that don't fill the frame: *Clip to element*
   (effect stays inside the element, clean edges) or *Let effect spill* (ghosting, smear and glow extend past
   it as light over what's underneath). Presets don't change it.

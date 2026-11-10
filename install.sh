@@ -63,6 +63,26 @@ fi
 SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO="sudo"
 
+# Running as root (the .pkg installer's postinstall, or sudo)? The Final Cut steps
+# (opening NTSCRT.app, pluginkit, the effect template in ~/Movies) are per user:
+# run them as the user logged in at the screen, in their GUI session.
+CONSOLE_USER=""
+if [ "$(id -u)" -eq 0 ]; then
+  CONSOLE_USER="$(stat -f%Su /dev/console 2>/dev/null || true)"
+  case "$CONSOLE_USER" in ""|root|loginwindow) CONSOLE_USER="" ;; esac
+fi
+if [ -n "$CONSOLE_USER" ]; then
+  user_home="$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+  TEMPLATE_DIR="${user_home:-/Users/$CONSOLE_USER}/Movies/Motion Templates.localized/Effects.localized/NTSCRT"
+fi
+as_user() {  # as_user <cmd...>: run as the console user when we're root
+  if [ -n "$CONSOLE_USER" ]; then
+    launchctl asuser "$(id -u "$CONSOLE_USER")" sudo -u "$CONSOLE_USER" "$@"
+  else
+    "$@"
+  fi
+}
+
 if [ -n "$UNINSTALL" ]; then
   if [ -n "$WANT_RESOLVE" ]; then
     say "Removing $OFX_DEST/NTSCRT.ofx.bundle"
@@ -71,7 +91,7 @@ if [ -n "$UNINSTALL" ]; then
   if [ -n "$WANT_FCP" ]; then
     say "Removing $APP_DEST/NTSCRT.app and its effect template"
     $SUDO rm -rf "$APP_DEST/NTSCRT.app"
-    rm -rf "$TEMPLATE_DIR"
+    as_user rm -rf "$TEMPLATE_DIR"
   fi
   say "Done."
   exit 0
@@ -193,10 +213,10 @@ if [ -n "$WANT_FCP" ]; then
   install_swap "$app" "$APP_DEST" NTSCRT.app
   # Opening the app once registers the plug-in and installs the effect template; it quits by itself.
   say "Registering with Final Cut Pro (opens NTSCRT.app once)"
-  open -g "$APP_DEST/NTSCRT.app" 2>/dev/null || open "$APP_DEST/NTSCRT.app" || true
+  as_user open -g "$APP_DEST/NTSCRT.app" 2>/dev/null || as_user open "$APP_DEST/NTSCRT.app" || true
   registered=""
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    if pluginkit -mA -p FxPlug 2>/dev/null | grep -qi ntscrt; then registered=1; break; fi
+    if as_user pluginkit -mA -p FxPlug 2>/dev/null | grep -qi ntscrt; then registered=1; break; fi
     sleep 1
   done
   if [ -n "$registered" ]; then

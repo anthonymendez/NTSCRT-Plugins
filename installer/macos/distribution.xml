@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NTSCRT .pkg: build-pkg.sh replaces __VERSION__ with the VERSION file. -->
+<installer-gui-script minSpecVersion="2">
+  <title>NTSCRT plug-in</title>
+  <welcome file="welcome.html" mime-type="text/html"/>
+  <conclusion file="conclusion.html" mime-type="text/html"/>
+  <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+  <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+  <choices-outline>
+    <line choice="default">
+      <line choice="com.ntscrt.plugins.installer"/>
+    </line>
+  </choices-outline>
+  <choice id="default"/>
+  <choice id="com.ntscrt.plugins.installer" visible="false">
+    <pkg-ref id="com.ntscrt.plugins.installer"/>
+  </choice>
+  <pkg-ref id="com.ntscrt.plugins.installer" version="__VERSION__" onConclusion="none">ntscrt-scripts.pkg</pkg-ref>
+</installer-gui-script>
