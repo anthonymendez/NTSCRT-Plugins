@@ -13,6 +13,7 @@
 
 #include "../gpu/gpu.h"
 #include "../src/internal.h"
+#include "howlaround/howl_hooks.h"
 
 namespace ntscrt {
 
@@ -92,18 +93,24 @@ private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };
 
-// ---- Screen Loop / howlaround (agent D) — GPU, sequential ---------------------
+// ---- Screen Loop / howlaround (agent G) — GPU, sequential ---------------------
+// See core/stages/howlaround/howl_engine.h (random access) and
+// docs/CONTRACT-CHANGES.md (2026-11-10, agent G) for the façade wiring.
 class Howlaround {
 public:
     explicit Howlaround(gpu::Device &dev);
     ~Howlaround();
     bool active(const json *feedback) const;
+    // The façade lends the loop its chain so past frames can be recomputed
+    // (run-up, seeks). Without hooks the TV shows the camera picture directly.
+    void set_hooks(HowlHooks hooks);
     // Replaces the scene with the camera's view of the simulated TV (runs the
     // run-up on first use / after seeks, pulling frames via ctx.source_at).
     std::shared_ptr<gpu::Texture> camera(const std::shared_ptr<gpu::Texture> &scene,
                                          const json &feedback, const FrameContext &ctx);
-    // After the CRT stage: push the displayed TV picture into the ring.
-    void after_frame(const gpu::Texture &tv_picture, const json &feedback, const FrameContext &ctx);
+    // After Glitch (before the CRT): this frame's CHAIN INPUT, which the loop
+    // draws through its own CRT copy (hooks.render_tv) as the TV's picture.
+    void after_frame(const gpu::Texture &chain_input, const json &feedback, const FrameContext &ctx);
     void flush();
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
