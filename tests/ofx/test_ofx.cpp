@@ -220,7 +220,7 @@ TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
         in.close();
         REQUIRE(saved.is_object());
         CHECK(saved["downscale"]["width"] == 256);
-        CHECK(saved["shader"]["preset"] == "crt/crtglow_gauss.slangp");
+        CHECK(saved["shader"]["preset"] == "glow_gauss");
 
         { std::ofstream o(tmp); o << R"({"downscale":{"enabled":false,"width":200}})"; }
         REQUIRE(f.changed("host_load_preset") == kOfxStatOK);
