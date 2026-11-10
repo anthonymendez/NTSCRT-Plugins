@@ -36,7 +36,10 @@ enum HostParamID : uint32_t {
     kBaseLook = 8,          // hidden string: JSON the params are overlaid on (from preset/file)
     kBaseFeedback = 9,      // hidden string: same for Screen Loop
     kExtrasGroup = 10,      // "Preset & timing" subgroup
+    kDebugLogging = 11,     // toggle: log every frame (diagnostics; never in the look or presets)
+    kOpenLogs = 12,         // push button: show the log folder in Finder
 };
+constexpr uint32_t kLastHostID = 99;  // host extras live in [1, 99]
 constexpr uint32_t kFirstMappedID = 100;     // param_ids.json assigns [100, 4999]
 constexpr uint32_t kLastMappedID = 4999;
 constexpr uint32_t kFirstFallbackID = 5000;  // unmapped schema entries hash into [5000, 8999]
@@ -129,9 +132,25 @@ struct RenderState {
     std::string feedback;                // empty = Screen Loop off
     uint64_t seed = 0;
     std::map<int64_t, std::string> past_looks;  // frame -> look JSON (only frames that differ)
+    bool debug = false;                  // "Debug Logging" on: log this frame in detail
 
     std::string serialize() const;
     static std::optional<RenderState> parse(const std::string &bytes);
+};
+
+// ---- diagnostic log file (ntscrt-fxplug.log) ----
+// Appends "<local time>.<ms> [<thread>] <msg>" lines, creating the folder; rotates the file
+// to "<stem>.old<ext>" past max_bytes. Thread-safe, never throws. An empty path disables it.
+class FileLog {
+public:
+    explicit FileLog(std::string path, uint64_t max_bytes = 1u << 20);
+    const std::string &path() const { return path_; }
+    std::string folder() const;  // parent directory ("" if none)
+    void write(const std::string &msg) const;
+
+private:
+    std::string path_;
+    uint64_t max_bytes_;
 };
 
 // Frame index from a time offset (both as value/timescale rationals): round(offset / frame).

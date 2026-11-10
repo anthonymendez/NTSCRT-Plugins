@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -52,6 +53,25 @@ struct Preset {
     json data;
 };
 
+// ---- diagnostic log ------------------------------------------------------------
+// <Library>/Logs/NTSCRT/ntscrt-fxplug.log, where <Library> is the renderer's sandbox
+// container (~/Library/Containers/<renderer bundle id>/Data/Library). Same content as the
+// Resolve plug-in's ntscrt-ofx.log: load, failures, the first renders, and every frame while
+// "Debug Logging" is on. Load lines and failures also go to the system log ([NTSCRT], Console.app).
+const FileLog &Log() {
+    static const FileLog *log = [] {
+        NSURL *lib = [[NSFileManager defaultManager] URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
+        NSURL *file = [[lib URLByAppendingPathComponent:@"Logs/NTSCRT" isDirectory:YES] URLByAppendingPathComponent:@"ntscrt-fxplug.log"];
+        const char *fs = file ? file.fileSystemRepresentation : nullptr;
+        return new FileLog(fs ? std::string(fs) : std::string());
+    }();
+    return *log;
+}
+void LogLine(const std::string &msg, bool also_nslog = true) {
+    Log().write(msg);
+    if (also_nslog) NSLog(@"[NTSCRT] %s", msg.c_str());
+}
+
 struct Shared {
     Model model;
     std::vector<Preset> looks, loops;  // bundled look / Screen Loop presets
@@ -77,7 +97,14 @@ const Shared &GetShared() {
         if (schema.is_discarded()) schema = json::object();
         std::vector<std::string> warnings;
         sh->model = Model::from_schema(schema, ids, &warnings);
-        for (const auto &w : warnings) NSLog(@"[NTSCRT] %s", w.c_str());
+        {
+            NSString *ver = [b objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
+            NSString *proc = NSProcessInfo.processInfo.processName ?: @"?";
+            NSString *os = NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?";
+            LogLine(std::string("NTSCRT ") + ver.UTF8String + " (FxPlug) loaded; resources " + sh->resource_dir +
+                    "; process " + proc.UTF8String + "; macOS " + os.UTF8String + "; log " + Log().path());
+        }
+        for (const auto &w : warnings) LogLine("schema: " + w);
 
         // Bundled presets need an instance; it never renders.
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_METAL, nullptr, nullptr, sh->resource_dir.c_str()};
@@ -100,6 +127,9 @@ const Shared &GetShared() {
 // Bumped on every parameter change; a pooled instance whose generation differs flushes
 // its temporal caches before rendering (the core validates history only by sampling).
 std::atomic<uint64_t> gParamGeneration{1};
+// Render log bookkeeping (process-wide: one renderer process serves all the plug-in's instances).
+std::atomic<long> gRenders{0};
+std::atomic<size_t> gLastDebugLookHash{0};  // debug logging: the full look only when it changes
 
 // One ntscrt instance renders one frame at a time; FxPlug renders on several threads.
 struct Slot {
@@ -220,7 +250,7 @@ const char *LookAt(void *user, int64_t frame_index) {
 }
 
 NSError *MakeError(NSInteger code, NSString *msg) {
-    NSLog(@"[NTSCRT] %@", msg);
+    LogLine(std::string("error: ") + (msg.UTF8String ?: "?"));
     return [NSError errorWithDomain:FxPlugErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey : msg}];
 }
 
@@ -285,6 +315,10 @@ NSError *MakeError(NSInteger code, NSString *msg) {
                           sliderMin:0 sliderMax:1000 delta:1 parameterFlags:fixed];
     ok &= [api addIntSliderWithName:@"History Frames" parameterID:kHistoryFrames defaultValue:8 parameterMin:0
                        parameterMax:kMaxHistory sliderMin:0 sliderMax:32 delta:1 parameterFlags:fixed];
+    // Diagnostics: never part of the look or of presets.
+    ok &= [api addToggleButtonWithName:@"Debug Logging" parameterID:kDebugLogging defaultValue:NO parameterFlags:fixed];
+    ok &= [api addPushButtonWithName:@"Open Logs Folder" parameterID:kOpenLogs selector:@selector(openLogsPressed)
+                      parameterFlags:PF(kFxParameterFlag_DEFAULT)];
     ok &= [api endParameterSubGroup];
 
     for (const UiItem &it : m.layout) {
@@ -442,6 +476,16 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
 
 - (BOOL)parameterChanged:(UInt32)paramID atTime:(CMTime)time error:(NSError **)error {
     (void)error;
+    if (paramID == kDebugLogging || paramID == kOpenLogs) {  // diagnostics: the look is unchanged
+        if (paramID == kDebugLogging) {
+            id<FxParameterRetrievalAPI_v6> g = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
+            BOOL on = NO;
+            if (g) [g getBoolValue:&on fromParameter:kDebugLogging atTime:time];
+            LogLine(std::string("debug logging ") + (on ? "on" : "off"), false);
+            gLastDebugLookHash.store(0);
+        }
+        return YES;
+    }
     gParamGeneration.fetch_add(1);
     if (_applying) return YES;
     id<FxParameterRetrievalAPI_v6> get = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
@@ -513,6 +557,30 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     });
 }
 
+// ---- Open Logs Folder button ------------------------------------------------------
+- (void)openLogsPressed {
+    const std::string folder = Log().folder();
+    if (folder.empty()) {
+        LogLine("open logs folder: no Library folder");
+        return;
+    }
+    NSURL *dir = [NSURL fileURLWithFileSystemRepresentation:folder.c_str() isDirectory:YES relativeToURL:nil];
+    [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    LogLine("open logs folder: " + folder, false);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSURL *file = [dir URLByAppendingPathComponent:@"ntscrt-fxplug.log"];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:file.path]) {
+            [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[ file ]];
+        } else if (![[NSWorkspace sharedWorkspace] openURL:dir]) {
+            // The sandbox may refuse: show where the log is instead.
+            NSAlert *a = [NSAlert new];
+            a.messageText = @"NTSCRT log folder";
+            a.informativeText = dir.path ?: @"";
+            [a runModal];
+        }
+    });
+}
+
 // ---- timing / state -----------------------------------------------------------
 - (BOOL)pluginState:(NSData **)pluginState atTime:(CMTime)renderTime quality:(FxQuality)qualityLevel error:(NSError **)error {
     (void)qualityLevel;
@@ -541,6 +609,8 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     st.look = now.look.dump();
     st.feedback = now.feedback ? now.feedback->dump() : std::string();
     st.seed = uint64_t(std::max(0, GetInt(get, kSeed, renderTime, 0)));
+    BOOL debug = NO;
+    st.debug = [get getBoolValue:&debug fromParameter:kDebugLogging atTime:renderTime] && debug;
     if (needs_history(now.look, now.feedback)) {
         const int want = std::clamp(GetInt(get, kHistoryFrames, renderTime, 8), 0, kMaxHistory);
         st.history = int(std::min<int64_t>(want, st.frame));
@@ -667,6 +737,8 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
     ra.source_premultiplied = 1;  // FxPlug / Motion images carry premultiplied alpha
     ra.user = &ctx;
 
+    const auto t0 = std::chrono::steady_clock::now();
+    bool used_cpu = false;
     const bool src_up = BottomUp(src), dst_up = BottomUp(destinationImage);
     const bool full = SameRect(destinationImage.tilePixelBounds, destinationImage.imagePixelBounds);
     int ox = 0, oy = 0;
@@ -711,7 +783,10 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
     if (status != NTSCRT_OK && status != NTSCRT_ERR_SOURCE_UNAVAILABLE) {
         // CPU fallback straight through the IOSurfaces.
         static std::atomic<bool> logged{false};
-        if (!logged.exchange(true)) NSLog(@"[NTSCRT] Metal path failed (%d: %@), using CPU (logged once)", int(status), why);
+        if (!logged.exchange(true))
+            LogLine("Metal path failed (" + std::to_string(int(status)) + ": " + std::string(why ? why.UTF8String : "") +
+                    "), using CPU (logged once)");
+        used_cpu = true;
         SurfaceView in, out;
         if (in.lock((__bridge IOSurfaceRef)src.ioSurface, true, src_up) &&
             out.lock((__bridge IOSurfaceRef)destinationImage.ioSurface, false, dst_up)) {
@@ -740,6 +815,30 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
     }
     const std::string err = ntscrt_last_error(slot->inst);  // copy before another thread reuses the slot
     GetPool().release(slot);
+    const long n = ++gRenders;
+    const bool failed = status != NTSCRT_OK && status != NTSCRT_ERR_SOURCE_UNAVAILABLE;
+    if (n <= 20 || n % 500 == 0 || st->debug || failed) {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const FxRect ib = destinationImage.imagePixelBounds, tb = destinationImage.tilePixelBounds;
+        std::ostringstream o;
+        o << (st->debug ? "debug " : "") << "render #" << n << " frame=" << st->frame << " fps=" << st->fps
+          << " scale=" << ra.render_scale << " image=" << (ib.right - ib.left) << 'x' << (ib.top - ib.bottom)
+          << " tile=" << (tb.right - tb.left) << 'x' << (tb.top - tb.bottom)
+          << " srcfmt=" << uint32_t(IOSurfaceGetPixelFormat((__bridge IOSurfaceRef)src.ioSurface))
+          << " flip=" << int(src_up) << int(dst_up) << " history=" << st->history << " path=" << (used_cpu ? "cpu" : "metal")
+          << " status=" << int(status) << (failed ? " error=" + err : std::string()) << " ms=" << ms;
+        if (st->debug) {
+            const size_t lh = std::hash<std::string>{}(st->look) ^ (std::hash<std::string>{}(st->feedback) << 1);
+            o << " seed=" << st->seed << " past_looks=" << st->past_looks.size() << " look#" << std::hex << lh << std::dec;
+            if (gLastDebugLookHash.exchange(lh) != lh) {
+                o << " look=" << st->look;
+                if (!st->feedback.empty()) o << " feedback=" << st->feedback;
+            }
+        } else if (n == 1) {
+            o << " look=" << st->look.substr(0, 400) << (st->look.size() > 400 ? "..." : "");
+        }
+        LogLine(o.str(), failed);  // per-frame detail stays out of the system log
+    }
     if (status != NTSCRT_OK && status != NTSCRT_ERR_SOURCE_UNAVAILABLE) {
         if (outError) *outError = MakeError(kFxError_ThirdPartyDeveloperStart + 2,
                                             [NSString stringWithFormat:@"NTSCRT render failed (%d): %s %@", int(status), err.c_str(), why ?: @""]);

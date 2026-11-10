@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -30,8 +31,16 @@
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
+#  include <objbase.h>
+#  include <shellapi.h>
 #else
 #  include <dlfcn.h>
+#  include <spawn.h>
+#  include <sys/wait.h>
+#  ifdef __APPLE__
+#    include <crt_externs.h>
+#  endif
+extern char **environ;
 #endif
 
 using namespace ntscrt_ofx;
@@ -46,6 +55,8 @@ const char kPresetFileParam[] = "host_preset_file";
 const char kLoadParam[] = "host_load_preset";
 const char kSaveParam[] = "host_save_preset";
 const char kSeedParam[] = "host_seed";
+const char kDebugParam[] = "host_debug_logging";
+const char kOpenLogsParam[] = "host_open_logs";
 const char kHostGroup[] = "grp_host_presets";
 const char kNoPreset[] = "(none)";
 
@@ -167,22 +178,33 @@ bool wrap_padded(OFX::Image &im, const OfxRectI &r, ntscrt_image &out, std::vect
 // instance, the first renders of each instance and every failure. For bug reports.
 //   Windows: %LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log    macOS: ~/Library/Logs/NTSCRT/ntscrt-ofx.log
 //   NTSCRT_OFX_LOG=<file> logs there instead ("off" disables), NTSCRT_OFX_LOG_VERBOSE=1 logs every frame.
+//   The per-instance "Debug logging" checkbox logs every frame of that instance in detail.
 // Rotated to ntscrt-ofx.old.log at 1 MB.
 namespace dlog {
 std::mutex &mu() { static std::mutex m; return m; }
+std::filesystem::path default_path() {
+    namespace fs = std::filesystem;
+#ifdef _WIN32
+    const char *base = std::getenv("LOCALAPPDATA");
+    return base ? fs::u8path(base) / "NTSCRT" / "ntscrt-ofx.log" : fs::path();
+#else
+    const char *home = std::getenv("HOME");
+    return home ? fs::u8path(home) / "Library" / "Logs" / "NTSCRT" / "ntscrt-ofx.log" : fs::path();
+#endif
+}
 std::filesystem::path path() {
     static const std::filesystem::path p = [] {
         namespace fs = std::filesystem;
         if (const char *e = std::getenv("NTSCRT_OFX_LOG"); e && *e) return std::string(e) == "off" ? fs::path() : fs::u8path(e);
-#ifdef _WIN32
-        const char *base = std::getenv("LOCALAPPDATA");
-        return base ? fs::u8path(base) / "NTSCRT" / "ntscrt-ofx.log" : fs::path();
-#else
-        const char *home = std::getenv("HOME");
-        return home ? fs::u8path(home) / "Library" / "Logs" / "NTSCRT" / "ntscrt-ofx.log" : fs::path();
-#endif
+        return default_path();
     }();
     return p;
+}
+// Folder "Open logs folder" shows: the log's folder (the default one when logging is off).
+std::filesystem::path folder() {
+    std::filesystem::path p = path();
+    if (p.empty()) p = default_path();
+    return p.empty() ? p : p.parent_path();
 }
 bool verbose() {
     static const bool v = [] { const char *e = std::getenv("NTSCRT_OFX_LOG_VERBOSE"); return e && *e && *e != '0'; }();
@@ -233,6 +255,77 @@ std::string rect(const OfxRectI &r) {
     o << r.x1 << ',' << r.y1 << '-' << r.x2 << ',' << r.y2 << " (" << (r.x2 - r.x1) << 'x' << (r.y2 - r.y1) << ')';
     return o.str();
 }
+
+// Is there a desktop to show a folder on? Not when the host runs headless
+// (Resolve -nogui) or NTSCRT_OFX_NO_OPEN is set (tests, CI).
+bool has_gui() {
+    if (const char *e = std::getenv("NTSCRT_OFX_NO_OPEN"); e && *e && *e != '0') return false;
+#ifdef _WIN32
+    std::wstring cl = GetCommandLineW();
+    std::transform(cl.begin(), cl.end(), cl.begin(), [](wchar_t c) { return wchar_t(towlower(c)); });
+    if (cl.find(L"-nogui") != std::wstring::npos) return false;
+    HWINSTA ws = GetProcessWindowStation();
+    USEROBJECTFLAGS uof{};
+    if (ws && GetUserObjectInformationW(ws, UOI_FLAGS, &uof, sizeof uof, nullptr) && !(uof.dwFlags & WSF_VISIBLE))
+        return false;  // service / non-interactive session
+    return true;
+#elif defined(__APPLE__)
+    char **argv = *_NSGetArgv();
+    for (int i = 0, n = *_NSGetArgc(); i < n && argv && argv[i]; ++i)
+        if (std::strcmp(argv[i], "-nogui") == 0) return false;
+    return true;
+#else
+    return std::getenv("DISPLAY") != nullptr;
+#endif
+}
+
+// "Open logs folder": create the folder, log the press, open it in Explorer / Finder
+// on a background thread. Never blocks the host and never throws.
+void open_folder(int instance) {
+    try {
+        namespace fs = std::filesystem;
+        const fs::path dir = folder();
+        std::ostringstream o;
+        o << "instance #" << instance << " open logs folder: " << u8(dir);
+        if (dir.empty()) {
+            write(o.str() + " (no folder: HOME / LOCALAPPDATA unset)");
+            return;
+        }
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (!has_gui()) {
+            write(o.str() + " (no GUI: not opened)");
+            return;
+        }
+        write(o.str());
+#ifdef _WIN32
+        std::thread([w = dir.wstring()] {
+            HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            auto r = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+            if (r <= 32) write("open logs folder: ShellExecute failed (" + std::to_string(r) + ")");
+            if (SUCCEEDED(hr)) CoUninitialize();
+        }).detach();
+#else
+        std::thread([s = u8(dir)] {
+#  ifdef __APPLE__
+            const char *tool = "/usr/bin/open";
+#  else
+            const char *tool = "xdg-open";
+#  endif
+            const char *argv[] = {tool, s.c_str(), nullptr};
+            pid_t pid = 0;
+            int rc = posix_spawnp(&pid, tool, nullptr, nullptr, const_cast<char *const *>(argv), environ);
+            if (rc != 0) {
+                write("open logs folder: spawn failed (" + std::to_string(rc) + ")");
+                return;
+            }
+            int status = 0;
+            waitpid(pid, &status, 0);
+        }).detach();
+#endif
+    } catch (...) {
+    }
+}
 }  // namespace dlog
 
 // ---------------------------------------------------------------------------
@@ -260,6 +353,7 @@ public:
         loop_preset_ = g_.loops.empty() ? nullptr : fetchChoiceParam(kLoopPresetParam);
         preset_file_ = fetchStringParam(kPresetFileParam);
         seed_ = fetchIntParam(kSeedParam);
+        debug_ = fetchBooleanParam(kDebugParam);
 
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, g_.res_dir.c_str()};
         if (ntscrt_create(&ci, &inst_) != NTSCRT_OK) inst_ = nullptr;
@@ -312,6 +406,18 @@ public:
     }
 
     void changedParam(const OFX::InstanceChangedArgs &args, const std::string &name) override {
+        // Diagnostics only: they never touch the look, so no cache flush.
+        if (name == kOpenLogsParam) {
+            dlog::open_folder(id_);
+            return;
+        }
+        if (name == kDebugParam) {
+            bool on = false;
+            try { debug_->getValue(on); } catch (...) {}
+            dlog::write("instance #" + std::to_string(id_) + " debug logging " + (on ? "on" : "off"));
+            last_look_hash_ = 0;  // log the full look on the next frame
+            return;
+        }
         // Temporal caches in the core only sample keyframe history, so any param
         // change (user edit, keyframe add/remove, preset apply/load = plugin edit)
         // must drop them. Pure time changes don't.
@@ -512,6 +618,8 @@ private:
     OFX::ChoiceParam *preset_ = nullptr, *loop_preset_ = nullptr;
     OFX::StringParam *preset_file_ = nullptr;
     OFX::IntParam *seed_ = nullptr;
+    OFX::BooleanParam *debug_ = nullptr;
+    size_t last_look_hash_ = 0;  // debug logging: full look only when it changes
     ntscrt_instance *inst_ = nullptr;
     std::mutex mu_;
     bool applying_ = false;
@@ -535,11 +643,13 @@ struct RenderCtx {
     };
     std::map<const ntscrt_image *, Live> live;
     std::string look_buf, fb_buf;
+    int fetches = 0;  // other frames the core pulled (debug log)
 
     static const ntscrt_image *fetch(void *u, int64_t frame) {
         auto *c = static_cast<RenderCtx *>(u);
         double t = c->start + double(frame);
         if (t < c->start || t > c->end) return nullptr;
+        ++c->fetches;
         try {
             std::unique_ptr<OFX::Image> im(c->fx->src_->fetchImage(t));
             if (!im) return nullptr;
@@ -590,6 +700,7 @@ void NtscrtEffect::render(const OFX::RenderArguments &args) {
 }
 
 void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
+    const auto t_start = std::chrono::steady_clock::now();
     std::unique_ptr<OFX::Image> dst(dst_->fetchImage(args.time));
     std::unique_ptr<OFX::Image> src(src_->fetchImage(args.time));
     if (!dst || !src) OFX::throwSuiteStatusException(kOfxStatFailed);
@@ -605,10 +716,14 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         OFX::throwSuiteStatusException(kOfxStatErrImageFormat);
     }
 
+    const auto t_fetched = std::chrono::steady_clock::now();
     std::string look, fb;
     look_at_time(args.time, look, fb);
     int seed = 0;
     seed_->getValueAtTime(args.time, seed);
+    bool debug = false;
+    debug_->getValue(debug);
+    const auto t_looked = std::chrono::steady_clock::now();
 
     OfxRangeD range = source_frame_range();
     RenderCtx ctx{this, range.min, range.max, win, {}, {}, {}};
@@ -631,17 +746,36 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         report_error("NTSCRT: core failed to initialise");
         OFX::throwSuiteStatusException(kOfxStatFailed);
     }
+    const auto t_core = std::chrono::steady_clock::now();
     ntscrt_status st = ntscrt_render_cpu(inst_, &ra, &s, &d);
     ++renders_;
-    if (renders_ <= 20 || renders_ % 500 == 0 || dlog::verbose() || st != NTSCRT_OK) {
+    const auto t_done = std::chrono::steady_clock::now();
+    if (renders_ <= 20 || renders_ % 500 == 0 || dlog::verbose() || debug || st != NTSCRT_OK) {
+        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
         std::ostringstream o;
-        o << "instance #" << id_ << " render #" << renders_ << " t=" << args.time << " frame=" << ra.frame_index
-          << " fps=" << ra.fps << " scale=" << ra.render_scale << " dst=" << dlog::rect(win)
+        o << "instance #" << id_ << (debug ? " debug" : "") << " render #" << renders_ << " t=" << args.time
+          << " frame=" << ra.frame_index << " fps=" << ra.fps << " scale=" << ra.render_scale << " dst=" << dlog::rect(win)
           << " src=" << dlog::rect(src->getBounds()) << " depth=" << dlog::depth_name(src->getPixelDepth())
           << " premult=" << ra.source_premultiplied << " status=" << int(st)
           << (st != NTSCRT_OK ? std::string(" error=") + ntscrt_last_error(inst_) : std::string()) << " ms="
-          << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-        if (renders_ == 1) o << " look=" << look.substr(0, 400) << (look.size() > 400 ? "..." : "");
+          << std::chrono::duration_cast<std::chrono::milliseconds>(t_done - t0).count();
+        if (debug) {
+            // Per-phase timings (fetch = host images, look = reading every param, core = all stages)
+            // and the look: in full whenever it changes, otherwise its hash.
+            o.setf(std::ios::fixed);
+            o.precision(2);
+            o << " fetch_ms=" << ms(t_start, t_fetched) << " look_ms=" << ms(t_fetched, t_looked)
+              << " core_ms=" << ms(t_core, t_done) << " seed=" << seed << " temporal_fetches=" << ctx.fetches;
+            const size_t h = std::hash<std::string>{}(look) ^ (std::hash<std::string>{}(fb) << 1);
+            o << " look#" << std::hex << h << std::dec;
+            if (h != last_look_hash_) {
+                o << " look=" << look;
+                if (!fb.empty()) o << " feedback=" << fb;
+                last_look_hash_ = h;
+            }
+        } else if (renders_ == 1) {
+            o << " look=" << look.substr(0, 400) << (look.size() > 400 ? "..." : "");
+        }
         dlog::write(o.str());
     }
     if (st != NTSCRT_OK && st != NTSCRT_ERR_SOURCE_UNAVAILABLE) {
@@ -659,10 +793,32 @@ public:
     // projects by (id, major) and load the highest minor. So the major stays at
     // kOfxIdentityMajor (bump it only if old projects truly can't load the new
     // plug-in), and the minor grows with every release (X.Y.Z -> X*10000+Y*100+Z).
-    NtscrtFactory()
-        : PluginFactoryHelper<NtscrtFactory>(kPluginId, kOfxIdentityMajor,
-                                             NTSCRT_OFX_VERSION_MAJOR * 10000 + NTSCRT_OFX_VERSION_MINOR * 100 +
-                                                 NTSCRT_OFX_VERSION_PATCH) {}
+    NtscrtFactory() : PluginFactoryHelper<NtscrtFactory>(kPluginId, kOfxIdentityMajor, identity_minor()) {}
+
+    // A development copy loaded next to an installed one with the same version would lose
+    // (the host keeps one plug-in per id and version). NTSCRT_OFX_DEV_BUNDLE=<folder> (set by
+    // tests/resolve: run_resolve_tests.py --bundle, launch_resolve_dev.ps1) marks the copy
+    // inside that folder as a dev build that outranks every installed release.
+    static unsigned identity_minor() {
+        const unsigned release = NTSCRT_OFX_VERSION_MAJOR * 10000 + NTSCRT_OFX_VERSION_MINOR * 100 + NTSCRT_OFX_VERSION_PATCH;
+        return is_dev_copy() ? 999999u : release;
+    }
+    static bool is_dev_copy() {
+        const char *e = std::getenv("NTSCRT_OFX_DEV_BUNDLE");
+        if (!e || !*e) return false;
+        try {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const fs::path dev = fs::weakly_canonical(fs::u8path(e), ec);
+            const fs::path res = fs::weakly_canonical(fs::u8path(resource_dir()), ec);
+            auto d = dev.native(), r = res.native();
+            std::transform(d.begin(), d.end(), d.begin(), [](auto c) { return decltype(c)(c < 128 ? std::tolower(int(c)) : int(c)); });
+            std::transform(r.begin(), r.end(), r.begin(), [](auto c) { return decltype(c)(c < 128 ? std::tolower(int(c)) : int(c)); });
+            return !d.empty() && r.compare(0, d.size(), d) == 0;
+        } catch (...) {
+            return false;
+        }
+    }
     void load() override {}
     void unload() override {}
     void describe(OFX::ImageEffectDescriptor &desc) override;
@@ -674,7 +830,8 @@ void NtscrtFactory::describe(OFX::ImageEffectDescriptor &desc) {
     {
         const auto *h = OFX::getImageEffectHostDescription();
         std::ostringstream o;
-        o << "NTSCRT " << NTSCRT_VERSION_STRING << " loaded; resources " << globals().res_dir << "; host "
+        o << "NTSCRT " << NTSCRT_VERSION_STRING << (NtscrtFactory::is_dev_copy() ? " (dev copy, NTSCRT_OFX_DEV_BUNDLE)" : "")
+          << " loaded; resources " << globals().res_dir << "; host "
           << (h ? h->hostName + " (" + h->hostLabel + ") " + h->versionLabel : std::string("?"));
         dlog::write(o.str());
     }
@@ -836,6 +993,23 @@ void NtscrtFactory::describeInContext(OFX::ImageEffectDescriptor &desc, OFX::Con
         d->setAnimates(false);
         d->setEvaluateOnChange(false);
         d->setParent(*hg);
+    }
+    {
+        // Diagnostics: never part of the look or of presets, and not saved with the project
+        // (nobody ships a project that logs every frame by accident).
+        auto *d = desc.defineBooleanParam(kDebugParam);
+        d->setLabel("Debug logging");
+        d->setHint("Log every frame this effect renders (timings and the full look) to the NTSCRT log, "
+                   "for bug reports. Slows rendering slightly; turn it off when done.");
+        d->setDefault(false);
+        d->setIsPersistant(false);
+        d->setAnimates(false);
+        d->setEvaluateOnChange(false);
+        d->setParent(*hg);
+        auto *e = desc.definePushButtonParam(kOpenLogsParam);
+        e->setLabel("Open logs folder");
+        e->setHint("Show the folder with ntscrt-ofx.log in Explorer / Finder, to attach it to a bug report.");
+        e->setParent(*hg);
     }
     {
         auto *d = desc.defineIntParam(kSeedParam);

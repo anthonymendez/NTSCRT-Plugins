@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 #include <ntscrt/ntscrt.h>
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -186,4 +187,68 @@ TEST_CASE("model: only the selected CRT preset's shader params go into the look"
     json em = look_for("easymode");
     CHECK(em["shader"]["params"]["GAMMA_INPUT"].get<double>() == doctest::Approx(2.0));
     CHECK(em["shader"]["params"]["MASK_STRENGTH"].get<double>() == doctest::Approx(0.3));
+}
+
+TEST_CASE("model: diagnostics are host extras outside the look, presets and schema ids") {
+    json schema = json::parse(ntscrt_param_schema_json());
+    Model m = Model::from_schema(schema, load("fxplug/param_ids.json"), nullptr);
+    // fixed host ids, below every schema-mapped id, distinct from the other extras
+    CHECK(uint32_t(kDebugLogging) <= kLastHostID);
+    CHECK(uint32_t(kOpenLogs) <= kLastHostID);
+    CHECK(kLastHostID < kFirstMappedID);
+    CHECK(kDebugLogging != kOpenLogs);
+    CHECK(m.find_host(kDebugLogging) == nullptr);
+    CHECK(m.find_host(kOpenLogs) == nullptr);
+    for (const auto &p : m.params) {
+        CAPTURE(p.id);
+        CHECK(p.id.find("debug") == std::string::npos);
+    }
+    // presets can't set them, the look never contains them
+    json preset = {{"debug_logging", true}, {"debug", true}};
+    for (bool fb : {false, true}) {
+        auto v = m.host_values_from_preset(preset, fb);
+        CHECK(v.count(kDebugLogging) == 0);
+        CHECK(v.count(kOpenLogs) == 0);
+    }
+    json look = m.build_look(json::object(), [&](const Param &p) { return m.default_host_value(p); });
+    CHECK(look.dump().find("debug") == std::string::npos);
+
+    // the per-frame flag travels in the plug-in state, not in the look
+    RenderState s;
+    s.look = look.dump();
+    CHECK_FALSE(RenderState::parse(s.serialize())->debug);
+    CHECK(s.serialize().find("debug") == std::string::npos);  // states from before the flag stay identical
+    s.debug = true;
+    auto r = RenderState::parse(s.serialize());
+    REQUIRE(r.has_value());
+    CHECK(r->debug);
+    CHECK(r->look == s.look);
+}
+
+TEST_CASE("model: FileLog appends timestamped lines and rotates") {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::temp_directory_path() / "ntscrt_fx_filelog_test" / "Logs" / "NTSCRT";
+    std::error_code ec;
+    fs::remove_all(dir.parent_path().parent_path(), ec);
+    auto u = (dir / "ntscrt-fxplug.log").u8string();
+    FileLog log(std::string(u.begin(), u.end()), 200);
+    auto f = dir.u8string();
+    CHECK(log.folder() == std::string(f.begin(), f.end()));
+    log.write("first line");  // creates the folders
+    log.write("second line");
+    std::ifstream in(dir / "ntscrt-fxplug.log");
+    std::stringstream ss;
+    ss << in.rdbuf();
+    in.close();
+    const std::string text = ss.str();
+    CHECK(text.find("] first line\n") != std::string::npos);
+    CHECK(text.find("] second line\n") != std::string::npos);
+    CHECK(text[4] == '-');  // "YYYY-MM-DD HH:MM:SS.mmm [tid] msg"
+    for (int i = 0; i < 10; ++i) log.write("padding padding padding padding padding");
+    CHECK(fs::exists(dir / "ntscrt-fxplug.old.log"));
+    CHECK(fs::file_size(dir / "ntscrt-fxplug.log") < 400);
+    FileLog off("");
+    off.write("nothing");  // disabled: no-op, no throw
+    CHECK(off.folder().empty());
+    fs::remove_all(dir.parent_path().parent_path(), ec);
 }

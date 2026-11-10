@@ -20,7 +20,7 @@ NTSCRT.app                                   wrapper app (required by FxPlug 4)
     (schema groups → FxPlug subgroups, bool → checkbox, int/float → sliders,
     choice → popup, color → color well), plus *Preset* (bundled looks),
     *Load Preset…* / *Save Preset…* buttons, *Screen Loop* (Off / Custom / bundled
-    loops), *Seed* and *History Frames*;
+    loops), *Seed*, *History Frames*, *Debug Logging* and *Open Logs Folder*;
   - `pluginState:` evaluates every parameter at the render time and builds the
     look JSON (and Screen Loop JSON); with a temporal stage on (Digital, Glitch,
     Screen Loop) it also evaluates the look at up to 16 earlier frames (`look_at`);
@@ -63,7 +63,10 @@ NTSCRT.app                                   wrapper app (required by FxPlug 4)
    Check registration with `pluginkit -mAvvv -p FxPlug`.
 5. Restart Final Cut Pro; the effect is under **Effects → NTSCRT**.
 
-Debugging: `log stream --predicate 'eventMessage CONTAINS "[NTSCRT]"'`.
+Debugging: the renderer logs to `~/Library/Containers/<renderer bundle id>/Data/Library/Logs/NTSCRT/ntscrt-fxplug.log`
+(load, failures, the first 20 renders; every frame with timings and the look while *Debug Logging* is on;
+*Open Logs Folder* shows it in Finder). Load lines and failures also reach the system log:
+`log stream --predicate 'eventMessage CONTAINS "[NTSCRT]"'`.
 FCP stops using a plug-in that crashes 3 times within 30 s; restart FCP after a crash.
 
 ## CI: enabling the FxPlug job (what you must do)

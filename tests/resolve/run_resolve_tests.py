@@ -17,6 +17,8 @@ Tests (see README.md next to this file):
   depth     8-bit int / 16-bit int / 16-bit float / 32-bit float sources give the same result
   sizes     odd and portrait sizes render at the right size
   speed     ms per frame at 1920x1080 for every CRT preset (informational)
+  debug     "Debug logging" logs every frame (and doesn't change the picture); "Open logs folder"
+            is pressed if Fusion scripting can press it (only logged, no window, under --headless)
 
 Resolve loads the plug-in from its OFX folder, or from OFX_PLUGIN_PATH at startup:
 tests/resolve/launch_resolve_dev.ps1 starts Resolve with a build's bundle.
@@ -242,6 +244,9 @@ def start_headless(bundle, log_dir):
         shutil.rmtree(dev, ignore_errors=True)
         shutil.copytree(b, dev / "NTSCRT.ofx.bundle")
         env["OFX_PLUGIN_PATH"] = str(dev)
+        # An installed NTSCRT of the same version would otherwise win over the copy (Resolve keeps
+        # one plug-in per id + version): this marks the copy as a dev build that outranks it.
+        env["NTSCRT_OFX_DEV_BUNDLE"] = str(dev)
     env.setdefault("NTSCRT_OFX_LOG", str(Path(log_dir) / "ntscrt-ofx.log"))
     if not Path(RESOLVE_EXE).exists():
         raise RuntimeError(f"Resolve not found at {RESOLVE_EXE}")
@@ -698,13 +703,103 @@ class Suite:
             m[preset] = round(((time.time() - t0) / n - base) * 1000)
         self.record("speed", "pass", m, "ms per 1920x1080 frame added by NTSCRT (informational)")
 
+    def plugin_log(self):
+        """The log the plug-in in this Resolve writes (start_headless points it into --out)."""
+        if self.a.headless:
+            return Path(os.environ.get("NTSCRT_OFX_LOG") or Path(self.a.out) / "ntscrt-ofx.log")
+        if os.environ.get("NTSCRT_OFX_LOG"):  # only right if Resolve was started with the same env
+            return Path(os.environ["NTSCRT_OFX_LOG"])
+        if sys.platform == "win32":
+            return Path(os.environ.get("LOCALAPPDATA", "")) / "NTSCRT" / "ntscrt-ofx.log"
+        return Path.home() / "Library/Logs/NTSCRT/ntscrt-ofx.log"
+
+    @staticmethod
+    def log_size(p):
+        try:
+            return p.stat().st_size
+        except OSError:
+            return 0
+
+    @staticmethod
+    def log_since(p, offset):
+        try:
+            with open(p, "rb") as f:
+                f.seek(offset)
+                return f.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+
+    def t_debug(self):
+        log = self.plugin_log()
+        fu, _ = self.new_comp("debug")
+        src = self.scene(fu)
+        fx = self.ntscrt(fu, src)
+        if fx.GetInput("host_debug_logging") is None:
+            self.record("debug", "fail", {"log": str(log)}, "the loaded NTSCRT has no Debug logging input: Resolve "
+                        "loaded an older build (an installed copy of the same version wins without NTSCRT_OFX_DEV_BUNDLE)")
+            return
+        n = 3 if self.a.quick else 5
+        off = read_png(fu.render({"fx": fx}, [2], "debug-off")["fx"][2])
+        start = self.log_size(log)
+        fx.SetInput("host_debug_logging", 1)
+        on = fu.render({"fx": fx}, (2, 2 + n - 1), "debug-on")["fx"]
+        time.sleep(0.5)
+        text = self.log_since(log, start)
+        lines = [l for l in text.splitlines() if " debug render #" in l]
+        times = {l.split(" t=")[1].split()[0] for l in lines if " t=" in l}
+        same = stats(off, read_png(on[2]))["rgb"]["max"]
+        fx.SetInput("host_debug_logging", 0)
+        start_off = self.log_size(log)
+        fu.render({"fx": fx}, (2 + n, 2 + n + 1), "debug-after")
+        after = [l for l in self.log_since(log, start_off).splitlines() if " debug render #" in l]
+        m = {"log": str(log), "debug_lines": len(lines), "distinct_times": len(times), "full_look_lines": sum(" look={" in l for l in lines),
+             "lines_after_off": len(after), "max_rgb_diff_on_vs_off": same}
+        problems = []
+        if len(times) < n:
+            problems.append(f"{len(times)} frames logged in detail, expected {n}")
+        if not any(" look={" in l and "core_ms=" in l for l in lines):
+            problems.append("no line with the full look and timings")
+        if after:
+            problems.append(f"{len(after)} detailed lines after turning it off")
+        if same > 0:
+            problems.append(f"debug logging changed the picture (max diff {same})")
+
+        # "Open logs folder": Fusion scripting may not be able to press OFX push buttons. With
+        # -nogui the plug-in must only log the press (no Explorer / Finder window).
+        start_btn = self.log_size(log)
+        pressed = False
+        for value in (1, True):
+            try:
+                fx.SetInput("host_open_logs", value)
+            except Exception:
+                pass
+            time.sleep(1)
+            if "open logs folder:" in self.log_since(log, start_btn):
+                pressed = True
+                break
+        btn_text = self.log_since(log, start_btn)
+        alive = bool(self.r.GetVersionString()) and bool(fu.render({"fx": fx}, [2 + n + 2], "debug-alive")["fx"])
+        m.update({"button_pressed_from_script": pressed, "resolve_responsive_after": alive})
+        notes = []
+        if not alive:
+            problems.append("Resolve stopped answering after the button")
+        if pressed:
+            if self.a.headless and "(no GUI: not opened)" not in btn_text:
+                problems.append("button tried to open a window in headless Resolve")
+            notes.append("button press logged" + (" (no GUI: not opened)" if "no GUI" in btn_text else ""))
+        else:
+            notes.append("Fusion scripting can't press OFX push buttons (SetInput is ignored): button not tested")
+        if not self.a.headless and not log.exists():
+            notes.append(f"no log at {log} (Resolve started with another NTSCRT_OFX_LOG?)")
+        self.record("debug", "fail" if problems else "pass", m, "; ".join(problems + notes))
+
     # -- main -------------------------------------------------------------------
     def main(self):
         self.open_project()
         try:
             for name, fn in (("version", self.t_version), ("alpha", self.t_alpha), ("edit", self.t_edit),
                              ("order", self.t_order), ("cli", self.t_cli), ("depth", self.t_depth),
-                             ("sizes", self.t_sizes), ("speed", self.t_speed)):
+                             ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug)):
                 self.run(name, fn)
         finally:
             self.close()
@@ -730,7 +825,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", help="CMake build dir (finds ntscrt-cli and the bundle's resources)")
     ap.add_argument("--out", default=None, help="output folder (default: a new temp folder)")
-    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,depth,sizes,speed)")
+    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,depth,sizes,speed,debug)")
     ap.add_argument("--quick", action="store_true", help="fewer frames")
     ap.add_argument("--keep-project", action="store_true", help="stay in the test project afterwards")
     ap.add_argument("--headless", action="store_true",

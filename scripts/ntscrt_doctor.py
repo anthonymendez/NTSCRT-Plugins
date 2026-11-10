@@ -201,7 +201,22 @@ def plugin_log_paths():
     paths = [base / "ntscrt-ofx.log", base / "ntscrt-ofx.old.log", tmp / "ntscrt-ofx-dev" / "ntscrt-ofx.log"]
     if os.environ.get("NTSCRT_OFX_LOG"):
         paths.insert(0, Path(os.environ["NTSCRT_OFX_LOG"]))
+    if MAC:  # the Final Cut renderer is sandboxed: its log lives in its container
+        # (macOS 14+ may ask whether Terminal may "access data from other apps": allow it)
+        try:
+            for d in sorted((HOME / "Library" / "Containers").glob("*NTSCRT*/Data/Library/Logs/NTSCRT")):
+                paths += [d / "ntscrt-fxplug.log", d / "ntscrt-fxplug.old.log"]
+        except OSError:
+            pass
     return paths
+
+
+def log_name(p):
+    """Name in the zip: plugin-<folder>-<file>, plus the container for Final Cut logs."""
+    parts = Path(p).parts
+    if "Containers" in parts and len(parts) > parts.index("Containers") + 1:
+        return f"plugin-{parts[parts.index('Containers') + 1]}-{Path(p).name}"
+    return f"plugin-{Path(p).parent.name}-{Path(p).name}"
 
 
 def resolve_log_dirs():
@@ -214,14 +229,24 @@ def resolve_log_dirs():
 def collect_logs(r):
     found = []
     for p in plugin_log_paths():
-        if r.copy(p, f"plugin-{p.parent.name}-{p.name}"):
+        if r.copy(p, log_name(p)):
             found.append(str(p))
             text = p.read_text("utf-8", "replace")
-            fails = [l for l in text.splitlines() if "FAILED" in l or "error=" in l]
+            fails = [l for l in text.splitlines() if "FAILED" in l or "error=" in l or "] error: " in l]
             if fails:
-                r.note("FAIL", f"plug-in log has {len(fails)} failed renders, last: {fails[-1][:200]}")
+                r.note("FAIL", f"plug-in log {p.name} has {len(fails)} failures, last: {fails[-1][:200]}")
+            if " debug render #" in text or "] debug render #" in text:
+                r.note("info", f"{p.name}: includes Debug logging output")
     if not found:
-        r.note("info", "no NTSCRT plug-in log yet (the plug-in writes one once Resolve loads it)")
+        r.note("info", "no NTSCRT plug-in log yet (the plug-in writes one once Resolve / Final Cut loads it)")
+    r.section("Plug-in logs found", found or "none")
+    if MAC:
+        # [NTSCRT] lines the Final Cut renderer sent to the system log (load, failures).
+        out = run(["log", "show", "--last", "24h", "--style", "compact",
+                   "--predicate", 'eventMessage CONTAINS "[NTSCRT]"'], timeout=180)
+        dst = r.out / "files" / "macos-system-log-ntscrt-24h.txt"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(out[-(4 << 20):] + "\n", encoding="utf-8")
     # Resolve: only NTSCRT / OpenFX / error lines (the full log names your projects)
     pat = r"ntscrt|openfx|\bofx\b|fusion.*error|crash|exception|gpu|cuda|metal|opencl"
     for d in resolve_log_dirs():

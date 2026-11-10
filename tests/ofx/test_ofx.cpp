@@ -11,11 +11,41 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 
 using nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
+// Before the plug-in loads (it reads these once): keep the test runs out of the user's
+// log and never open a file-manager window from "Open logs folder".
+const fs::path kLogFile = [] {
+    fs::path p = fs::temp_directory_path() / "ntscrt_ofx_test.log";
+    std::error_code ec;
+    fs::remove(p, ec);
+    auto u = p.u8string();
+    std::string s(u.begin(), u.end());
+#ifdef _WIN32
+    _putenv_s("NTSCRT_OFX_LOG", s.c_str());
+    _putenv_s("NTSCRT_OFX_NO_OPEN", "1");
+#else
+    setenv("NTSCRT_OFX_LOG", s.c_str(), 1);
+    setenv("NTSCRT_OFX_NO_OPEN", "1", 1);
+#endif
+    return p;
+}();
+std::string read_log() {
+    std::ifstream f(kLogFile);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+size_t count(const std::string &hay, const std::string &needle) {
+    size_t n = 0;
+    for (size_t i = hay.find(needle); i != std::string::npos; i = hay.find(needle, i + 1)) ++n;
+    return n;
+}
+
 std::string host_name(const std::string &id) {
     std::string r = id;
     for (char &c : r)
@@ -180,6 +210,15 @@ TEST_CASE("describe: params match the schema") {
     CHECK(f.param("host_load_preset")->type == kOfxParamTypePushButton);
     CHECK(f.param("host_save_preset")->type == kOfxParamTypePushButton);
     CHECK(f.param("host_seed")->type == kOfxParamTypeInteger);
+    // diagnostics: in the Presets group, not saved with the project
+    mock::Param *dbg = f.param("host_debug_logging");
+    CHECK(dbg->type == kOfxParamTypeBoolean);
+    CHECK(dbg->props.i(kOfxParamPropDefault) == 0);
+    CHECK(dbg->props.i(kOfxParamPropPersistant) == 0);
+    CHECK(dbg->props.i(kOfxParamPropAnimates) == 0);
+    CHECK(dbg->props.s(kOfxParamPropParent) == "grp_host_presets");
+    CHECK(f.param("host_open_logs")->type == kOfxParamTypePushButton);
+    CHECK(f.param("host_open_logs")->props.s(kOfxParamPropParent) == "grp_host_presets");
 }
 
 TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
@@ -228,6 +267,33 @@ TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
         CHECK(f.param("downscale_enabled")->v[0] == 0);
         CHECK(f.param("ntsc_enabled")->v[0] == 1);  // missing key -> default
         fs::remove(tmp);
+    }
+
+    SUBCASE("presets and preset files leave the debug checkbox alone") {
+        mock::Param *dbg = f.param("host_debug_logging");
+        dbg->v[0] = 1;
+        mock::Param *pp = f.param("host_preset");
+        pp->v[0] = f.choice_index(*pp, "Clean VHS");
+        REQUIRE(f.changed("host_preset") == kOfxStatOK);
+        CHECK(dbg->v[0] == 1);
+        CHECK(dbg->sets == 0);
+        fs::path tmp = fs::temp_directory_path() / "ntscrt_ofx_test_preset2.json";
+        auto u8 = tmp.u8string();
+        f.param("host_preset_file")->str = std::string(u8.begin(), u8.end());
+        REQUIRE(f.changed("host_save_preset") == kOfxStatOK);
+        std::ifstream in(tmp);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        in.close();
+        fs::remove(tmp);
+        CHECK(ss.str().find("debug") == std::string::npos);
+    }
+
+    SUBCASE("Open logs folder logs the press and opens nothing without a GUI") {
+        REQUIRE(f.changed("host_open_logs") == kOfxStatOK);
+        std::string log = read_log();
+        CHECK(log.find("open logs folder: ") != std::string::npos);
+        CHECK(log.find("(no GUI: not opened)") != std::string::npos);
     }
 
     SUBCASE("clip preferences declare frame varying output") {
@@ -282,5 +348,26 @@ TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
             if (std::fabs(out[i] - ref[i]) > 1.0f / 255.0f + 1e-6f) ++bad;
         CHECK(bad == 0);
         CHECK(std::count(src.fetched.begin(), src.fetched.end(), 20) >= 1);
+
+        // Debug logging: one detailed line per frame, full look once, output unchanged.
+        const std::string before = read_log();
+        f.param("host_debug_logging")->v[0] = 1;
+        REQUIRE(f.changed("host_debug_logging") == kOfxStatOK);
+        for (double t : {21.0, 22.0, 23.0}) {
+            in.set(kOfxPropTime, {t});
+            REQUIRE(f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in) == kOfxStatOK);
+        }
+        const std::string added = read_log().substr(before.size());
+        MESSAGE(added);
+        CHECK(added.find("debug logging on") != std::string::npos);
+        CHECK(count(added, " debug render #") == 3);
+        for (const char *t : {" t=21 ", " t=22 ", " t=23 "}) CHECK(added.find(t) != std::string::npos);
+        CHECK(count(added, "core_ms=") == 3);
+        CHECK(count(added, " look={") == 1);  // the look didn't change between frames
+        const std::vector<float> &ref23 = src.frames[23];
+        bad = 0;
+        for (size_t i = 0; i < out.size(); ++i)
+            if (std::fabs(out[i] - ref23[i]) > 1.0f / 255.0f + 1e-6f) ++bad;
+        CHECK(bad == 0);
     }
 }

@@ -14,6 +14,21 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Added
+- *Presets → Debug logging* checkbox (Resolve and Final Cut): logs every frame that effect renders, with
+  per-phase timings and the full look, for bug reports. Presets never change it; Resolve doesn't save it with the project.
+- *Presets → Open logs folder* button: shows the NTSCRT log folder in Explorer / Finder (when Resolve runs
+  without a window, `-nogui`, it only logs the press).
+- Final Cut plug-in: a log file like the Resolve one (`ntscrt-fxplug.log` in the renderer's sandbox container,
+  `~/Library/Containers/<renderer>/Data/Library/Logs/NTSCRT/`). Load lines and failures also go to the system log.
+- `ntscrt_doctor.py` collects the Final Cut log and the last 24 hours of `[NTSCRT]` system-log lines on macOS.
+- Resolve test suite: `debug` test (Debug logging logs every frame without changing the picture).
+
+### Fixed
+- `run_resolve_tests.py --bundle` and `launch_resolve_dev.ps1` tested the *installed* plug-in whenever it had the
+  same version as the build (Resolve keeps one plug-in per id and version). The dev copy now outranks it
+  (`NTSCRT_OFX_DEV_BUNDLE`).
+
 ### Changed
 - README: the before/after preview is now an animated GIF (`scripts/make_previews.ps1` renders it with ffmpeg).
 - README previews: the looks grid is an animated GIF too, and both GIFs are now rendered by the OpenFX plug-in in

@@ -13,7 +13,9 @@ the alpha / frame handling in `core/`.
   ```powershell
   .\tests\resolve\launch_resolve_dev.ps1 -Bundle C:\ntb\main\ofx\Release\NTSCRT.ofx.bundle
   ```
-  That also sets `NTSCRT_OFX_LOG`, where the plug-in writes why a render failed.
+  That also sets `NTSCRT_OFX_LOG`, where the plug-in writes why a render failed, and
+  `NTSCRT_OFX_DEV_BUNDLE`, which makes the copy outrank an installed NTSCRT of the same version
+  (Resolve keeps only one plug-in per id and version; without it the installed one wins).
 
 ## Run
 ```bash
@@ -50,6 +52,7 @@ timeline's resolution from a script crashed Resolve 21.1.2, so other sizes are m
 | depth | 8-bit int, 16-bit int, 16-bit float sources | each within mean 1.5 of the 32-bit float result |
 | sizes | 1279×719, 1080×1920, 321×241 sources inside Fusion | renders, not black, lines up with the bypassed source |
 | speed | 1920×1080, every CRT preset | informational: ms per frame NTSCRT adds |
+| debug | *Debug logging* on for a few frames, then off; *Open logs folder* pressed (`SetInput`) | one detailed log line (timings, look) per frame, none after turning it off, the picture unchanged; the button press is logged and, headless, opens no window; Resolve still answers |
 
 ## When something fails
 Open the diff image named in the report (differences ×8). For render errors, read the

@@ -73,9 +73,21 @@ The zip is plain text. It contains:
 Nothing is uploaded anywhere. Look through it if you like, then send it along with a description of
 what went wrong.
 
-The plug-in's own log, if you want to look:
-- Windows: `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log`
-- macOS: `~/Library/Logs/NTSCRT/ntscrt-ofx.log`
+### Debug logging (for a specific problem)
+The plug-in always keeps a small log (start-up, the first frames of each effect, every error). To capture
+**every** frame of the problem:
+1. Select the effect. In its *Presets* group, tick **Debug logging**.
+2. Reproduce the problem: play, scrub or render the frames that look wrong.
+3. Untick **Debug logging** (it slows rendering a little). Resolve doesn't save it with the project.
+4. Click **Open logs folder**: Explorer / Finder opens the folder with the log. Attach that file, or run the
+   doctor above, which collects it.
+
+Where the logs are:
+- Resolve, Windows: `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log`
+- Resolve, macOS: `~/Library/Logs/NTSCRT/ntscrt-ofx.log`
+- Final Cut: `~/Library/Containers/<NTSCRT Renderer>/Data/Library/Logs/NTSCRT/ntscrt-fxplug.log` (Final Cut's
+  plug-ins run sandboxed). On macOS 14 and later, the doctor may make Terminal ask to "access data from other
+  apps": allow it, so it can collect this log.
 
 ## 4. Uninstall
 - Windows: *Settings → Apps → NTSCRT plug-in installer → Uninstall*.

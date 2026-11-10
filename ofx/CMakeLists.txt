@@ -45,6 +45,9 @@ add_library(ntscrt_ofx MODULE
   ofx_params.cpp
   ofx_params.h)
 target_link_libraries(ntscrt_ofx PRIVATE ntscrt_ofx_support ntscrt_core nlohmann_json::nlohmann_json)
+if(WIN32)
+  target_link_libraries(ntscrt_ofx PRIVATE shell32 ole32)  # "Open logs folder" (ShellExecuteW)
+endif()
 target_compile_definitions(ntscrt_ofx PRIVATE
   NTSCRT_VERSION_STRING="${PROJECT_VERSION}"
   NTSCRT_OFX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}

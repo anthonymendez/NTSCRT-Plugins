@@ -40,3 +40,23 @@ TEST_CASE("build_look writes only the selected CRT preset's shader params") {
         if (!shared) CHECK_MESSAGE(!em["shader"]["params"].contains(p.path.substr(15)), p.id);
     }
 }
+
+TEST_CASE("diagnostics are host extras: no schema param, never in the look or presets") {
+    // "Debug logging" / "Open logs folder" are defined by the plug-in itself (host_debug_logging,
+    // host_open_logs), so they can't reach build_look or preset_value through the schema.
+    Schema s = Schema::parse(ntscrt_param_schema_json());
+    for (const auto &p : s.params) {
+        CAPTURE(p.id);
+        CHECK(p.id.find("debug") == std::string::npos);
+        CHECK(p.name.rfind("host_", 0) != 0);
+        CHECK(p.path.find("debug") == std::string::npos);
+    }
+    json look, fb;
+    build_look(s, [&](size_t i) { return s.params[i].def; }, look, fb);
+    CHECK(look.dump().find("debug") == std::string::npos);
+    json preset = {{"debug_logging", true}, {"host_debug_logging", true}};
+    for (const auto &p : s.params) {
+        auto v = preset_value(p, preset, false);
+        if (v) CHECK(*v == p.def);  // unknown keys are ignored: every param gets its default
+    }
+}
