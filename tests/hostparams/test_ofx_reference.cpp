@@ -136,7 +136,9 @@ TEST_CASE("OpenFX: every bundled preset builds the look and feedback it built be
         json look = def["look"], fb = def["feedback"];
         look.merge_patch(patch["look"]);
         fb.merge_patch(patch["feedback"]);
-        CHECK_MESSAGE(close(it->second.look, look, where), "look " << where);
-        CHECK_MESSAGE(close(it->second.feedback, fb, where), "feedback " << where);
+        // 1e-6: the reference was written on Windows; CRT shader params that timeline keys lerp in
+        // float (core/params/timeline.h) differ in the last float bit on macOS (1.1000000238 vs 1.0999999046).
+        CHECK_MESSAGE(close(it->second.look, look, where, "", 1e-6), "look " << where);
+        CHECK_MESSAGE(close(it->second.feedback, fb, where, "", 1e-6), "feedback " << where);
     }
 }
