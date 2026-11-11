@@ -1,6 +1,10 @@
 # Regenerates the README previews in docs/images/ (hero-before-after.webp, looks-grid.webp).
 #
-#   powershell.exe -NoProfile -File scripts/make_previews.ps1 [-Cli path/to/ntscrt-cli.exe] [-Resources DIR]
+#   powershell.exe -NoProfile -File scripts/make_previews.ps1 -Build <cmake build dir>
+#                  [-Cli path/to/ntscrt-cli.exe] [-Resources DIR]
+#
+# -Build defaults to the NTSCRT_BUILD_DIR environment variable; -Cli and -Resources default to
+# ntscrt-cli and the OpenFX bundle's Resources folder inside it.
 #
 # Draws a looping synthetic test scene (no third-party footage; the grid scrolls, so the temporal
 # effects show), renders it with a few looks and composites two animated WebP images with
@@ -13,8 +17,9 @@
 #    OpenFX plug-in inside DaVinci Resolve, headless, then calls this script with -Renders to
 #    composite them. It also uses -SceneOnly to get the scene frames.
 param(
-    [string]$Cli = 'C:/ntb/main/tools/ntscrt-cli/Release/ntscrt-cli.exe',
-    [string]$Resources = 'C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle/Contents/Resources',
+    [string]$Build = $env:NTSCRT_BUILD_DIR,   # CMake build dir (for -Cli / -Resources)
+    [string]$Cli = '',
+    [string]$Resources = '',
     [string]$OutDir = '',
     [string]$WorkDir = '',
     [switch]$SceneOnly,          # only write the scene frames (WorkDir/seq/in_0000.png ...) and stop
@@ -129,9 +134,10 @@ function Write-Look([string]$name, [string]$json) {
     $p = Join-Path $WorkDir "$name.json"; [IO.File]::WriteAllText($p, $json); $p
 }
 
-function Invoke-RenderSeq([string]$exe, [string]$resDir, [string]$pattern, [string]$outPattern, [string]$look, [int]$first, [int]$frames) {
+function Invoke-RenderSeq([string]$exe, [string]$resDir, [string]$pattern, [string]$outPattern, [string]$look, [int]$first, [int]$frames, [bool]$timeline = $false) {
     $a = @('--seq', $pattern, '--out', $outPattern, '--resources', $resDir, '--fps', '30', '--frame', "$first", '--frames', "$frames")
     if ($look) { $a += @('--look', $look) }
+    if ($timeline) { $a += @('--timeline') }   # an animated preset, keyed from frame 0 as the plug-ins do
     & $exe @a
     if ($LASTEXITCODE -ne 0) { throw "ntscrt-cli failed for $outPattern" }
 }
@@ -217,7 +223,7 @@ if (-not $ffmpeg) { throw 'ffmpeg not found on PATH' }
 $presets = Join-Path $repo 'presets'
 $looks = @(
     @{ Name = 'default';     Label = 'Default look';               Look = (Write-Look 'default' '{}'); Start = 0 },
-    @{ Name = 'vhold';       Label = 'V Hold glitch';              Look = (Join-Path $presets 'V Hold glitch.json'); Start = 30 },
+    @{ Name = 'vhold';       Label = 'V Hold glitch';              Look = (Join-Path $presets 'V Hold glitch.json'); Start = 30; Timeline = $true },
     @{ Name = 'obliterated'; Label = 'Obliterated';                Look = (Join-Path $presets 'Obliterated.json'); Start = 0 },
     @{ Name = 'webcam';      Label = 'Webcam (low quality)';       Look = (Join-Path $presets 'Webcam (low quality).json'); Start = 0 },
     @{ Name = 'royale';      Label = 'CRT Royale shader (2x close-up)'; Look = (Write-Look 'royale' '{"shader": {"enabled": true, "preset": "royale"}}'); Start = 0; Crop = @(300, 20) }
@@ -225,8 +231,12 @@ $looks = @(
 if ($Renders) {
     $rdir = $Renders
 } else {
+    if (-not $Cli -and $Build) { $Cli = Join-Path $Build 'tools/ntscrt-cli/Release/ntscrt-cli.exe' }
+    if (-not $Resources -and $Build) { $Resources = Join-Path $Build 'ofx/Release/NTSCRT.ofx.bundle/Contents/Resources' }
+    if (-not $Cli -or -not (Test-Path $Cli)) { throw "ntscrt-cli not found ('$Cli'): pass -Build <build dir> (or set NTSCRT_BUILD_DIR) or -Cli" }
+    if (-not $Resources -or -not (Test-Path $Resources)) { throw "plug-in resources not found ('$Resources'): pass -Build or -Resources" }
     $rdir = Join-Path $WorkDir 'renders'; New-Item -ItemType Directory -Force $rdir | Out-Null
-    foreach ($l in $looks) { Invoke-RenderSeq $Cli $Resources $inPattern (Join-Path $rdir "$($l.Name)-%04d.png") $l.Look $l.Start $GifFrames }
+    foreach ($l in $looks) { Invoke-RenderSeq $Cli $Resources $inPattern (Join-Path $rdir "$($l.Name)-%04d.png") $l.Look $l.Start $GifFrames ([bool]$l.Timeline) }
 }
 function Frame($l, [int]$k) { Join-Path $rdir ('{0}-{1:D4}.png' -f $l.Name, ($l.Start + $k)) }
 

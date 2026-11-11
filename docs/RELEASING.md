@@ -105,3 +105,10 @@ NTSCRT `crt-smoke` references) and `tests/golden/self/ref/` (our own baselines);
 regenerates the self-references first: `cmake --build <build> --config Release --target golden-update`,
 review the image diff, commit. After an upstream sync, re-run the **golden** workflow and commit its
 `golden-refs` artifact into `tests/golden/ref/`.
+
+The same goes for the pictures in the docs: after a look change, or when presets are added, regenerate the
+README previews (`python scripts/make_previews_resolve.py --build <build>`) and the
+[presets gallery](PRESETS-GALLERY.md) (`python scripts/make_presets_gallery.py --build <build>`; `--only` for
+a few presets). Both render through the plug-in in headless Resolve Studio (closed first) and check the
+result against `ntscrt-cli`; `NTSCRT_BUILD_DIR` can stand in for `--build`
+([ENVIRONMENT.md](ENVIRONMENT.md)).

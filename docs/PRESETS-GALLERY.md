@@ -1,6 +1,6 @@
 # Presets gallery
 
-Every preset that ships with the NTSCRT plug-ins, applied to the same synthetic test scene (a looping synthwave grid, 2 s at 30 fps) so they can be compared side by side. In DaVinci Resolve they're in the NTSCRT effect's Inspector, in the **Presets** group at the top: **Preset** (looks and Digital video formats), **Screen Loop preset**, and **CRT shader → Shader**. Choosing a preset writes its values into the controls below it, so you can tweak or keyframe them afterwards.
+Every preset that ships with the NTSCRT plug-ins, applied to the same synthetic test scene (a looping synthwave grid, 2 s at 30 fps) so they can be compared side by side. In DaVinci Resolve they're in the NTSCRT effect's Inspector, in the **Presets** group at the top: **Preset** (looks and Digital video formats) and **Screen Loop preset**; the CRT shaders are in **CRT → Shader**. Choosing a preset writes its values into the controls below it, so you can tweak or keyframe them afterwards.
 
 The GIFs loop; the animated looks loop one pass of their keyframes. They're scaled down to 336 px and limited to a GIF palette, so fine detail (scanlines, masks, noise) looks rougher than in a real render.
 
@@ -120,7 +120,7 @@ Entries named `Digital video/<format>` in **Presets → Preset**: they turn on t
 
 ## CRT shaders
 
-**CRT shader → Shader**: the libretro slang CRT shaders over the default look (which uses CRT Glow (Gaussian)). Best seen at full size: the GIFs are scaled down, so the masks and scanlines blur. (7 presets)
+**CRT → Shader**: the libretro slang CRT shaders over the default look (which uses CRT Glow (Gaussian)). Best seen at full size: the GIFs are scaled down, so the masks and scanlines blur. (7 presets)
 
 <table>
 <tr>
@@ -152,7 +152,7 @@ Every preset was checked against `ntscrt-cli` given the preset file (`--timeline
 Regenerate the GIFs and this page (Resolve Studio closed, ffmpeg on PATH; `--renderer cli` renders without Resolve):
 
 ```
-python scripts/make_presets_gallery.py --bundle C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle --build C:/ntb/main
+python scripts/make_presets_gallery.py --build <your CMake build dir>
 ```
 
 New presets in `presets/`, new Digital video formats and new CRT shaders in `core/params/schema.json` are picked up automatically.
