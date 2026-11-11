@@ -33,7 +33,7 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   default (`latest`) skips; testers install one with `-Version` / `--version vX.Y.Z-rc.N`.
 - **Animated presets:** choosing *Glitch pop*, *15 second glitches* and the other bundled looks with upstream
   timeline keys now plays their animation: the keys become host keyframes (one per frame on each moving control,
-  one per change on toggles and menus), the timeline's duration from the clip's first frame at the clip's frame
+  two per change on toggles and menus), the timeline's duration from the clip's first frame at the clip's frame
   rate, looping to the clip's end (at most 3600 frames), evaluated as the NTSCRT app does (easing, step snapping,
   held toggles). `core/params/timeline.h` holds the shared evaluation; the FxPlug model gains `preset_keys`.
 - **Digital video formats** (Webcam (2005), Video call, MiniDV, Early web video, CD-ROM (Video 1), Datamosh) in the

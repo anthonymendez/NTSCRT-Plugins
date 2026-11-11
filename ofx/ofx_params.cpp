@@ -430,14 +430,19 @@ PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t 
             if (still && !json_equal(v.back(), v.front())) still = false;
         }
         auto &keys = out.keys[pi];
-        if (still) {
+        if (still || !p.animatable) {  // a param the host can't key: the timeline's first value
             keys.emplace_back(0, v.front());
             continue;
         }
         const bool stepped = p.type == PType::Bool || p.type == PType::Choice;
         for (int64_t n = 0; n < out.frames; ++n) {
             const json &x = v[size_t(n % out.pass)];
-            if (stepped && !keys.empty() && json_equal(keys.back().second, x)) continue;
+            if (stepped && !keys.empty()) {
+                if (json_equal(keys.back().second, x)) continue;
+                // The old value again just before the change: hosts that interpolate a
+                // checkbox / menu (Fusion) then still switch exactly at frame n.
+                if (keys.back().first < n - 1) keys.emplace_back(n - 1, keys.back().second);
+            }
             keys.emplace_back(n, x);
         }
     }

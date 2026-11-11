@@ -7,6 +7,7 @@
 #include "../../core/stages/digital/migrate.h"
 
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -39,6 +40,22 @@ json keyed_value(const std::vector<std::pair<int64_t, json>> &keys, int64_t n) {
     for (const auto &[f, x] : keys)
         if (f <= n) v = x;
     return v;
+}
+// json equality with numbers equal to 1e-9 (presets carry 0.029 and 0.028999999999999998).
+bool near(const json &a, const json &b) {
+    if (a.is_number() && b.is_number()) return std::fabs(a.get<double>() - b.get<double>()) < 1e-9;
+    if (a.type() != b.type() || a.size() != b.size()) return false;
+    if (a.is_object()) {
+        for (auto &[k, v] : a.items())
+            if (!b.contains(k) || !near(v, b[k])) return false;
+        return true;
+    }
+    if (a.is_array()) {
+        for (size_t i = 0; i < a.size(); ++i)
+            if (!near(a[i], b[i])) return false;
+        return true;
+    }
+    return a == b;
 }
 // The look a host holding `pk` sends at frame n.
 json host_look(const PresetKeys &pk, const json &preset, int64_t n) {
@@ -123,7 +140,16 @@ TEST_CASE("timeline: easing, segments, frame mapping and looping (upstream Timel
 TEST_CASE("animated preset -> host keyframes match the upstream evaluation") {
     const Schema &s = schema();
     const double fps = 24;
-    for (const std::string name : {"Glitch pop", "V Hold glitch", "15 second glitches", "Very wavy"}) {
+    // every bundled look with timeline keys (all of them must be playable by the host)
+    std::vector<std::string> names;
+    for (const auto &e : std::filesystem::directory_iterator(std::string(NTSCRT_SOURCE_DIR) + "/presets")) {
+        if (e.path().extension() != ".json") continue;
+        const std::string n = e.path().stem().string();
+        const json j = read_preset(n);
+        if (j.contains("timeline") && !j["timeline"].value("keys", json::array()).empty()) names.push_back(n);
+    }
+    CHECK(names.size() >= 16);
+    for (const std::string &name : names) {
         CAPTURE(name);
         const json preset = read_preset(name);
         const PresetKeys pk = preset_keys(s, preset, fps, 120);
@@ -147,11 +173,12 @@ TEST_CASE("animated preset -> host keyframes match the upstream evaluation") {
         json first = host_look(pk, preset, 0);
         bool changed = false;
         for (int64_t n : {int64_t(0), int64_t(1), pk.pass / 3, pk.pass / 2, pk.pass - 1, pk.pass, pk.pass + 7, int64_t(119)}) {
+            if (n >= pk.frames) continue;
             CAPTURE(n);
             const json want = as_host_look(preset_look_at_frame(s, preset, n, fps));
             const json got = host_look(pk, preset, n);
-            CHECK(got == want);
-            if (got != first) changed = true;
+            CHECK_MESSAGE(near(got, want), json::diff(want, got).dump());
+            if (!near(got, first)) changed = true;
         }
         CHECK(changed);
         // Past the keyed stretch the last key holds.

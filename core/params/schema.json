@@ -922,7 +922,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/scale_settings",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -965,7 +965,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/scale_with_video_size",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/settings/scale_settings"
   },
   {
@@ -978,7 +978,7 @@
    "max": 2147483647,
    "step": 1,
    "path": "/ntsc/settings/random_seed",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1021,7 +1021,7 @@
     }
    ],
    "path": "/ntsc/settings/use_field",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1044,7 +1044,7 @@
     }
    ],
    "path": "/ntsc/settings/filter_type",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1072,7 +1072,7 @@
     }
    ],
    "path": "/ntsc/settings/input_luma_filter",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1100,7 +1100,7 @@
     }
    ],
    "path": "/ntsc/settings/chroma_lowpass_in",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1125,7 +1125,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/composite_noise",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1228,7 +1228,7 @@
     }
    ],
    "path": "/ntsc/settings/video_scanline_phase_shift",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1274,7 +1274,7 @@
     }
    ],
    "path": "/ntsc/settings/chroma_demodulation",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1298,7 +1298,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/head_switching",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1351,7 +1351,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/head_switching_start_mid_line",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/settings/head_switching"
   },
   {
@@ -1393,7 +1393,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/tracking_noise",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1478,7 +1478,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/ringing",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1532,7 +1532,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/luma_noise",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1587,7 +1587,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/chroma_noise",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1700,7 +1700,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/vhs_settings",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1729,7 +1729,7 @@
     }
    ],
    "path": "/ntsc/settings/vhs_tape_speed",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/settings/vhs_settings"
   },
   {
@@ -1756,7 +1756,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/vhs_sharpen_enabled",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/settings/vhs_settings"
   },
   {
@@ -1795,7 +1795,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/vhs_edge_wave_enabled",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/settings/vhs_settings"
   },
   {
@@ -1862,7 +1862,7 @@
    "type": "bool",
    "default": true,
    "path": "/ntsc/settings/vhs_chroma_vert_blend",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -1890,7 +1890,7 @@
     }
    ],
    "path": "/ntsc/settings/chroma_lowpass_out",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/ntsc/enabled"
   },
   {
@@ -2032,7 +2032,7 @@
    "default": true,
    "encode": "number",
    "path": "/glitch/values/closed_captions",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/glitch/enabled"
   },
   {
@@ -2149,7 +2149,7 @@
    "default": true,
    "encode": "number",
    "path": "/glitch/values/dropout_compensation",
-   "animatable": false,
+   "animatable": true,
    "enabled_if": "/glitch/enabled"
   },
   {

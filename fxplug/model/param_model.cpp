@@ -408,6 +408,19 @@ json Model::preset_look_at_frame(const json &preset, int64_t n, double fps) cons
     return ntscrt::timeline::look_at_frame(up, ntscrt::timeline::parse(up), timeline, n, fps);
 }
 
+namespace {
+// Host values equal, numbers to 1e-9 (presets carry 0.029 and 0.028999999999999998).
+bool same_host_value(const json &a, const json &b) {
+    if (a.is_number() && b.is_number()) return std::fabs(a.get<double>() - b.get<double>()) < 1e-9;
+    if (a.is_array() && b.is_array() && a.size() == b.size()) {
+        for (size_t i = 0; i < a.size(); ++i)
+            if (!same_host_value(a[i], b[i])) return false;
+        return true;
+    }
+    return a == b;
+}
+}  // namespace
+
 PresetKeys Model::preset_keys(const json &preset, double fps, int64_t available) const {
     namespace tl = ntscrt::timeline;
     PresetKeys out;
@@ -429,17 +442,22 @@ PresetKeys Model::preset_keys(const json &preset, double fps, int64_t available)
             json x = value_at(l, p.pointer);
             std::optional<json> h = x.is_null() ? std::nullopt : to_host_value(p, x);
             v.push_back(h ? *h : default_host_value(p));
-            if (still && v.back() != v.front()) still = false;
+            if (still && !same_host_value(v.back(), v.front())) still = false;
         }
         auto &keys = out.keys[p.host_id];
-        if (still) {
+        if (still || !p.animatable) {  // a param the host can't key: the timeline's first value
             keys.emplace_back(0, v.front());
             continue;
         }
         const bool stepped = p.kind == Kind::Bool || p.kind == Kind::Choice;
         for (int64_t n = 0; n < out.frames; ++n) {
             const json &x = v[size_t(n % out.pass)];
-            if (stepped && !keys.empty() && keys.back().second == x) continue;
+            if (stepped && !keys.empty()) {
+                if (same_host_value(keys.back().second, x)) continue;
+                // The old value again just before the change: hosts that interpolate a
+                // checkbox / menu then still switch exactly at frame n.
+                if (keys.back().first < n - 1) keys.emplace_back(n - 1, keys.back().second);
+            }
             keys.emplace_back(n, x);
         }
     }

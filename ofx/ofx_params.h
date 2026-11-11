@@ -116,8 +116,8 @@ struct PresetKeys {
     int64_t pass = 0;    // frames one timeline pass spans at the host rate (0 = not animated)
     int64_t frames = 0;  // frames written, from the effect's first frame
     // Per look param the preset sets: its keyframes (frame offset, value), or one
-    // (0, value) pair when it holds still. Stepped params (bool, choice) get a key
-    // where the value changes; the others a key on every frame (exact on every
+    // (0, value) pair when it holds still. Stepped params (bool, choice) get keys
+    // where the value changes (old value the frame before, new value on it); the others a key on every frame (exact on every
     // frame whatever interpolation the host uses between keys).
     std::map<size_t, std::vector<std::pair<int64_t, json>>> keys;
     bool animated() const { return pass > 0; }

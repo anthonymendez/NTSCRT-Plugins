@@ -91,8 +91,8 @@ struct PresetKeys {
     int64_t pass = 0;    // frames one timeline pass spans at the host rate (0 = not animated)
     int64_t frames = 0;  // frames keyed from the effect's first frame
     // host id -> (frame offset from the effect's first frame, host value). A single
-    // (0, v) entry = holds still: set v without keyframes. Bool / choice params get a
-    // key where the value changes, the others one on every frame.
+    // (0, v) entry = holds still: set v without keyframes. Bool / choice params get keys
+    // where the value changes (old value the frame before, new one on it), the others one on every frame.
     std::map<uint32_t, std::vector<std::pair<int64_t, json>>> keys;
     bool animated() const { return pass > 0; }
 };

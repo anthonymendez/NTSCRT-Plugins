@@ -81,7 +81,7 @@ writing each param's value at its JSON-Pointer `path`.
     "default": 0.05, "min": 0, "max": 1, "display_min": 0, "display_max": 0.5, "step": 0.001,
     "options": [{"value": "x", "label": "X"}],   // choice only; value is written to JSON
     "path": "/ntsc/settings/composite_noise_intensity",  // RFC 6901 JSON Pointer into the look (or "fb:/..." for feedback_json)
-    "animatable": true,                           // false = upstream "structure" params / enums / bools
+    "animatable": true,                           // false = holds for a whole render (upstream "structure", stage switches, menus outside the timeline)
     "enabled_if": "/ntsc/settings/composite_noise"  // optional: grey out when that path is false
   }]
 }
@@ -163,6 +163,6 @@ the core calls 0) and lasts `duration` seconds at the host's frame rate: `N = ro
 frame `n` at `t = (n mod N) / (N - 1)`, so it **loops** until the effect ends, as upstream's playback does (the
 timeline's own `fps` is ignored: it is upstream's rate for stills). Applying the preset clears every look
 param's keyframes and writes host keyframes for the params that move: one per frame for numbers (exact at
-every frame whatever interpolation the host uses between keys), one per change for bools and choices; params
+every frame whatever interpolation the host uses between keys), two per change for bools and choices (the old value on the frame before, the new one on the frame it changes, so hosts that interpolate them still switch on the right frame); params
 that hold still get a plain value. At most 3600 frames are keyed (the last values hold after that); with an
 unknown effect length, one pass. The FxPlug model offers the same (`Model::preset_keys`).
