@@ -8,7 +8,8 @@
 #       Info.plist                       (CFBundlePackageType XPC!)
 #       MacOS/NTSCRTRenderer             the FxPlug plug-in (FxTileableEffect)
 #       Frameworks/FxPlug.framework, PluginManager.framework   (from the SDK)
-#       Resources/presets, shaders, param_ids.json
+#       Resources/presets, shaders, param_ids.json,
+#                 LICENSE, THIRD_PARTY_NOTICES.md, licenses/
 #
 # Signing is inside-out: frameworks, renderer (sandbox entitlements), app.
 # Identity "-" = ad-hoc (local testing; no hardened runtime so ad-hoc library
@@ -19,12 +20,13 @@ set -euo pipefail
 # Arguments are --key=value so an empty value (e.g. no shaders dir) can't shift the rest.
 SHADERS=""
 LIBRASHADER=""
+LICENSE_ROOT=""
 for arg in "$@"; do
   v="${arg#*=}"
   case "$arg" in
     --app=*) APP="$v" ;; --renderer=*) RENDERER="$v" ;; --plugin-name=*) PLUGIN_NAME="$v" ;;
     --plist=*) PLIST="$v" ;; --frameworks=*) FRAMEWORKS="$v" ;; --presets=*) PRESETS="$v" ;;
-    --shaders=*) SHADERS="$v" ;; --librashader=*) LIBRASHADER="$v" ;; --param-ids=*) PARAM_IDS="$v" ;; --template-dir=*) TEMPLATE_DIR="$v" ;;
+    --shaders=*) SHADERS="$v" ;; --librashader=*) LIBRASHADER="$v" ;; --param-ids=*) PARAM_IDS="$v" ;; --license-root=*) LICENSE_ROOT="$v" ;; --template-dir=*) TEMPLATE_DIR="$v" ;;
     --renderer-entitlements=*) RENT="$v" ;; --app-entitlements=*) AENT="$v" ;; --identity=*) IDENTITY="$v" ;;
     *) echo "assemble_bundle.sh: unknown arg $arg" >&2; exit 2 ;;
   esac
@@ -49,6 +51,14 @@ else
   echo "note: no shaders dir given (NTSCRT_SHADERS_DIR) - CRT stage will report missing resources" >&2
 fi
 cp "$PARAM_IDS" "$PK/Contents/Resources/param_ids.json"
+if [[ -n "$LICENSE_ROOT" ]]; then
+  cp "$LICENSE_ROOT/LICENSE" "$LICENSE_ROOT/THIRD_PARTY_NOTICES.md" "$PK/Contents/Resources/"
+  rsync -a --delete "$LICENSE_ROOT/licenses/" "$PK/Contents/Resources/licenses/"
+  # The wrapper app is what users see in /Applications: give it the same texts.
+  mkdir -p "$APP/Contents/Resources"
+  cp "$LICENSE_ROOT/LICENSE" "$LICENSE_ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/"
+  rsync -a --delete "$LICENSE_ROOT/licenses/" "$APP/Contents/Resources/licenses/"
+fi
 if [ -n "${LIBRASHADER:-}" ] && [ -f "$LIBRASHADER" ]; then
   cp "$LIBRASHADER" "$PK/Contents/Frameworks/"   # CrtStage searches <Resources>/../Frameworks
 fi

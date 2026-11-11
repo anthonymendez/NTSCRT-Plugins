@@ -8,6 +8,7 @@
 #   Contents/Resources/presets/        (copy of repo presets/)
 #   Contents/Resources/shaders/        (copy of resources/shaders if it exists)
 #   Contents/Resources/<librashader>   (NTSCRT_LIBRASHADER_LIB, if set)
+#   Contents/Resources/LICENSE, THIRD_PARTY_NOTICES.md, licenses/
 include(FetchContent)
 
 # OpenFX SDK headers + C++ Support library. SOURCE_SUBDIR points nowhere so the
@@ -87,6 +88,7 @@ add_custom_command(TARGET ntscrt_ofx POST_BUILD
     -DLIBRASHADER=$<IF:$<BOOL:${NTSCRT_LIBRASHADER_LIB}>,${NTSCRT_LIBRASHADER_LIB},${NTSCRT_LIBRASHADER_BUILT}>
     -DPLIST=$<IF:$<BOOL:${APPLE}>,${CMAKE_CURRENT_BINARY_DIR}/Info.plist,>
     -DVERSION_FILE=${NTSCRT_ROOT}/VERSION
+    -DLICENSE_ROOT=${NTSCRT_ROOT}
     -P ${CMAKE_CURRENT_SOURCE_DIR}/bundle_resources.cmake
   COMMENT "Assembling NTSCRT.ofx.bundle resources"
   VERBATIM)

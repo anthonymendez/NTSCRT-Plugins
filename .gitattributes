@@ -1,6 +1,18 @@
 * text=auto eol=lf
-*.png binary
-*.icns binary
-*.webp binary
+
+# Windows-only scripts keep CRLF.
 *.cmd text eol=crlf
+*.bat text eol=crlf
 *.ps1 text eol=crlf
+
+# Binary assets: no eol conversion, no text diffs.
+*.png binary
+*.gif binary
+*.webp binary
+*.jpg binary
+*.icns binary
+*.ico binary
+*.mp4 binary
+*.zip binary
+*.dll binary
+*.dylib binary

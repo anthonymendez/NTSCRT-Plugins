@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/anthonymendez/NTSCRT-Plugins/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue.
+  - name: Testing guide and diagnostics (ntscrt_doctor.py)
+    url: https://github.com/anthonymendez/NTSCRT-Plugins/blob/main/docs/TESTING.md
+    about: A 5-minute check and the script that collects a debug report.

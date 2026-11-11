@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a look, a control, or support for another app.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like
+      description: What you want to do, and what's missing or awkward today.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Examples
+      description: Reference footage, a screenshot, or the NTSCRT app / ntsc-rs setting that does it.
+    validations:
+      required: false
+  - type: dropdown
+    id: host
+    attributes:
+      label: App
+      multiple: true
+      options:
+        - DaVinci Resolve
+        - Final Cut Pro
+        - Motion
+        - Other
+    validations:
+      required: false

@@ -24,6 +24,8 @@
 	<string>public.app-category.video</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright (c) 2026 Anthony Mendez and Finn McKenty. MIT License; third-party components keep their own licences (see THIRD_PARTY_NOTICES.md).</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSHighResolutionCapable</key>

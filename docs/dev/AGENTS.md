@@ -4,7 +4,7 @@
   Its own submodules (`Vendor/ntsc-rs`, `Vendor/slang-shaders`) are not checked out; `Vendor/ntscrs-capi` is.
 - Contracts: `core/include/ntscrt/ntscrt.h`, `core/stages/stages.h`, `core/gpu/gpu.h`, `core/src/internal.h`,
   `docs/params.md`, `cmake/Shaders.cmake` (function signature). Don't change them; if you must, append the change
-  and its reason to `docs/CONTRACT-CHANGES.md` and keep it minimal.
+  and its reason to `docs/dev/CONTRACT-CHANGES.md` and keep it minimal.
 - Edit only the paths your brief says you own. Shared files (root `CMakeLists.txt`, `cmake/Deps.cmake`):
   add lines, don't restructure; mention them in your report.
 - Windows build (MSVC 2022 Build Tools, CMake 4.x, Rust stable x86_64-pc-windows-msvc):

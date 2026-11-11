@@ -1,0 +1,86 @@
+name: Bug report
+description: Something looks wrong, crashes, or doesn't install.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The diagnostics zip below answers most of our questions, so please attach it
+        if you can. Security problems: please report them privately instead (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead. Screenshots help.
+      placeholder: |
+        1. Put NTSCRT on a 4K clip on the Edit page
+        2. Picked the "V Hold glitch" preset
+        3. The viewer showed black frames after a few seconds
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: App
+      options:
+        - DaVinci Resolve (free)
+        - DaVinci Resolve Studio
+        - Final Cut Pro
+        - Motion
+        - Other OpenFX host
+    validations:
+      required: true
+  - type: input
+    id: host-version
+    attributes:
+      label: App version
+      description: "Resolve: *DaVinci Resolve → About DaVinci Resolve*."
+      placeholder: "21.1.2"
+    validations:
+      required: true
+  - type: input
+    id: ntscrt-version
+    attributes:
+      label: NTSCRT version
+      description: Shown in the effect's *Presets → Version* field.
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple silicon)
+        - macOS (Intel)
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+      description: "Windows: *Task Manager → Performance → GPU*. Mac: *Apple menu → About This Mac*."
+      placeholder: "NVIDIA GeForce RTX 3070, driver 591.44"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Diagnostics zip
+      description: |
+        Run `ntscrt_doctor.py` (see [docs/TESTING.md, section 3](https://github.com/anthonymendez/NTSCRT-Plugins/blob/main/docs/TESTING.md#3-automatic-tests--debug-report))
+        and drag the `ntscrt-diagnostics-<date>.zip` from your Desktop into this box. It's plain text, with your
+        user name and home folder removed; look through it first if you like. For a problem with particular
+        frames, tick **Debug logging** in the effect and reproduce it before running the doctor.
+      placeholder: Drop the zip here (or say why you can't).
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Preset or project settings involved, timeline resolution and frame rate, whether it happens every time.
+    validations:
+      required: false

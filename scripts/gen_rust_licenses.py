@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Collect the licence texts of every Rust crate compiled into what the
+NTSCRT plug-ins ship, into licenses/rust-crates.txt:
+
+  * rust/ntscrs-capi  (ntsc-rs, linked statically into the plug-in binary)
+  * vendor/librashader (librashader.dll / librashader.dylib, built by
+    core/stages/crt/CMakeLists.txt with --no-default-features and
+    `stable,runtime-d3d11` on Windows, `stable,runtime-metal` on macOS)
+
+MIT, BSD, Zlib and similar licences ask that their copyright notice travel
+with binary copies, so the bundle carries this file. Identical texts are
+printed once, under every crate that uses them.
+
+Adapted from upstream NTSCRT's scripts/gen-rust-licenses.py (MIT,
+Copyright (c) 2026 Finn McKenty): same output format, but it uses the cargo
+on PATH, reads librashader from the vendor/librashader submodule, and takes
+the union over every target and feature set we build.
+
+Usage:
+    python scripts/gen_rust_licenses.py
+
+Needs cargo and the submodules (`git submodule update --init --depth 1
+vendor/ntsc-rs vendor/librashader`), plus network access the first time so
+cargo can fetch the crates' sources.
+"""
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CARGO = os.environ.get("CARGO", "cargo")
+LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|UNLICENSE)", re.I)
+
+TARGETS = ("x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin")
+# (workdir, root crate, {target triple: feature list or None})
+BUILDS = [
+    (os.path.join(ROOT, "rust", "ntscrs-capi"), "ntscrs-capi", {t: None for t in TARGETS}),
+    (os.path.join(ROOT, "vendor", "librashader"), "librashader-capi", {
+        "x86_64-pc-windows-msvc": "stable,runtime-d3d11",
+        "aarch64-apple-darwin": "stable,runtime-metal",
+        "x86_64-apple-darwin": "stable,runtime-metal",
+    }),
+]
+TREE_LINE = re.compile(r"^(\S+) v(\S+)")
+
+
+def run(workdir, args):
+    return subprocess.run([CARGO, *args], cwd=workdir, check=True, capture_output=True,
+                          text=True, encoding="utf-8").stdout
+
+
+def linked(workdir, root, features, target):
+    """(name, version) of every crate linked into `root` for this target and
+    feature set. `cargo tree -p` honours per-package features (cargo metadata
+    unifies them over the whole librashader workspace, which would pull in
+    every runtime)."""
+    args = ["tree", "--locked", "-p", root, "--target", target, "-e", "normal",
+            "--prefix", "none", "-f", "{p}"]
+    if features is not None:
+        args += ["--no-default-features", "--features", features]
+    out = set()
+    for line in run(workdir, args).splitlines():
+        m = TREE_LINE.match(line.strip())
+        if m:
+            out.add((m.group(1), m.group(2)))
+    return out
+
+
+def packages(workdir):
+    meta = json.loads(run(workdir, ["metadata", "--locked", "--format-version", "1"]))
+    return {(p["name"], p["version"]): p for p in meta["packages"]}
+
+
+def license_texts(pkg):
+    """The crate's own licence files, plus those of C/C++ code a -sys crate
+    vendors (glslang, SPIRV-Cross), which may sit deeper."""
+    top = os.path.dirname(pkg["manifest_path"])
+    found = []
+    for dirpath, dirnames, files in os.walk(top):
+        depth = dirpath[len(top):].count(os.sep)
+        if depth > (4 if pkg["name"].endswith("-sys") else 0):
+            dirnames[:] = []
+            continue
+        dirnames[:] = sorted(d for d in dirnames if d not in ("target", ".git", "tests", "test", "examples"))
+        for f in sorted(files):
+            if LICENSE_FILE.match(f):
+                path = os.path.join(dirpath, f)
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    rel = os.path.relpath(path, top).replace(os.sep, "/")
+                    found.append((rel, fh.read().strip().replace("\r\n", "\n")))
+    return found
+
+
+def main():
+    crates = {}
+    for workdir, root, runs in BUILDS:
+        if not os.path.exists(os.path.join(workdir, "Cargo.toml")):
+            sys.exit(f"{workdir} missing: init the submodules first")
+        pkgs = packages(workdir)
+        for target, features in runs.items():
+            for key in linked(workdir, root, features, target):
+                crates[key] = pkgs[key]
+
+    texts, users, missing = {}, {}, []
+    for key in sorted(crates):
+        p = crates[key]
+        found = license_texts(p)
+        if not found:
+            missing.append(p)
+        for rel, text in found:
+            h = hashlib.sha1(text.encode()).hexdigest()
+            texts[h] = text
+            users.setdefault(h, []).append(f"{p['name']} {p['version']} ({rel})")
+
+    out = ["Third-party Rust crates compiled into the NTSCRT plug-ins (ntsc-rs via",
+           "rust/ntscrs-capi, linked into the plug-in binary; and librashader.dll /",
+           "librashader.dylib), with their licences.",
+           "Generated by scripts/gen_rust_licenses.py - do not edit by hand.", "",
+           "Crates and their declared licences:", ""]
+    for key in sorted(crates):
+        p = crates[key]
+        out.append(f"  {p['name']} {p['version']} - {p['license'] or 'see licence file'}")
+    if missing:
+        out += ["", "Crates without a licence file in their package (the declared",
+                "licence applies; standard texts are in this folder):", ""]
+        out += [f"  {p['name']} {p['version']} - {p['license']}" for p in missing]
+    for h, text in texts.items():
+        out += ["", "=" * 78, "Used by:"] + [f"  {u}" for u in users[h]] + ["-" * 78, text]
+    dest = os.path.join(ROOT, "licenses", "rust-crates.txt")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(out) + "\n")
+    print(f"{len(crates)} crates, {len(texts)} distinct licence texts, "
+          f"{len(missing)} without a file -> {os.path.relpath(dest, ROOT)}")
+
+
+if __name__ == "__main__":
+    main()

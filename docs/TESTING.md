@@ -29,8 +29,9 @@ Then restart Resolve / Final Cut.
    lets ghosting and glow spread over the video underneath.
 5. Render a few seconds on the Deliver page and play the file back.
 
-**Final Cut Pro** (12.4 or newer, macOS). Only if the release you installed includes the Final Cut plug-in
-(v0.3.0 and v0.4.0 don't: the installer says "skipping Final Cut Pro"):
+**Final Cut Pro** (12.4 or newer, macOS). Only if the release you installed includes the Final Cut plug-in.
+The Final Cut plug-in hasn't been released yet: releases without it have no `NTSCRT-FxPlug-macos-universal.zip`
+on their release page, and the installer says "skipping Final Cut Pro". Skip this part then.
 1. Effects browser → *NTSCRT* → drag onto a clip. The look should appear in the viewer.
 2. Change a few parameters and the preset; scrub; render/share a few seconds.
 3. Put it on a title as in step 4 above.
@@ -66,9 +67,15 @@ The zip is plain text. It contains:
 - the NTSCRT install state;
 - NTSCRT's own log;
 - only the NTSCRT/OpenFX lines of Resolve's log (the full log lists your project names);
-- crash reports from the last 7 days that mention Resolve, Final Cut or NTSCRT;
+- crash reports from the last 7 days that mention Resolve, Final Cut or NTSCRT, trimmed to the crash itself
+  (the error, the thread that crashed and the modules it ran through; Windows minidumps are listed, not included);
+- Windows only: application errors mentioning Resolve or NTSCRT from the event log;
 - installer logs;
 - the test report.
+
+Before zipping, the doctor removes personal details from every file: your home folder becomes `~`, your user
+name `<user>` and your computer's name `<computer>`; on a Mac, serial numbers and hardware UUIDs are removed.
+Lines that mention a project or file name containing "NTSCRT" are kept as they are.
 
 Nothing is uploaded anywhere. Look through it if you like, then send it along with a description of
 what went wrong.
