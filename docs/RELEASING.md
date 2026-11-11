@@ -68,8 +68,10 @@ sha256sum -c SHA256SUMS --ignore-missing                       # macOS: shasum -
 gh attestation verify NTSCRT-OFX-windows-x64.zip -R anthonymendez/NTSCRT-Plugins
 ```
 `install.ps1` and `install.sh` download `SHA256SUMS` from the same release and refuse to install a zip
-that isn't listed or doesn't match (they fail closed: releases before v0.4.1 have no `SHA256SUMS`, so
-installing those needs `-From` / `--from`, which skips the check). Both accept only `latest` or a tag
+that isn't listed or doesn't match. They fail closed: a release without `SHA256SUMS` is refused, except
+v0.3.0 and v0.4.0, which predate checksums and install with a warning (`latest` is first resolved to its
+tag through the redirect of `/releases/latest`, so the exception applies to it too). Never publish a
+release without `SHA256SUMS`. `-From` / `--from` skips the check. Both accept only `latest` or a tag
 of the form `vX.Y.Z[-rc.N]` for `-Version` / `--version` / `NTSCRT_VERSION`.
 
 ### Re-running a release
@@ -91,7 +93,8 @@ MSI properties for testing / offline installs: `msiexec /i NTSCRT-Installer-wind
 or `NTSCRT_VERSION=v0.3.0`; the pkg's `postinstall` reads the same two environment variables and logs
 to `/Library/Logs/NTSCRT/install.log` (and, through Installer, `/var/log/install.log`).
 CI also smoke-tests the scripts' download path: it serves the built zip and a `SHA256SUMS` over local
-HTTP (`install.ps1 -BaseUrl` / `install.sh --base-url`), installs, and checks that a tampered zip is refused.
+HTTP (`install.ps1 -BaseUrl` / `install.sh --base-url`), installs, and checks that a tampered zip is refused,
+that a release without `SHA256SUMS` is refused, and that `-Version v0.4.0` without one installs with a warning.
 
 On macOS, `install.sh` only removes the quarantine flag and ad-hoc signs the OFX bundle when the bundle
 has no real signature (unsigned / ad-hoc, which is every release so far); a Developer ID-signed bundle

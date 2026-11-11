@@ -92,8 +92,7 @@ written but not yet built.
   unchanged.
 - The install scripts and installers check the downloaded zip against the release's `SHA256SUMS` and
   refuse to install if it is missing or doesn't match (`-From` / `--from` with your own zip skips the check).
-  Releases before this one have no `SHA256SUMS`, so `-Version v0.4.0` is refused: install those from their
-  zip with `-From` / `--from`. `-Version` / `--version` / `NTSCRT_VERSION` accept only `latest` or
+  v0.3.0 and v0.4.0 predate `SHA256SUMS` and install with a warning, without verification. `-Version` / `--version` / `NTSCRT_VERSION` accept only `latest` or
   `vX.Y.Z[-rc.N]`.
 - macOS: `install.sh` only removes the quarantine flag and ad-hoc signs the plug-in when it has no real
   signature. The .pkg installer logs to `/Library/Logs/NTSCRT/install.log` (and `/var/log/install.log`)
@@ -102,6 +101,9 @@ written but not yet built.
   serial numbers / hardware UUIDs), and trims crash reports to the crash itself. Non-text files are left out.
 
 ### Fixed
+- The one-line installs (`install.ps1` / `install.sh` from `main`) work again with v0.3.0 and v0.4.0, which
+  predate `SHA256SUMS`: they resolve `latest` to its tag and install those two releases with a warning
+  instead of refusing them; a missing `SHA256SUMS` on any other release is still refused.
 - Faster seeks and edits in Resolve with Glitch on (the default): when no parameter is keyframed the plug-in no
   longer rebuilds the look from all ~300 parameters for every earlier frame the Glitch receiver replays (up to
   18 per frame while playing, every frame from 0 after an edit); keyframed looks are built once per frame and

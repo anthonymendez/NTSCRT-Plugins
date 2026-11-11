@@ -97,9 +97,9 @@ same line to update. You can read them first: [install.ps1](install.ps1), [insta
 | Install a zip you downloaded | `-From path\to.zip` | `--from path/to.zip` |
 
 The scripts check each download against the release's `SHA256SUMS` file and refuse to install a zip that
-isn't listed in it or doesn't match. Releases before v0.4.1 (v0.3.0, v0.4.0) have no `SHA256SUMS`, so
-`-Version` / `--version` refuse them: download that release's zip and install it with `-From` / `--from`,
-which skips the check. `-Version` / `--version` take `latest` (the default) or a tag like `v1.2.3`.
+isn't listed in it or doesn't match (or a release with no `SHA256SUMS`). The only exceptions are v0.3.0 and
+v0.4.0, published before checksums existed: they install with a warning, without verification; every
+later release is verified. `-From` / `--from` with your own zip skips the check. `-Version` / `--version` take `latest` (the default) or a tag like `v1.2.3`.
 
 **Release candidates** (`vX.Y.Z-rc.N` tags, marked *Pre-release* on the releases page) are for testers:
 the installers and `latest` skip them. Install one with `-Version` / `--version` and its tag (for example
