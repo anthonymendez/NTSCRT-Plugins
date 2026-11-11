@@ -1,7 +1,10 @@
 {
  "version": 1,
- "note": "Self-references: ntscrt_core regression baselines (tests/golden/test_golden_self.cpp). Refs: self/ref/<id>-f<frame>.png, per-OS overrides in self/ref-windows|ref-macos/. Regenerate after an intended look change: cmake --build <build> --config Release --target golden-update. 'input_downscale' (integer box factor) shrinks the input to keep refs small. Tolerances (a number or {\"windows\": a, \"macos\": b, \"default\": c}): 'threshold' = max mean abs difference over RGBA (colour premultiplied by alpha), 0..255 units; 'max_over16' = max share of pixels with a channel off by more than 16. The defaults allow GPU-to-GPU float differences (NVIDIA vs WARP: mean <= 0.43, no pixel off by > 16) and catch a changed look.",
- "default_threshold": 1.0,
+ "note": "Self-references: ntscrt_core regression baselines (tests/golden/test_golden_self.cpp). Refs: self/ref/<id>-f<frame>.png, per-OS overrides in self/ref-windows|ref-macos/. Regenerate after an intended look change: cmake --build <build> --config Release --target golden-update. 'input_downscale' (integer box factor) shrinks the input to keep refs small. Tolerances (a number or {\"windows\": a, \"macos\": b, \"default\": c}): 'threshold' = max mean abs difference over RGBA (colour premultiplied by alpha), 0..255 units; 'max_over16' = max share of pixels with a channel off by more than 16. The defaults allow GPU-to-GPU float differences against the Windows NVIDIA baselines (WARP: mean <= 0.43, no pixel off by > 16; macOS CI Metal: mean <= 1.35, <= 0.6% of pixels off by > 16) and catch a changed look.",
+ "default_threshold": {
+  "default": 1.0,
+  "macos": 1.6
+ },
  "entries": [
   {
    "id": "digital-dct",
@@ -561,5 +564,8 @@
    "input_downscale": 2
   }
  ],
- "default_max_over16": 0.005
+ "default_max_over16": {
+  "default": 0.005,
+  "macos": 0.01
+ }
 }

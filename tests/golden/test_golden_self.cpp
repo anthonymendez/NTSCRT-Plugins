@@ -148,12 +148,14 @@ bool entry_looks(const json &e, json &look, json &feedback, std::string *err) {
 // A tolerance from the entry (a number, or {"windows": a, "macos": b, "default": c})
 // or the manifest's default_<key>.
 double entry_tolerance(const json &e, const json &m, const char *key) {
-    double v = m.value(std::string("default_") + key, 0.0);
-    if (e.contains(key)) {
-        const json &t = e[key];
-        if (t.is_number()) v = t.get<double>();
-        else if (t.is_object()) v = t.value(kOs, t.value("default", v));
-    }
+    auto pick = [](const json &t, double v) {
+        if (t.is_number()) return t.get<double>();
+        if (t.is_object()) return t.value(kOs, t.value("default", v));
+        return v;
+    };
+    const std::string dk = std::string("default_") + key;
+    double v = m.contains(dk) ? pick(m[dk], 0.0) : 0.0;
+    if (e.contains(key)) v = pick(e[key], v);
     return v;
 }
 

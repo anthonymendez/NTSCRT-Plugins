@@ -32,8 +32,8 @@ Not covered here (the app's other stages have no `crt-smoke` path): Glitch, Digi
 crop, alpha. Those are in the self-references.
 
 Tolerance: mean |difference| over RGB, 0..255 units, `default_threshold` 2.0 (3.0 with ntsc-rs).
-Measured: 0.1 to 1.6 (Windows NVIDIA, WARP); the residue is GPU float math, the Lanczos stand-in
-for vImage, and crt-sim's feedback on its first frame.
+Measured: **0.000 on macOS CI** (same Metal path and librashader as `crt-smoke`: bit-identical), 0.1 to
+1.6 on Windows (NVIDIA and WARP; GPU float math, D3D11 vs Metal sampling, crt-sim's first frame).
 
 Refresh after an upstream sync or a manifest change (editing the manifest re-runs the workflow):
 ```
@@ -52,10 +52,12 @@ preset at frame 12. Inputs are `TestAssets/game-frame.png` box-downscaled to 160
 PNGs small (about 2.5 MB in all).
 
 Compared on RGBA, straight colour weighted by its alpha (what shows once composited). Tolerances
-(per entry, or the manifest defaults): `threshold` 1.0 = mean |difference|, and `max_over16` 0.005
-= share of pixels with a channel off by more than 16, which catches a local change (a missing
-glitch band) that barely moves the mean. Measured against the Windows NVIDIA baselines: WARP
-(Windows CI) mean <= 0.43, no pixel off by > 16; macOS CI (Metal, paravirtual GPU): see the CI log.
+(per entry, or the manifest defaults): `threshold` = mean |difference| (1.0; macOS 1.6), and
+`max_over16` = share of pixels with a channel off by more than 16 (0.005; macOS 0.01), which catches
+a local change (a missing glitch band) that barely moves the mean. Measured against the Windows
+NVIDIA baselines: WARP (Windows CI) mean <= 0.43, no pixel off by > 16; macOS CI (Metal, paravirtual
+GPU) mean <= 1.35, at most 0.6% of pixels off by > 16. The CPU-only entries (Digital, no-shader
+presets) are bit-identical on all three.
 `preset-cd-rom-low-quality` has a wider tolerance: Video 1 after a nearest GPU downscale flips
 block colours at edges when the GPU differs by a fraction of a pixel. An entry can carry per-OS
 tolerances (`{"windows": a, "macos": b}`) or per-OS baselines (`self/ref-windows/`, `self/ref-macos/`,
@@ -71,7 +73,9 @@ directory instead; a CI mismatch artifact can also be dropped into it as is
 (`gh run download <id> -n golden-mismatch-macos` then copy `self/*.png` minus `*.diff.png`).
 
 On macOS GitHub runners only, a render that hangs the virtual GPU ("GPU Hang") is a warning and
-the entry is skipped (counted in the summary line), as in `tests/crt`.
+the entry is skipped (counted in the summary line), as in `tests/crt`; in practice that is
+`testpattern-crtsim`. CI runs the golden step before the other tests on macOS: after one hang
+(test_crt's crt-sim) the VM's GPU tends to hang on everything that follows.
 
 ## Environment
 
