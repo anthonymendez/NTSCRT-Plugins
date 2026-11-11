@@ -709,6 +709,25 @@ class Suite:
         m = {"keyed_composite_preemphasis": keyed, "pass_frames": pass_frames}
         if len({round(v or 0, 6) for v in keyed.values()}) < 2:
             problems.append(f"Composite preemphasis doesn't move over time: {keyed}")
+        # Keyed values against the timeline evaluated here (this look's keys are all Linear; toggles hold).
+        keys = sorted(look["timeline"]["keys"], key=lambda k: k["t"])
+
+        def expected(name, f):
+            t = (f % pass_frames) / (pass_frames - 1)
+            a = max((k for k in keys if k["t"] <= t), key=lambda k: k["t"], default=keys[0])
+            later = [k for k in keys if k["t"] > t]
+            va = a["ntsc"][name]
+            if not later or isinstance(va, bool):
+                return float(va)
+            b = later[0]
+            return va + (b["ntsc"][name] - va) * (t - a["t"]) / (b["t"] - a["t"])
+        # Informational: Fusion's GetInput(name, time) reads the spline at comp time, which needn't be
+        # the render frame (the rendered frames are the check).
+        table = {}
+        for name in ("vhs_chroma_loss", "ringing", "vhs_edge_wave_enabled", "composite_preemphasis"):
+            table[name] = {f: [fx.GetInput(f"ntsc_{name}", f), round(expected(name, f), 6)]
+                           for f in (0, 1, 3, 5, 6, 7, 9, 10, 12, 20, 36, 39)}
+        m["keyed_values_got_vs_timeline"] = table
         n = 16 if self.a.quick else 40
         frames = (0, n - 1)
         # source and effect from the same render job (Fusion's source frames differ slightly between jobs)
