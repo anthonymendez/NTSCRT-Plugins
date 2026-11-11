@@ -380,7 +380,23 @@ TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
 // Seeks, playback and edits, with and without keyframes. Prints the timings
 // (informational) and checks that no edit leaves a stale picture: each result
 // equals a render after a full purge.
-TEST_CASE("edits and seeks: look history, cache flushing, timings") {
+namespace {
+// GitHub's macOS runners: a paravirtual GPU that can hang ("GPU Hang") on CRT shaders.
+// Only there is a hang (or the CPU fallback after one) tolerated: the test stops with a warning.
+bool ci_virtual_gpu() {
+#ifdef __APPLE__
+    const char *gha = std::getenv("GITHUB_ACTIONS");
+    return gha && std::string(gha) == "true";
+#else
+    return false;
+#endif
+}
+struct CiGpuHang {
+    std::string log;
+};
+
+void edits_and_seeks() {
+    const size_t log_start = read_log().size();
     Fixture f;
     f.create();
     const int w = 640, h = 360, last = 300;
@@ -430,7 +446,20 @@ TEST_CASE("edits and seeks: look history, cache flushing, timings") {
         const long r0 = reads();
         auto t0 = std::chrono::steady_clock::now();
         OfxStatus st = f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in);
+        if (ci_virtual_gpu()) {
+            const std::string added = read_log().substr(log_start);
+            if (added.find("Hang") != std::string::npos || added.find("GPU device lost") != std::string::npos)
+                throw CiGpuHang{added};
+        }
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (st != kOfxStatOK) {
+            const std::string log = read_log();
+            // the core's error is on the render line before the FAILED one
+            const size_t at = log.rfind(" FAILED");
+            size_t from = at == std::string::npos ? 0 : log.rfind('\n', at);
+            if (from != std::string::npos && from > 0) from = log.rfind('\n', from - 1);
+            MESSAGE("render t=" << t << " failed; plug-in log: " << log.substr(from == std::string::npos ? 0 : from + 1));
+        }
         REQUIRE(st == kOfxStatOK);
         return Shot{ms, reads() - r0, out};
     };
@@ -508,4 +537,13 @@ TEST_CASE("edits and seeks: look history, cache flushing, timings") {
            << " looks)";
     MESSAGE(report.str());
     std::printf("[timing] %s\n", report.str().c_str());
+}
+}  // namespace
+
+TEST_CASE("edits and seeks: look history, cache flushing, timings") {
+    try {
+        edits_and_seeks();
+    } catch (const CiGpuHang &h) {
+        MESSAGE("WARNING: the CI runner's virtual GPU hung; rest of the test skipped. Plug-in log: " << h.log);
+    }
 }
