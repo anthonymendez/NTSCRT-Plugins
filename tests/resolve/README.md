@@ -11,8 +11,9 @@ the alpha / frame handling in `core/`.
 - The plug-in build to test, loaded by Resolve. Either install it, or, without administrator rights,
   quit Resolve and start it with the build on `OFX_PLUGIN_PATH`:
   ```powershell
-  .\tests\resolve\launch_resolve_dev.ps1 -Bundle C:\ntb\main\ofx\Release\NTSCRT.ofx.bundle
+  .\tests\resolve\launch_resolve_dev.ps1 -Bundle <build>\ofx\Release\NTSCRT.ofx.bundle
   ```
+  (`<build>` is your CMake build directory, the one you passed to `cmake -B`.)
   That also sets `NTSCRT_OFX_LOG`, where the plug-in writes why a render failed, and
   `NTSCRT_OFX_DEV_BUNDLE`, which makes the copy outrank an installed NTSCRT of the same version
   (Resolve keeps only one plug-in per id and version; without it the installed one wins).
@@ -20,9 +21,9 @@ the alpha / frame handling in `core/`.
 ## Run
 ```bash
 # Recommended: Resolve closed; the suite starts it headless (-nogui), tests this build, quits it.
-python tests/resolve/run_resolve_tests.py --headless --bundle C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle --build C:/ntb/main
+python tests/resolve/run_resolve_tests.py --headless --bundle <build>/ofx/Release/NTSCRT.ofx.bundle --build <build>
 # In an open Resolve (tests whatever plug-in it loaded; don't touch Resolve meanwhile):
-python tests/resolve/run_resolve_tests.py --build C:/ntb/main --quick --only alpha,order
+python tests/resolve/run_resolve_tests.py --build <build> --quick --only alpha,order
 ```
 `--headless` is the unattended mode: with no UI there's no dialog that could block the run. Testers
 without a build use `scripts/ntscrt_doctor.py --resolve-tests` (see docs/TESTING.md), which fetches this

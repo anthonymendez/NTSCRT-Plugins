@@ -25,7 +25,8 @@ to test):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.sh | sh -s -- --version v1.2.0-rc.1
 ```
-The script checks the download against the release's `SHA256SUMS` and stops if it doesn't match. Running the
+The script checks the download against the release's `SHA256SUMS` and stops if it doesn't match or is
+missing (only v0.3.0 and v0.4.0, which predate checksums, install without one, with a warning). Running the
 install line again without `-Version` / `--version` goes back to the latest release.
 
 ## 2. Manual check (10 minutes)
