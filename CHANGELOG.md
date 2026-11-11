@@ -47,6 +47,9 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   resolution and a Digital video format.
 - Resolve test suite: the `speed` test also reports the plug-in's time for a frame after a seek, a CRT edit, a
   Glitch edit and with keyframed Glitch values.
+- [Presets gallery](docs/PRESETS-GALLERY.md): an animated GIF of every bundled look, Digital video format,
+  Screen Loop preset and CRT shader, linked from the README; `scripts/make_presets_gallery.py` regenerates the
+  GIFs (through the plug-in in headless Resolve, or `ntscrt-cli`) and the page.
 
 ### Changed
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac
