@@ -32,6 +32,10 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   says so. Without a GPU, a cropped picture now fills the whole frame (letterboxed) instead of leaving part of it
   unwritten.
 
+### Added
+- Resolve test suite: the `speed` test also reports the plug-in's time for a frame after a seek, a CRT edit, a
+  Glitch edit and with keyframed Glitch values.
+
 ### Changed
 - Core: identical look JSON is parsed once (the host sends the same string for every frame of an unanimated
   look), the history of other frames' looks is bounded, upload / output / Glitch textures are reused across
