@@ -103,9 +103,22 @@ jobs:
 
       - name: Build crt-smoke (swift build -c release)
         working-directory: upstream/NTSCRT
+        # Upstream's DigitalVideoRenderer.swift has a long multi-statement closure that
+        # Swift 6.1 (the runner's default Xcode 16.4) gives up type-checking ("unable to
+        # type-check this expression in reasonable time"). Use the newest Xcode on the
+        # image, and if that still times out, raise the solver's time limit (a type-checker
+        # budget only: it changes nothing in the generated code).
         run: |
+          ls -d /Applications/Xcode*.app || true
+          xc="$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1)"
+          if [ -n "$xc" ]; then sudo xcode-select -s "$xc/Contents/Developer"; fi
+          xcode-select -p
           swift --version
-          swift build -c release --product crt-smoke
+          if ! swift build -c release --product crt-smoke; then
+            echo "::warning::crt-smoke failed to build with the default solver limit; retrying with -solver-expression-time-threshold=600"
+            swift build -c release --product crt-smoke \
+              -Xswiftc -Xfrontend -Xswiftc -solver-expression-time-threshold=600
+          fi
           echo "SMOKE=$(swift build -c release --show-bin-path)/crt-smoke" >> "$GITHUB_ENV"
 
       - name: Render references

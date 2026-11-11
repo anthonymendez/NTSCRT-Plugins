@@ -1,7 +1,7 @@
 {
   "version": 1,
   "note": "Golden references: each entry is rendered by UPSTREAM NTSCRT's crt-smoke (golden workflow, macOS) into ref/<id>.png + ref/<id>.json, and by ntscrt_core in test_golden. Inputs live in upstream/NTSCRT/TestAssets. Output size = input size. Editing this file re-runs the golden workflow; commit the artifact's files under tests/golden/ref/.",
-  "upstream_commit": "2b3013dd33c96ed7941c294ec65587ef51f9eeb6",
+  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
   "librashader_commit": "76462c03",
   "default_threshold": 2.0,
   "entries": [
