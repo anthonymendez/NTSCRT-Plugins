@@ -128,17 +128,16 @@ std::optional<SourceCrop> from_look(const json &look) {
 
 }  // namespace crop
 
-void Crop::apply(const json &look, const ImageBGRA8 &in, ImageBGRA8 &out) {
+namespace {
+// The rect `look` cuts out of a w x h picture, or nullopt when it cuts nothing.
+std::optional<crop::Rect> cut_rect(const json &look, int w, int h) {
     auto c = crop::from_look(look);
-    if (!c || in.width <= 0 || in.height <= 0) {
-        if (&out != &in) out = in;
-        return;
-    }
-    crop::Rect r = c->rect(in.width, in.height);
-    if (r.width == in.width && r.height == in.height) {  // cuts nothing: the picture itself
-        if (&out != &in) out = in;
-        return;
-    }
+    if (!c || w <= 0 || h <= 0) return std::nullopt;
+    crop::Rect r = c->rect(w, h);
+    if (r.width == w && r.height == h) return std::nullopt;  // cuts nothing: the picture itself
+    return r;
+}
+void cut(const ImageBGRA8 &in, const crop::Rect &r, ImageBGRA8 &out) {
     ImageBGRA8 tmp;
     tmp.width = r.width;
     tmp.height = r.height;
@@ -146,6 +145,17 @@ void Crop::apply(const json &look, const ImageBGRA8 &in, ImageBGRA8 &out) {
     for (int y = 0; y < r.height; ++y)
         std::memcpy(tmp.row(y), in.row(r.y + y) + size_t(r.x) * 4, size_t(r.width) * 4);
     out = std::move(tmp);
+}
+}  // namespace
+
+void Crop::apply(const json &look, const ImageBGRA8 &in, ImageBGRA8 &out) {
+    if (auto r = cut_rect(look, in.width, in.height)) cut(in, *r, out);
+    else if (&out != &in) out = in;
+}
+
+void Crop::apply(const json &look, ImageBGRA8 &&in, ImageBGRA8 &out) {
+    if (auto r = cut_rect(look, in.width, in.height)) cut(in, *r, out);
+    else if (&out != &in) out = std::move(in);
 }
 
 }  // namespace ntscrt

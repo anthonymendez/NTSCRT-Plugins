@@ -14,6 +14,11 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Changed
+- Less work per frame: opaque sources (most video) no longer get a per-pixel alpha buffer, the pixel-format
+  conversion loops are specialised per format, and an uncropped picture is moved instead of copied. Output is
+  unchanged.
+
 ## [0.4.0] - 2026-11-10
 
 Debug logging and a one-click logs folder for bug reports, and README previews rendered by the plug-in in

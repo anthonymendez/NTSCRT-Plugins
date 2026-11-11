@@ -18,12 +18,17 @@ AlphaMode alpha_mode(const json &look);
 
 // Host image -> internal BGRA8 (clamped, opaque) prepared for `mode` (see
 // above). `src_premult`: host RGB is premultiplied. Source alpha copied to
-// `alpha_out` (0..1 per pixel) when non-null.
+// `alpha_out` (0..1 per pixel) when non-null; left EMPTY when every pixel is
+// opaque (no buffer for ordinary video). Everything below reads an empty
+// alpha vector as "all 1".
 void to_bgra8(const ntscrt_image &src, ImageBGRA8 &out, std::vector<float> *alpha_out,
               AlphaMode mode = AlphaMode::Clip, bool src_premult = false);
 // Clip mode: replace RGB where alpha is ~0 by the colour of the nearest
 // non-transparent area (pull-push). No-op when nothing is transparent.
 void fill_transparent(ImageBGRA8 &im, const std::vector<float> &alpha);
+// Places `in` into a out_w x out_h picture the way the CRT stage's bypass
+// does (fitted at its aspect, centred, black bars), for the no-GPU path.
+void letterbox(const ImageBGRA8 &in, int out_w, int out_h, ImageBGRA8 &out);
 
 // Output pixel from processed straight-or-over-black RGB `c` and source alpha
 // `a` (alpha mode semantics above), in the destination's convention.
@@ -41,8 +46,8 @@ inline void merge_alpha(float c[4], float a, AlphaMode mode, bool premult) {
 }
 
 // Internal BGRA8 -> host image (writes min of both sizes). `alpha` (same
-// dimensions as `in`) is the source alpha; NULL = not aligned with the result
-// (crop on): treated as 1 in Clip mode, 0 in Spill mode.
+// dimensions as `in`, or empty = opaque) is the source alpha; NULL = not
+// aligned with the result (crop on): treated as 1 in Clip mode, 0 in Spill mode.
 void from_bgra8(const ImageBGRA8 &in, const std::vector<float> *alpha, ntscrt_image &dst,
                 AlphaMode mode = AlphaMode::Clip, bool premult = false);
 }  // namespace ntscrt

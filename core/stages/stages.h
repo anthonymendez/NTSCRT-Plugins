@@ -24,6 +24,8 @@ namespace ntscrt {
 // The CRT stage later fits it into the output frame (letterbox, black bars).
 struct Crop {
     static void apply(const json &look, const ImageBGRA8 &in, ImageBGRA8 &out);
+    // Same, but moves `in` into `out` when the crop cuts nothing (no copy).
+    static void apply(const json &look, ImageBGRA8 &&in, ImageBGRA8 &out);
 };
 
 // ---- Digital video codec (agent C) — CPU, temporal ----------------------------
