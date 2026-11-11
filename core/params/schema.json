@@ -2,12 +2,12 @@
  "version": 1,
  "generated_by": "tools/gen_schema.py",
  "sources": {
-  "upstream_ntscrt": "2b3013dd33c96ed7941c294ec65587ef51f9eeb6",
+  "upstream_ntscrt": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
   "slang_shaders": "cb01f2f238700eed7ec1c859be1737a9fbcdcb7c",
   "ntsc_rs": "vendor/ntsc-rs (see .gitmodules / submodule pin)"
  },
  "constants": {
-  "/version": 1,
+  "/version": 2,
   "/ntsc/settings/version": 1,
   "fb:/kind": "ntscrt-video-feedback",
   "fb:/version": 2
@@ -29,6 +29,11 @@
    "parent": null
   },
   {
+   "id": "digital.compression",
+   "label": "Compression",
+   "parent": "digital"
+  },
+  {
    "id": "digital.capture",
    "label": "Capture",
    "parent": "digital"
@@ -36,11 +41,6 @@
   {
    "id": "digital.picture",
    "label": "Picture",
-   "parent": "digital"
-  },
-  {
-   "id": "digital.compression",
-   "label": "Compression",
    "parent": "digital"
   },
   {
@@ -463,11 +463,150 @@
    "id": "digital.enabled",
    "group": "digital",
    "label": "Digital video",
-   "hint": "A small video codec run for real: capture, 8×8 DCT blocks, quantization, motion-compensated prediction, data loss.",
+   "hint": "A small video codec run for real: capture, 8×8 DCT blocks or Microsoft Video 1's 4×4 color blocks, quantization, motion-compensated prediction, data loss.",
    "type": "bool",
    "default": false,
    "path": "/digital/enabled",
    "animatable": false
+  },
+  {
+   "id": "digital.codec",
+   "group": "digital.compression",
+   "label": "Codec",
+   "hint": "How the picture is compressed. DCT, the MPEG, H.263 and DV family, blurs detail inside 8×8 blocks and rings around edges. Block colors is Microsoft Video 1 (1992, Video for Windows): each 4×4 block becomes one, two or eight flat 15-bit colors and unchanged blocks are skipped — chunky two-tone edges and banded gradients, the early CD-ROM look.",
+   "type": "choice",
+   "default": 0,
+   "options": [
+    {
+     "value": 0,
+     "label": "DCT (MPEG, DV)"
+    },
+    {
+     "value": 1,
+     "label": "Block colors (Video 1)"
+    }
+   ],
+   "path": "/digital/values/codec",
+   "animatable": false,
+   "enabled_if": "/digital/enabled",
+   "structure": true
+  },
+  {
+   "id": "digital.chroma",
+   "group": "digital.compression",
+   "label": "Color",
+   "hint": "How much color detail is kept against brightness detail. Codecs store color at lower resolution because eyes notice it less: 4:2:2 halves it across, 4:2:0 across and down, and 4:1:1, NTSC DV's choice, quarters it across, smearing color sideways.",
+   "type": "choice",
+   "default": 2,
+   "options": [
+    {
+     "value": 0,
+     "label": "4:4:4 (full)"
+    },
+    {
+     "value": 1,
+     "label": "4:2:2 (half)"
+    },
+    {
+     "value": 2,
+     "label": "4:2:0 (quarter)"
+    },
+    {
+     "value": 3,
+     "label": "4:1:1 (DV)"
+    }
+   ],
+   "path": "/digital/values/chroma",
+   "animatable": false,
+   "enabled_if": "/digital/enabled",
+   "visible_if": {
+    "path": "/digital/values/codec",
+    "equals": 0
+   },
+   "structure": true
+  },
+  {
+   "id": "digital.quality2",
+   "group": "digital.compression",
+   "label": "Quality",
+   "hint": "How finely each 8×8 block's detail is kept (the quantizer). Lower turns blocks into flat tiles and rings edges with mosquito noise.",
+   "type": "float",
+   "default": 0.749,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/quality",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.quality",
+   "group": "digital.compression",
+   "label": "Quality (from 0.4.0)",
+   "hint": "This instance was made with NTSCRT 0.4.0, whose Quality slider ran on JPEG's own curve. While Quality above is at its default, this value (converted to the same quantizer) is used instead. Set it to 0 to drop it.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "path": "/digital/legacy/quality",
+   "animatable": true,
+   "enabled_if": "/digital/enabled",
+   "visible_if": {
+    "path": "/digital/legacy/quality"
+   },
+   "legacy": true
+  },
+  {
+   "id": "digital.keyframe_interval",
+   "group": "digital.compression",
+   "label": "Keyframe interval",
+   "hint": "Seconds between keyframes (whole pictures). Between them the codec only sends what moved, so errors and datamoshing persist until the next one. 0 compresses every frame on its own, like Motion JPEG and DV.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 10,
+   "step": 0.01,
+   "unit": "s",
+   "path": "/digital/values/keyframe_interval",
+   "animatable": false,
+   "enabled_if": "/digital/enabled",
+   "structure": true
+  },
+  {
+   "id": "digital.fixed_bitrate",
+   "group": "digital.compression",
+   "label": "Fixed bitrate",
+   "hint": "How strictly the codec keeps to a fixed bitrate. Busy frames — motion, detail, grain — have to share the same bits, so they turn blocky, and the picture sharpens again when things settle.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/fixed_bitrate",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
+   "id": "digital.deblocking",
+   "group": "digital.compression",
+   "label": "Deblocking",
+   "hint": "The decoder smoothing block edges, as H.264 does. Off keeps the hard tiles of older codecs; on trades them for smear.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/deblocking",
+   "animatable": true,
+   "enabled_if": "/digital/enabled",
+   "visible_if": {
+    "path": "/digital/values/codec",
+    "equals": 0
+   }
   },
   {
    "id": "digital.frame_rate",
@@ -489,9 +628,9 @@
    "id": "digital.fields",
    "group": "digital.capture",
    "label": "Fields",
-   "hint": "Interlaced cameras like the VX1000 record each frame as two fields of alternate lines. Deinterlaced the cheap way — one field, each line doubled, as most DV reached the web — diagonals turn to stairs.",
+   "hint": "Interlaced cameras like the VX1000 record each frame as two fields of alternate lines. One field keeps just one, as most DV reached the web: the CRT gets half as many lines, each twice as tall, and draws a scanline per line — the 240p look — while anywhere without the CRT each line shows twice, turning diagonals to stairs.",
    "type": "choice",
-   "default": 0,
+   "default": 1,
    "options": [
     {
      "value": 0,
@@ -499,7 +638,7 @@
     },
     {
      "value": 1,
-     "label": "One field (line-doubled)"
+     "label": "One field"
     }
    ],
    "path": "/digital/values/fields",
@@ -508,26 +647,10 @@
    "structure": true
   },
   {
-   "id": "digital.lens_blur",
-   "group": "digital.capture",
-   "label": "Lens softness",
-   "hint": "A soft, cheap or wide-angle lens: fine detail blurs before the sensor sees it.",
-   "type": "float",
-   "default": 0,
-   "min": 0,
-   "max": 1,
-   "step": 0.001,
-   "percent": true,
-   "path": "/digital/values/lens_blur",
-   "animatable": false,
-   "enabled_if": "/digital/enabled",
-   "structure": true
-  },
-  {
    "id": "digital.aliasing",
    "group": "digital.capture",
    "label": "Aliasing",
-   "hint": "The sensor reading detail it can't resolve, with nothing blurring it away first: fine stripes beat into moiré and edges into jaggies. The red and blue chips sit half a pixel either side of green, as in a 3-CCD camera, so fine patterns turn to rainbows.",
+   "hint": "The sensor reading detail it can't resolve, with nothing blurring it away first: fine stripes beat into moiré and edges into jaggies. Red, green and blue are sampled a third of a pixel apart, so where a beat drifts slowly its colors cycle through the rainbow. Above 50% the finest detail is boosted as it's read, for stronger moiré from sources not much sharper than the camera.",
    "type": "float",
    "default": 0,
    "min": 0,
@@ -538,6 +661,25 @@
    "animatable": false,
    "enabled_if": "/digital/enabled",
    "structure": true
+  },
+  {
+   "id": "digital.lens_blur",
+   "group": "digital.capture",
+   "label": "Lens softness (removed)",
+   "hint": "From NTSCRT 0.4.0. Lens softness is gone (upstream 0.19); kept so older projects load. No effect.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "path": "/digital/legacy/lens_blur",
+   "animatable": true,
+   "enabled_if": "/digital/enabled",
+   "visible_if": {
+    "path": "/digital/legacy/lens_blur",
+    "equals": "never"
+   },
+   "legacy": true
   },
   {
    "id": "digital.sensor_noise",
@@ -570,19 +712,55 @@
    "enabled_if": "/digital/enabled"
   },
   {
+   "id": "digital.ccd_response",
+   "group": "digital.picture",
+   "label": "CCD response",
+   "hint": "The tone of a 90s 3-CCD camcorder like the VX1000, fitted to its footage. Auto exposure meters the middle of the frame and exposes bright; each color is compressed by the knee and then clips at white on its own, so warm skin and skies go yellow, then white; lens flare and the mishandled 7.5 IRE setup lift the blacks to a milky gray, more in bright scenes. 0% leaves the picture alone.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 1,
+   "step": 0.001,
+   "percent": true,
+   "path": "/digital/values/ccd_response",
+   "animatable": true,
+   "enabled_if": "/digital/enabled"
+  },
+  {
    "id": "digital.exposure",
    "group": "digital.picture",
-   "label": "Exposure",
-   "hint": "How much light the camera lets in. Exposing for the shadows blows out skies and highlights: each color clips at white on its own, so bright skin and sky shift hue on the way.",
+   "label": "Exposure (from 0.4.0)",
+   "hint": "This instance was made with NTSCRT 0.4.0, whose Exposure became CCD response. While CCD response is 0 it sets CCD response (the stronger of this and Black level decides). Set it to 0 to drop it.",
    "type": "float",
    "default": 0,
    "min": -2,
    "max": 2,
    "step": 0.01,
-   "unit": "stops",
-   "path": "/digital/values/exposure",
+   "path": "/digital/legacy/exposure",
    "animatable": true,
-   "enabled_if": "/digital/enabled"
+   "enabled_if": "/digital/enabled",
+   "visible_if": {
+    "path": "/digital/legacy/exposure"
+   },
+   "legacy": true
+  },
+  {
+   "id": "digital.black_level",
+   "group": "digital.picture",
+   "label": "Black level (from 0.4.0)",
+   "hint": "This instance was made with NTSCRT 0.4.0, whose Black level became CCD response. While CCD response is 0 it sets CCD response (the stronger of this and Exposure decides). Set it to 0 to drop it.",
+   "type": "float",
+   "default": 0,
+   "min": 0,
+   "max": 0.25,
+   "step": 0.001,
+   "path": "/digital/legacy/black_level",
+   "animatable": true,
+   "enabled_if": "/digital/enabled",
+   "visible_if": {
+    "path": "/digital/legacy/black_level"
+   },
+   "legacy": true
   },
   {
    "id": "digital.white_balance",
@@ -630,21 +808,6 @@
    "enabled_if": "/digital/enabled"
   },
   {
-   "id": "digital.black_level",
-   "group": "digital.picture",
-   "label": "Black level",
-   "hint": "Lifted, milky blacks. NTSC DV's 7.5 IRE setup was often handled wrong in transfers, so its blacks came out gray.",
-   "type": "float",
-   "default": 0,
-   "min": 0,
-   "max": 0.25,
-   "step": 0.001,
-   "percent": true,
-   "path": "/digital/values/black_level",
-   "animatable": true,
-   "enabled_if": "/digital/enabled"
-  },
-  {
    "id": "digital.sharpening",
    "group": "digital.picture",
    "label": "Sharpening",
@@ -656,97 +819,6 @@
    "step": 0.001,
    "percent": true,
    "path": "/digital/values/sharpening",
-   "animatable": true,
-   "enabled_if": "/digital/enabled"
-  },
-  {
-   "id": "digital.chroma",
-   "group": "digital.compression",
-   "label": "Color",
-   "hint": "How much color detail is kept against brightness detail. Codecs store color at lower resolution because eyes notice it less: 4:2:2 halves it across, 4:2:0 across and down, and 4:1:1, NTSC DV's choice, quarters it across, smearing color sideways.",
-   "type": "choice",
-   "default": 2,
-   "options": [
-    {
-     "value": 0,
-     "label": "4:4:4 (full)"
-    },
-    {
-     "value": 1,
-     "label": "4:2:2 (half)"
-    },
-    {
-     "value": 2,
-     "label": "4:2:0 (quarter)"
-    },
-    {
-     "value": 3,
-     "label": "4:1:1 (DV)"
-    }
-   ],
-   "path": "/digital/values/chroma",
-   "animatable": false,
-   "enabled_if": "/digital/enabled",
-   "structure": true
-  },
-  {
-   "id": "digital.quality",
-   "group": "digital.compression",
-   "label": "Quality",
-   "hint": "How finely each 8×8 block's detail is kept (the quantizer). Lower turns blocks into flat tiles and rings edges with mosquito noise.",
-   "type": "float",
-   "default": 0.22,
-   "min": 0,
-   "max": 1,
-   "step": 0.001,
-   "percent": true,
-   "path": "/digital/values/quality",
-   "animatable": true,
-   "enabled_if": "/digital/enabled"
-  },
-  {
-   "id": "digital.keyframe_interval",
-   "group": "digital.compression",
-   "label": "Keyframe interval",
-   "hint": "Seconds between keyframes (whole pictures). Between them the codec only sends what moved, so errors and datamoshing persist until the next one. 0 compresses every frame on its own, like Motion JPEG and DV.",
-   "type": "float",
-   "default": 0,
-   "min": 0,
-   "max": 10,
-   "step": 0.01,
-   "unit": "s",
-   "path": "/digital/values/keyframe_interval",
-   "animatable": false,
-   "enabled_if": "/digital/enabled",
-   "structure": true
-  },
-  {
-   "id": "digital.fixed_bitrate",
-   "group": "digital.compression",
-   "label": "Fixed bitrate",
-   "hint": "How strictly the codec keeps to a fixed bitrate. Busy frames — motion, detail, grain — have to share the same bits, so they turn blocky, and the picture sharpens again when things settle.",
-   "type": "float",
-   "default": 0,
-   "min": 0,
-   "max": 1,
-   "step": 0.001,
-   "percent": true,
-   "path": "/digital/values/fixed_bitrate",
-   "animatable": true,
-   "enabled_if": "/digital/enabled"
-  },
-  {
-   "id": "digital.deblocking",
-   "group": "digital.compression",
-   "label": "Deblocking",
-   "hint": "The decoder smoothing block edges, as H.264 does. Off keeps the hard tiles of older codecs; on trades them for smear.",
-   "type": "float",
-   "default": 0,
-   "min": 0,
-   "max": 1,
-   "step": 0.001,
-   "percent": true,
-   "path": "/digital/values/deblocking",
    "animatable": true,
    "enabled_if": "/digital/enabled"
   },
@@ -778,7 +850,11 @@
    "percent": true,
    "path": "/digital/values/datamosh",
    "animatable": true,
-   "enabled_if": "/digital/enabled"
+   "enabled_if": "/digital/enabled",
+   "visible_if": {
+    "path": "/digital/values/codec",
+    "equals": 0
+   }
   },
   {
    "id": "ntsc.enabled",
@@ -5462,27 +5538,31 @@
    "width": 320,
    "hint": "320 × 240, 15 fps, a noisy sensor, each frame compressed on its own.",
    "applies": {
+    "/digital/enabled": true,
     "/digital/values": {
      "frame_rate": 15,
-     "fields": 0,
-     "lens_blur": 0.35,
+     "fields": 1,
      "aliasing": 0.15,
      "sensor_noise": 0.4,
      "noise_reduction": 0.5,
-     "exposure": 0.4,
+     "ccd_response": 0.5,
      "white_balance": -0.15,
      "tint": 0,
      "saturation": 0.85,
-     "black_level": 0.04,
      "sharpening": 0.25,
+     "codec": 0,
      "chroma": 2,
-     "quality": 0.22,
+     "quality": 0.749,
      "keyframe_interval": 0,
      "fixed_bitrate": 0,
      "deblocking": 0,
      "data_loss": 0,
      "datamosh": 0
     },
+    "/digital/legacy/lens_blur": 0,
+    "/digital/legacy/exposure": 0,
+    "/digital/legacy/black_level": 0,
+    "/digital/legacy/quality": 0,
     "/downscale/enabled": true,
     "/downscale/width": 320,
     "/downscale/preset": "Webcam (2005) (320px)"
@@ -5494,27 +5574,31 @@
    "width": 320,
    "hint": "A squeezed bitrate and lost packets that smear until the next keyframe.",
    "applies": {
+    "/digital/enabled": true,
     "/digital/values": {
      "frame_rate": 15,
-     "fields": 0,
-     "lens_blur": 0.3,
+     "fields": 1,
      "aliasing": 0,
      "sensor_noise": 0.25,
      "noise_reduction": 0.6,
-     "exposure": 0.2,
+     "ccd_response": 0.3,
      "white_balance": 0,
      "tint": 0,
      "saturation": 0.9,
-     "black_level": 0,
      "sharpening": 0,
+     "codec": 0,
      "chroma": 2,
-     "quality": 0.22,
+     "quality": 0.749,
      "keyframe_interval": 4,
      "fixed_bitrate": 0.8,
      "deblocking": 0.6,
      "data_loss": 0.15,
      "datamosh": 0
     },
+    "/digital/legacy/lens_blur": 0,
+    "/digital/legacy/exposure": 0,
+    "/digital/legacy/black_level": 0,
+    "/digital/legacy/quality": 0,
     "/downscale/enabled": true,
     "/downscale/width": 320,
     "/downscale/preset": "Video call (320px)"
@@ -5526,27 +5610,31 @@
    "width": 720,
    "hint": "The VX1000 skate-video look: one field line-doubled, hard sharpening, aliasing and color moiré, blown highlights, warm saturated color, gray blacks, color at a quarter width (4:1:1).",
    "applies": {
+    "/digital/enabled": true,
     "/digital/values": {
      "frame_rate": 30,
      "fields": 1,
-     "lens_blur": 0.25,
      "aliasing": 0.6,
      "sensor_noise": 0.12,
      "noise_reduction": 0,
-     "exposure": 0.3,
+     "ccd_response": 1,
      "white_balance": 0.4,
      "tint": 0.2,
      "saturation": 1.15,
-     "black_level": 0.08,
      "sharpening": 0.6,
+     "codec": 0,
      "chroma": 3,
-     "quality": 0.7,
+     "quality": 0.894,
      "keyframe_interval": 0,
      "fixed_bitrate": 0.3,
      "deblocking": 0,
      "data_loss": 0,
      "datamosh": 0
     },
+    "/digital/legacy/lens_blur": 0,
+    "/digital/legacy/exposure": 0,
+    "/digital/legacy/black_level": 0,
+    "/digital/legacy/quality": 0,
     "/downscale/enabled": true,
     "/downscale/width": 720,
     "/downscale/preset": "MiniDV (720px)"
@@ -5558,30 +5646,70 @@
    "width": 320,
    "hint": "240p streaming: few bits, coarse blocks, and keyframes that pump.",
    "applies": {
+    "/digital/enabled": true,
     "/digital/values": {
      "frame_rate": 15,
-     "fields": 0,
-     "lens_blur": 0,
+     "fields": 1,
      "aliasing": 0,
      "sensor_noise": 0,
      "noise_reduction": 0,
-     "exposure": 0,
+     "ccd_response": 0,
      "white_balance": 0,
      "tint": 0,
      "saturation": 1,
-     "black_level": 0,
      "sharpening": 0,
+     "codec": 0,
      "chroma": 2,
-     "quality": 0.12,
+     "quality": 0.651,
      "keyframe_interval": 5,
      "fixed_bitrate": 0.7,
      "deblocking": 0,
      "data_loss": 0,
      "datamosh": 0
     },
+    "/digital/legacy/lens_blur": 0,
+    "/digital/legacy/exposure": 0,
+    "/digital/legacy/black_level": 0,
+    "/digital/legacy/quality": 0,
     "/downscale/enabled": true,
     "/downscale/width": 320,
     "/downscale/preset": "Early web video (320px)"
+   }
+  },
+  {
+   "id": "cd_rom",
+   "name": "CD-ROM (Video 1)",
+   "width": 240,
+   "hint": "Video for Windows off a 90s CD-ROM: 240 wide, 12 fps, Microsoft Video 1's flat two-tone blocks and banded 15-bit color, a keyframe every 15 frames.",
+   "applies": {
+    "/digital/enabled": true,
+    "/digital/values": {
+     "frame_rate": 12,
+     "fields": 1,
+     "aliasing": 0,
+     "sensor_noise": 0,
+     "noise_reduction": 0,
+     "ccd_response": 0,
+     "white_balance": 0,
+     "tint": 0,
+     "saturation": 1,
+     "sharpening": 0,
+     "codec": 1,
+     "chroma": 2,
+     "quality": 0.57,
+     "keyframe_interval": 1.25,
+     "fixed_bitrate": 0,
+     "deblocking": 0,
+     "data_loss": 0,
+     "datamosh": 0
+    },
+    "/digital/legacy/lens_blur": 0,
+    "/digital/legacy/exposure": 0,
+    "/digital/legacy/black_level": 0,
+    "/digital/legacy/quality": 0,
+    "/downscale/enabled": true,
+    "/downscale/width": 240,
+    "/downscale/preset": "CD-ROM (Video 1) (240px)"
    }
   },
   {
@@ -5590,27 +5718,31 @@
    "width": 480,
    "hint": "Keyframes removed: motion drags the old picture around.",
    "applies": {
+    "/digital/enabled": true,
     "/digital/values": {
      "frame_rate": 30,
-     "fields": 0,
-     "lens_blur": 0,
+     "fields": 1,
      "aliasing": 0,
      "sensor_noise": 0,
      "noise_reduction": 0,
-     "exposure": 0,
+     "ccd_response": 0,
      "white_balance": 0,
      "tint": 0,
      "saturation": 1,
-     "black_level": 0,
      "sharpening": 0,
+     "codec": 0,
      "chroma": 2,
-     "quality": 0.4,
+     "quality": 0.826,
      "keyframe_interval": 1,
      "fixed_bitrate": 0.3,
      "deblocking": 0,
      "data_loss": 0,
      "datamosh": 1
     },
+    "/digital/legacy/lens_blur": 0,
+    "/digital/legacy/exposure": 0,
+    "/digital/legacy/black_level": 0,
+    "/digital/legacy/quality": 0,
     "/downscale/enabled": true,
     "/downscale/width": 480,
     "/downscale/preset": "Datamosh (480px)"

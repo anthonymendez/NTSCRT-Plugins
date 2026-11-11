@@ -6,7 +6,7 @@ circuits, RetroArch CRT shaders via librashader, digital codec, Screen Loop) as 
 - **DaVinci Resolve 21.1.2+** — OpenFX plugin, Windows and macOS
 - **Final Cut Pro 12.4+** — FxPlug 4 plugin, macOS
 
-Status: in development. See `docs/` for architecture and contracts.
+Status: in development. See `docs/` for architecture and contracts. Synced with upstream NTSCRT v0.20.0.
 
 ![Animated before/after: a scrolling synthwave test scene untouched on the left, through NTSCRT's default look on the right](docs/images/hero-before-after.gif)
 *Before / after with the default look, in motion: chroma bleed, moving noise, scanlines and CRT glow.*

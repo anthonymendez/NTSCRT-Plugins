@@ -252,3 +252,22 @@ TEST_CASE("model: FileLog appends timestamped lines and rotates") {
     CHECK(off.folder().empty());
     fs::remove_all(dir.parent_path().parent_path(), ec);
 }
+
+TEST_CASE("model: Digital video legacy controls and version 1 presets") {
+    json schema = json::parse(ntscrt_param_schema_json());
+    Model m = Model::from_schema(schema, load("fxplug/param_ids.json"), nullptr);
+    const Param *legacy = m.find("digital.quality"), *q2 = m.find("digital.quality2"), *ccd = m.find("digital.ccd_response");
+    REQUIRE(legacy);
+    REQUIRE(q2);
+    REQUIRE(ccd);
+    json look = m.build_look(json::object(), [&](const Param &p) { return m.default_host_value(p); });
+    CHECK_FALSE(look["digital"].contains("legacy"));
+    CHECK(look["digital"]["values"]["quality"].get<double>() == doctest::Approx(0.749));
+    look = m.build_look(json::object(), [&](const Param &p) { return &p == legacy ? json(0.3) : m.default_host_value(p); });
+    CHECK(look["digital"]["legacy"]["quality"].get<double>() == doctest::Approx(0.3));
+    json v1 = {{"version", 1}, {"digital", {{"enabled", true}, {"values", {{"quality", 0.22}, {"black_level", 0.08}}}}}};
+    auto hv = m.host_values_from_preset(v1, false);
+    CHECK(hv[q2->host_id].get<double>() == doctest::Approx(0.749).epsilon(0.002));
+    CHECK(hv[ccd->host_id].get<double>() == doctest::Approx(1.0));
+    CHECK(hv[legacy->host_id].get<double>() == doctest::Approx(0.0));
+}

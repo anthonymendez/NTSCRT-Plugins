@@ -61,7 +61,11 @@ struct Preset {
     bool feedback = false;
     json data;
 };
+// Presets in menu order: released presets first, in the order they shipped
+// (released_preset_order), then newer ones alphabetically, so the index a
+// saved project holds keeps naming the same preset.
 std::vector<Preset> parse_presets(const char *presets_json);
+const std::vector<std::string> &released_preset_order();
 
 // Host param name for a schema id: [A-Za-z0-9_] only.
 std::string host_name(const std::string &id);
