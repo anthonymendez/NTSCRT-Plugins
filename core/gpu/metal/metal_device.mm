@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <cstring>
 #include <stdexcept>
@@ -284,6 +285,8 @@ public:
         wait(cb);
     }
 
+    bool lost() const override { return lost_; }
+
     void *native_device() const override { return (__bridge void *)dev_; }
     // Callers hold context_mutex() while they encode into it.
     void *native_context() override {
@@ -330,10 +333,13 @@ private:
         if (cb) [cb commit];
         return cb;
     }
-    static void wait(id<MTLCommandBuffer> cb) {
+    void wait(id<MTLCommandBuffer> cb) {
         if (!cb) return;
         [cb waitUntilCompleted];
-        if (cb.status == MTLCommandBufferStatusError) throw std::runtime_error("Metal command buffer failed: " + ns(cb.error));
+        if (cb.status == MTLCommandBufferStatusError) {
+            lost_ = true;  // a hang / GPU reset leaves the queue unusable: the owner makes a new device
+            throw std::runtime_error("Metal command buffer failed: " + ns(cb.error));
+        }
     }
 
     // Under context_mutex().
@@ -362,6 +368,7 @@ private:
     id<MTLSamplerState> linear_, point_;
     id<MTLCommandBuffer> cb_ = nil;
     id<MTLCommandBuffer> external_ = nil;
+    std::atomic<bool> lost_{false};  // a command buffer failed (GPU hang / reset); any thread sets it
     std::unordered_map<std::string, id<MTLLibrary>> libs_;
     std::unordered_map<std::string, std::unique_ptr<MtlKernel>> kernels_;
     std::mutex kern_mu_;  // libs_, kernels_

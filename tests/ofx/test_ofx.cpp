@@ -5,6 +5,8 @@
 #include <ntscrt/ntscrt.h>
 
 #include "mock_host.h"
+#include "../../core/params/timeline.h"
+#include "../../core/stages/digital/migrate.h"
 
 #include <algorithm>
 #include <cctype>
@@ -380,7 +382,23 @@ TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
 // Seeks, playback and edits, with and without keyframes. Prints the timings
 // (informational) and checks that no edit leaves a stale picture: each result
 // equals a render after a full purge.
-TEST_CASE("edits and seeks: look history, cache flushing, timings") {
+namespace {
+// GitHub's macOS runners: a paravirtual GPU that can hang ("GPU Hang") on CRT shaders.
+// Only there is a hang (or the CPU fallback after one) tolerated: the test stops with a warning.
+bool ci_virtual_gpu() {
+#ifdef __APPLE__
+    const char *gha = std::getenv("GITHUB_ACTIONS");
+    return gha && std::string(gha) == "true";
+#else
+    return false;
+#endif
+}
+struct CiGpuHang {
+    std::string log;
+};
+
+void edits_and_seeks() {
+    const size_t log_start = read_log().size();
     Fixture f;
     f.create();
     const int w = 640, h = 360, last = 300;
@@ -430,7 +448,20 @@ TEST_CASE("edits and seeks: look history, cache flushing, timings") {
         const long r0 = reads();
         auto t0 = std::chrono::steady_clock::now();
         OfxStatus st = f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in);
+        if (ci_virtual_gpu()) {
+            const std::string added = read_log().substr(log_start);
+            if (added.find("Hang") != std::string::npos || added.find("GPU device lost") != std::string::npos)
+                throw CiGpuHang{added};
+        }
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (st != kOfxStatOK) {
+            const std::string log = read_log();
+            // the core's error is on the render line before the FAILED one
+            const size_t at = log.rfind(" FAILED");
+            size_t from = at == std::string::npos ? 0 : log.rfind('\n', at);
+            if (from != std::string::npos && from > 0) from = log.rfind('\n', from - 1);
+            MESSAGE("render t=" << t << " failed; plug-in log: " << log.substr(from == std::string::npos ? 0 : from + 1));
+        }
         REQUIRE(st == kOfxStatOK);
         return Shot{ms, reads() - r0, out};
     };
@@ -508,4 +539,150 @@ TEST_CASE("edits and seeks: look history, cache flushing, timings") {
            << " looks)";
     MESSAGE(report.str());
     std::printf("[timing] %s\n", report.str().c_str());
+}
+}  // namespace
+
+TEST_CASE("edits and seeks: look history, cache flushing, timings") {
+    try {
+        edits_and_seeks();
+    } catch (const CiGpuHang &h) {
+        MESSAGE("WARNING: the CI runner's virtual GPU hung; rest of the test skipped. Plug-in log: " << h.log);
+    }
+}
+
+// Animated presets become host keyframes; Horizontal resolution / Digital video
+// formats write what their schema "applies" says; preset files round-trip.
+TEST_CASE("presets: timeline keyframes, menus with applies, save/load round trip") {
+    Fixture f;
+    f.create();
+    const json &s = f.schema;
+    auto read_preset = [](const std::string &name) {
+        std::ifstream in(std::string(NTSCRT_SOURCE_DIR) + "/presets/" + name + ".json", std::ios::binary);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        return json::parse(ss.str());
+    };
+    auto choose = [&](const std::string &param, const std::string &label) {
+        mock::Param *p = f.param(param);
+        int i = f.choice_index(*p, label);
+        REQUIRE_MESSAGE(i >= 0, label);
+        p->v[0] = i;
+        REQUIRE(f.changed(param) == kOfxStatOK);
+    };
+    auto keyed = [&]() {
+        std::vector<std::string> out;
+        for (const auto &sp : s["params"])
+            if (!f.param(host_name(sp["id"]))->keys.empty()) out.push_back(sp["id"]);
+        return out;
+    };
+
+    SUBCASE("an animated preset keys every moving param from the effect's first frame") {
+        // mock clip: frames 10..60 at 25 fps; "Glitch pop" lasts 2 s = 50 frames, then loops.
+        choose("host_preset", "Glitch pop");
+        const json preset = ntscrt::digital::migrate::upgraded(read_preset("Glitch pop"));
+        const auto tl = ntscrt::timeline::parse(preset);
+        const auto rules = ntscrt::timeline::Rules::from_schema(s);
+        mock::Param *noise = f.param("ntsc_composite_preemphasis");
+        REQUIRE(noise->keys.size() == 51);
+        CHECK(noise->keys.begin()->first == 10.0);
+        CHECK(noise->keys.rbegin()->first == 60.0);
+        for (int n : {0, 5, 17, 33, 49, 50, 50 + 17}) {
+            if (10 + n > 60) continue;
+            CAPTURE(n);
+            const json look = ntscrt::timeline::look_at_frame(preset, tl, rules, n, 25.0);
+            CHECK(noise->keys.at(10.0 + n)[0] ==
+                  doctest::Approx(look["ntsc"]["settings"]["composite_preemphasis"].get<double>()));
+        }
+        // a param the preset holds still: its value, no keys
+        CHECK(f.param("downscale_width")->keys.empty());
+        CHECK(f.param("downscale_width")->v[0] == 256);
+        // stepped params: a key where the value changes only
+        for (const auto &sp : s["params"]) {
+            if (sp["type"] != "bool" && sp["type"] != "choice") continue;
+            CAPTURE(sp["id"]);
+            CHECK(f.param(host_name(sp["id"]))->keys.size() < 51);
+        }
+        const auto moving = keyed();
+        MESSAGE(moving.size() << " params keyed");
+        CHECK(moving.size() > 5);
+        // another preset replaces the animation
+        choose("host_preset", "Clean VHS");
+        CHECK(keyed().empty());
+        CHECK(f.param("ntsc_composite_preemphasis")->key_clears > 0);
+    }
+
+    SUBCASE("Horizontal resolution sets the width; editing the width makes it Custom") {
+        mock::Param *pre = f.param("downscale_preset"), *w = f.param("downscale_width");
+        choose("downscale_preset", "Arcade (384px)");
+        CHECK(w->v[0] == 384);
+        w->v[0] = 500;
+        REQUIRE(f.changed("downscale_width") == kOfxStatOK);
+        CHECK(pre->v[0] == f.choice_index(*pre, "Custom"));
+        choose("downscale_preset", "SNES (256px)");
+        CHECK(w->v[0] == 256);
+        w->v[0] = 256;  // same width: stays
+        REQUIRE(f.changed("downscale_width") == kOfxStatOK);
+        CHECK(pre->v[0] == f.choice_index(*pre, "SNES (256px)"));
+    }
+
+    SUBCASE("Digital video formats are in the Preset menu and switch the stage on") {
+        mock::Param *pp = f.param("host_preset");
+        // the released presets keep their index; the formats follow the 0.5.0 looks
+        CHECK(f.choice_index(*pp, "15 second glitches") == 1);
+        CHECK(f.choice_index(*pp, "Webcam (low quality)") == 27);
+        const int webcam = f.choice_index(*pp, "Digital video/Webcam (2005)");
+        CHECK(webcam == f.choice_index(*pp, "Chunky webcam") + 1);
+        f.param("ntsc_composite_noise_intensity")->v[0] = 0.33;
+        choose("host_preset", "Digital video/MiniDV");
+        CHECK(f.param("digital_enabled")->v[0] == 1);
+        CHECK(f.param("downscale_enabled")->v[0] == 1);
+        CHECK(f.param("downscale_width")->v[0] == 720);
+        mock::Param *dp = f.param("downscale_preset");
+        CHECK(dp->v[0] == f.choice_index(*dp, "MiniDV (720px)"));
+        CHECK(f.param("ntsc_composite_noise_intensity")->v[0] == doctest::Approx(0.33));  // the rest stays
+    }
+
+    SUBCASE("Save writes upstream JSON with the Screen Loop settings; Load restores the same look") {
+        fs::path tmp = fs::temp_directory_path() / "ntscrt_ofx_roundtrip.json";
+        fs::path side = fs::temp_directory_path() / "ntscrt_ofx_roundtrip (Screen Loop).json";
+        fs::remove(side);
+        auto u8 = tmp.u8string();
+        f.param("host_preset_file")->str = std::string(u8.begin(), u8.end());
+        choose("host_preset", "Chunky webcam");
+        f.param("screenloop_enabled")->v[0] = 1;
+        f.param("screenloop_zoom")->v[0] = 0.83;
+        f.param("glitch_closed_captions")->v[0] = 0;
+        std::map<std::string, std::vector<double>> before;
+        for (const auto &sp : s["params"]) before[sp["id"]] = f.param(host_name(sp["id"]))->v;
+        REQUIRE(f.changed("host_save_preset") == kOfxStatOK);
+        json saved;
+        {
+            std::ifstream in(tmp);
+            saved = json::parse(in, nullptr, false);
+        }
+        REQUIRE(saved.is_object());
+        CHECK(saved["version"] == 2);
+        CHECK(saved["ntsc"]["settings"]["version"] == 1);
+        CHECK(saved["glitch"]["values"]["closed_captions"] == 0);  // encode: number
+        REQUIRE(saved.contains("screen_loop"));
+        CHECK(saved["screen_loop"]["kind"] == "ntscrt-video-feedback");
+        CHECK(saved["screen_loop"]["values"]["zoom"].get<double>() == doctest::Approx(0.83));
+        CHECK(fs::exists(side));  // Screen Loop on: also as an upstream Screen Loop file
+        // change things, load it back: every param as it was
+        f.param("screenloop_enabled")->v[0] = 0;
+        f.param("screenloop_zoom")->v[0] = 0.5;
+        f.param("downscale_width")->v[0] = 999;
+        f.param("digital_enabled")->v[0] = 0;
+        f.param("glitch_closed_captions")->v[0] = 1;
+        REQUIRE(f.changed("host_load_preset") == kOfxStatOK);
+        for (const auto &sp : s["params"]) {
+            CAPTURE(sp["id"]);
+            const auto &now = f.param(host_name(sp["id"]))->v;
+            const auto &was = before[sp["id"]];
+            REQUIRE(now.size() == was.size());
+            for (size_t k = 0; k < now.size(); ++k) CHECK(now[k] == doctest::Approx(was[k]));
+        }
+        fs::remove(tmp);
+        fs::remove(side);
+    }
 }

@@ -59,7 +59,10 @@ Read every commit message: upstream explains each behaviour change and its numbe
      and the old id becomes legacy, mapped onto the new one in `migrate.h`;
    - choice options may only be appended.
 6. Bundled preset menu: new presets sort after the released ones. When releasing, append their names to
-   `released_preset_order()` in `ofx/ofx_params.cpp` (never reorder it).
+   `released_preset_order()` in `ofx/ofx_params.cpp` (never reorder it). New upstream Digital video formats
+   (schema `digital_formats`) are menu entries too: append `Digital video/<name>` the same way.
+   Animated presets need nothing: `core/params/timeline.h` ports upstream's `Timeline.swift`; port changes
+   to it when upstream changes how keys evaluate.
 7. Add the new looks to the Resolve `cli` test (`DIGITAL_LOOKS` in `tests/resolve/run_resolve_tests.py`)
    when they use a stage the test doesn't cover yet.
 8. Record the version: the README status line, the pin line at the top of this page, the
