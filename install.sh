@@ -7,18 +7,21 @@
 # Options (pass after `sh -s --` when piping):
 #   curl -fsSL .../install.sh | sh -s -- --resolve          # only DaVinci Resolve
 #   curl -fsSL .../install.sh | sh -s -- --fcp              # only Final Cut Pro
-#   curl -fsSL .../install.sh | sh -s -- --version v0.3.0   # a specific release
+#   curl -fsSL .../install.sh | sh -s -- --version v0.4.1   # a specific release (or v0.5.0-rc.1)
 #   sh install.sh --from ~/Downloads/NTSCRT-OFX-macos-universal.zip   # a zip you already have
-#   sh install.sh --uninstall
+#   sh install.sh --uninstall                                   # removes both plug-ins (or pass --resolve / --fcp)
 #
 # Default: installs for every app it finds (/Applications/DaVinci Resolve,
 # /Applications/Final Cut Pro.app), or for both if it finds neither.
 # Asks for your password once (sudo) to write /Library/OFX/Plugins and /Applications.
 # If the direct download fails it falls back to `gh release download`
 # (GitHub CLI, signed in) or the GITHUB_TOKEN environment variable.
+# Downloaded zips are checked against the release's SHA256SUMS before anything is
+# installed; a missing or mismatching checksum stops the install (--from skips it).
 set -eu
 
 REPO="${NTSCRT_REPO:-anthonymendez/NTSCRT-Plugins}"
+BASE_URL=""   # --base-url: download <url>/<asset> + <url>/SHA256SUMS instead of the GitHub release (CI tests, mirrors)
 VERSION="latest"
 WANT_RESOLVE=""; WANT_FCP=""; FCP_EXPLICIT=""; UNINSTALL=""; FROM=""
 OFX_ASSET="NTSCRT-OFX-macos-universal.zip"
@@ -38,8 +41,9 @@ while [ $# -gt 0 ]; do
     --version) shift; VERSION="${1:?--version needs a tag}" ;;
     --from) shift; FROM="${1:?--from needs a path}" ;;
     --repo) shift; REPO="${1:?--repo needs owner/name}" ;;
+    --base-url) shift; BASE_URL="${1:?--base-url needs a URL}" ;;
     --uninstall) UNINSTALL=1 ;;
-    -h|--help) sed -n '2,20p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help) awk 'NR > 1 && /^set -eu/ { exit } NR > 1' "$0" 2>/dev/null || true; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
   shift
@@ -47,14 +51,23 @@ done
 
 [ "$(uname -s)" = "Darwin" ] || die "this installer is for macOS; on Windows use install.ps1"
 
+# latest, or a release tag: vX.Y.Z / vX.Y.Z-rc.N (it ends up in URLs; nothing else is accepted)
+version_ok() {
+  case "$1" in latest) return 0 ;; *[!0-9a-z.-]*|"") return 1 ;; esac   # also rules out newlines
+  printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
+}
+version_ok "$VERSION" || die "--version must be 'latest' or a release tag like v0.4.1 / v0.5.0-rc.1 (got '$VERSION')"
+
 # Run from an unzipped release (script file next to the plugin)? Install that copy.
 if [ -z "$FROM" ] && [ -f "$0" ]; then
   here="$(cd "$(dirname "$0")" && pwd)"
   if [ -d "$here/NTSCRT.ofx.bundle" ] || [ -d "$here/NTSCRT.app" ]; then FROM="$here"; fi
 fi
 
-# Nothing chosen: pick by what's installed (both if neither is found).
-if [ -z "$WANT_RESOLVE$WANT_FCP" ]; then
+# Nothing chosen: uninstall removes both; install picks by what's installed (both if neither is found).
+if [ -z "$WANT_RESOLVE$WANT_FCP" ] && [ -n "$UNINSTALL" ]; then
+  WANT_RESOLVE=1; WANT_FCP=1
+elif [ -z "$WANT_RESOLVE$WANT_FCP" ]; then
   [ -d "/Applications/DaVinci Resolve" ] || [ -d "/Applications/DaVinci Resolve.app" ] && WANT_RESOLVE=1
   [ -d "/Applications/Final Cut Pro.app" ] && WANT_FCP=1
   [ -z "$WANT_RESOLVE$WANT_FCP" ] && { WANT_RESOLVE=1; WANT_FCP=1; }
@@ -91,7 +104,14 @@ if [ -n "$UNINSTALL" ]; then
   if [ -n "$WANT_FCP" ]; then
     say "Removing $APP_DEST/NTSCRT.app and its effect template"
     $SUDO rm -rf "$APP_DEST/NTSCRT.app"
-    as_user rm -rf "$TEMPLATE_DIR"
+    as_user rm -rf "$TEMPLATE_DIR" || say "couldn't remove $TEMPLATE_DIR (remove it yourself)"
+  fi
+  # The .pkg installer's receipt: forget it once nothing it installed is left.
+  PKG_ID="com.ntscrt.plugins.installer"
+  if [ ! -e "$OFX_DEST/NTSCRT.ofx.bundle" ] && [ ! -e "$APP_DEST/NTSCRT.app" ] &&
+     pkgutil --pkg-info "$PKG_ID" >/dev/null 2>&1; then
+    say "Forgetting the installer receipt ($PKG_ID)"
+    $SUDO pkgutil --forget "$PKG_ID" >/dev/null || true
   fi
   say "Done."
   exit 0
@@ -100,8 +120,13 @@ fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ntscrt.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
-download() {  # download <asset> -> prints path of the zip
+fetch_asset() {  # fetch_asset <asset> -> prints its path; returns 1 if it can't be downloaded
   asset="$1"; out="$WORK/$asset"
+  if [ -n "$BASE_URL" ]; then
+    say "Downloading $asset from $BASE_URL" >&2
+    curl -fsSL -o "$out" "${BASE_URL%/}/$asset" && { echo "$out"; return 0; }
+    return 1
+  fi
   if [ "$VERSION" = "latest" ]; then url="https://github.com/$REPO/releases/latest/download/$asset"
   else url="https://github.com/$REPO/releases/download/$VERSION/$asset"; fi
   say "Downloading $asset ($VERSION) from $REPO" >&2
@@ -120,7 +145,34 @@ download() {  # download <asset> -> prints path of the zip
       echo "$out"; return 0
     fi
   fi
-  die "couldn't download $asset. Check https://github.com/$REPO/releases or use --from <zip>."
+  return 1
+}
+
+download() {  # download <asset> -> prints path of the zip (not yet verified: see verify)
+  fetch_asset "$1" || die "couldn't download $1. Check https://github.com/$REPO/releases or use --from <zip>."
+}
+
+# verify <zip> <asset>: check the zip against the release's SHA256SUMS. Fails closed: no
+# SHA256SUMS, no line for the asset, or a different hash stops the install. Run it in the
+# main shell (not inside $(...)) so die exits the script.
+verify() {
+  v_zip="$1"; v_asset="$2"; sums="$WORK/SHA256SUMS"
+  help="Nothing was installed. If you trust the file anyway, download it yourself and use --from <zip>."
+  if [ ! -f "$sums" ]; then
+    (fetch_asset SHA256SUMS >/dev/null) ||   # subshell: fetch_asset sets globals
+      die "couldn't download SHA256SUMS for $VERSION (releases before v0.4.1 don't have one), so $v_asset can't be verified. $help"
+  fi
+  want="$(awk -v n="$v_asset" '{ f = $2; sub(/^\*/, "", f); if (f == n && length($1) == 64) { print tolower($1); exit } }' "$sums")"
+  [ -n "$want" ] || die "SHA256SUMS of $VERSION doesn't list $v_asset, so it can't be verified. $help"
+  have="$(shasum -a 256 "$v_zip" | awk '{ print tolower($1) }')"
+  [ "$have" = "$want" ] || die "checksum mismatch for $v_asset: expected $want, got $have. The download is corrupt or was tampered with. $help"
+  say "Checksum OK: $v_asset (SHA-256 $have)"
+}
+
+# has_real_signature <bundle>: signed with a real identity (not ad-hoc / unsigned) and intact.
+has_real_signature() {
+  codesign --verify --deep --strict "$1" >/dev/null 2>&1 || return 1
+  codesign -dvv "$1" 2>&1 | grep -q '^Authority='
 }
 
 unpack() {  # unpack <zip|dir> <name to find> -> prints path of the found item
@@ -167,8 +219,15 @@ install_swap() {
   $SUDO mkdir -p "$dir"
   $SUDO rm -rf "$dir/.$name.new-"* "$dir/.$name.old-"* 2>/dev/null || true   # leftovers of an interrupted run
   if ! $SUDO ditto "$src" "$new"; then $SUDO rm -rf "$new"; die "copy to $dir failed; the installed version is untouched"; fi
-  $SUDO xattr -dr com.apple.quarantine "$new" 2>/dev/null || true
-  case "$name" in *.ofx.bundle) $SUDO codesign --force --deep --sign - "$new" 2>/dev/null || true ;; esac
+  # A properly signed bundle keeps its signature and quarantine flag (Gatekeeper checks it).
+  # Unsigned / ad-hoc builds (all releases so far) would be blocked, so those are
+  # de-quarantined and the OFX bundle is ad-hoc signed.
+  if has_real_signature "$new"; then
+    say "$name is signed: keeping its signature"
+  else
+    $SUDO xattr -dr com.apple.quarantine "$new" 2>/dev/null || true
+    case "$name" in *.ofx.bundle) $SUDO codesign --force --deep --sign - "$new" 2>/dev/null || true ;; esac
+  fi
   if [ -e "$dir/$name" ] && ! $SUDO mv "$dir/$name" "$old"; then
     $SUDO rm -rf "$new"; die "couldn't move the old $name aside; it is untouched"
   fi
@@ -196,7 +255,11 @@ if [ -n "$SUDO" ]; then
 fi
 
 if [ -n "$WANT_RESOLVE" ]; then
-  bundle="$(pick_from NTSCRT.ofx.bundle || unpack "$(download "$OFX_ASSET")" NTSCRT.ofx.bundle)"
+  if ! bundle="$(pick_from NTSCRT.ofx.bundle)"; then
+    ofx_zip="$(download "$OFX_ASSET")" || exit 1
+    verify "$ofx_zip" "$OFX_ASSET"
+    bundle="$(unpack "$ofx_zip" NTSCRT.ofx.bundle)" || exit 1
+  fi
   [ -f "$bundle/Contents/MacOS/NTSCRT.ofx" ] || die "not a macOS NTSCRT bundle: $bundle"
   if pgrep -xq Resolve; then say "DaVinci Resolve is running: the new version loads when you restart it."; fi
   new_v="$(bundle_version "$bundle")"; old_v="$(bundle_version "$OFX_DEST/NTSCRT.ofx.bundle")"
@@ -208,8 +271,8 @@ fi
 if [ -n "$WANT_FCP" ] && [ -z "$FROM" ]; then
   # A release can come without the Final Cut plug-in (it's built only when the FxPlug SDK is
   # available to CI). Found Final Cut by itself? Then skip it instead of failing the whole install.
-  if fcp_zip="$(download "$FCP_ASSET" 2>/dev/null)"; then
-    :
+  if fcp_zip="$(fetch_asset "$FCP_ASSET" 2>/dev/null)"; then
+    verify "$fcp_zip" "$FCP_ASSET"   # present but bad: stop (never skip silently)
   elif [ -n "$FCP_EXPLICIT" ]; then
     die "this release ($VERSION) has no Final Cut Pro plug-in ($FCP_ASSET)"
   else
@@ -219,7 +282,7 @@ if [ -n "$WANT_FCP" ] && [ -z "$FROM" ]; then
 fi
 
 if [ -n "$WANT_FCP" ]; then
-  app="$(pick_from NTSCRT.app || unpack "$fcp_zip" NTSCRT.app)"
+  app="$(pick_from NTSCRT.app || unpack "$fcp_zip" NTSCRT.app)" || exit 1
   if pgrep -xq "Final Cut Pro"; then say "Final Cut Pro is running: the new version loads when you restart it."; fi
   new_v="$(bundle_version "$app")"; old_v="$(bundle_version "$APP_DEST/NTSCRT.app")"
   say "Installing Final Cut Pro plugin $new_v${old_v:+ (replacing $old_v)} -> $APP_DEST/NTSCRT.app"

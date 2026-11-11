@@ -1,7 +1,7 @@
 // stages.h — CONTRACT (Wave 0): the interface of every pipeline stage.
 // Each owner implements its class in core/stages/<name>/*.cpp (replacing the
 // Wave-0 stub) and may add private headers there. Don't change these
-// signatures without a note in docs/CONTRACT-CHANGES.md.
+// signatures without a note in docs/dev/CONTRACT-CHANGES.md.
 //
 // Per-frame order (port of upstream Mp4Exporter.exportStill, see docs/pipeline.md):
 //   src(BGRA8) -> Crop -> [Howlaround camera] -> Digital -> Ntsc -> upload
@@ -104,7 +104,7 @@ private:
 
 // ---- Screen Loop / howlaround (agent G) — GPU, sequential ---------------------
 // See core/stages/howlaround/howl_engine.h (random access) and
-// docs/CONTRACT-CHANGES.md (2026-11-10, agent G) for the façade wiring.
+// docs/dev/CONTRACT-CHANGES.md (2026-11-10, agent G) for the façade wiring.
 class Howlaround {
 public:
     explicit Howlaround(gpu::Device &dev);

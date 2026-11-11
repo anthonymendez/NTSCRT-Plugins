@@ -104,6 +104,12 @@ migrated). NTSCRT-Plugins extensions, all optional:
   optional schema field hosts honour when applying presets). OFX sets output premultiplication = source's;
   FxPlug passes premultiplied. `facade/alpha_merge` params gained `mode`, `premult` (32-byte cbuffer).
 
+- 2026-11-11, agent C (upstream sync to v0.20.0), `core/src/internal.h`: `FrameContext` gains
+  `int line_height = 1`. Reason: upstream 0.19's Digital video "One field" sends the chain the field itself
+  (`DownscaleSpec.lineHeight` 2: half the lines, each two picture rows). The façade sets it for the frame
+  (`digital::chain_line_height(look)` from `core/stages/digital/fields.h`, only when the Digital stage runs,
+  so never under Screen Loop); the Downscale halves its lines; the CRT stage fits and supersamples by the
+  picture's shape (`in.height * line_height`), as upstream ScanlineGrid / SupersampledPass do.
 - 2026-11-11, agent D (responsiveness), `ntscrt.h`: appended `ntscrt_flush_caches_mask(inst, bits)` with
   `NTSCRT_CACHE_SOURCE|DIGITAL|GLITCH|CRT|SCREENLOOP|ALL` (ABI version unchanged: additive), so hosts flush only
   what an edit can affect. Documented that `NTSCRT_ERR_GPU`, `NTSCRT_ERR_MISSING_RESOURCE` and

@@ -3,6 +3,7 @@
 // timing, optics, sensor, electronics) and the stream around the codec.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -19,11 +20,15 @@ namespace ntscrt::digital {
 
 // ---- params (DigitalVideoParams.swift) ---------------------------------------
 
+// Upstream DigitalParam.all order.
 enum Param : int {
-    kFrameRate, kFields, kLensBlur, kAliasing, kSensorNoise, kNoiseReduction, kExposure, kWhiteBalance, kTint,
-    kSaturation, kBlackLevel, kSharpening, kChroma, kQuality, kKeyframeInterval, kFixedBitrate, kDeblocking,
+    kFrameRate, kFields, kAliasing, kSensorNoise, kNoiseReduction, kCCDResponse, kWhiteBalance, kTint,
+    kSaturation, kSharpening, kCodec, kChroma, kQuality, kKeyframeInterval, kFixedBitrate, kDeblocking,
     kDataLoss, kDatamosh, kParamCount
 };
+
+// Upstream DigitalCodecKind.
+enum class CodecKind : int { DCT = 0, BlockColors = 1 };
 
 struct ParamInfo {
     const char *id;
@@ -33,6 +38,8 @@ struct ParamInfo {
 };
 extern const ParamInfo kParams[kParamCount];
 std::optional<Param> param_by_id(std::string_view id);
+// Upstream DigitalParam.unusedBy / applies(to:): controls a codec doesn't have.
+bool param_applies(Param p, CodecKind codec);
 
 struct Settings {
     std::array<double, kParamCount> v;
@@ -40,7 +47,12 @@ struct Settings {
     double operator[](Param p) const { return v[size_t(p)]; }
     double &operator[](Param p) { return v[size_t(p)]; }
     bool set(std::string_view id, double value);  // false for unknown ids
+    CodecKind codec() const;
+    // The color layout the codec codes: Video 1 always keeps full color.
     Chroma chroma() const;
+    // A control's value as the codec uses it: 0 for controls it doesn't have
+    // (deblocking and datamosh under Video 1).
+    double effective(Param p) const;
     // The same settings with the structure controls taken from `base`.
     Settings holdingStructure(const Settings &base) const;
     uint64_t fingerprint() const;
@@ -109,9 +121,10 @@ public:
     static std::vector<uint8_t> scale(const uint8_t *base, int width, int height, int rowBytes, Size size,
                                       const Settings &optics);
     static void scaleLanczos(const uint8_t *src, int width, int height, int rowBytes, uint8_t *dst, int cw, int ch);
-    static void gaussianBlur(std::vector<uint8_t> &px, int w, int h, float sigma);
     static PicturePtr capture(const std::vector<uint8_t> &bgra, const Geometry &g, const Settings &settings,
                               int index, uint64_t seedMix = 0);
+    // Center-weighted mean of linear luminance (camcorder auto exposure).
+    static float meteredMean(const std::vector<uint8_t> &bgra, int w, int h, float gr, float gg, float gb);
     static std::vector<uint8_t> render(const Picture &decoded, const Geometry &g, const Settings &settings,
                                        float step);
     static void upscale(const std::vector<uint8_t> &picture, Size size, uint8_t *base, int width, int height,
@@ -159,5 +172,22 @@ private:
 };
 
 uint64_t seed_mix(uint64_t seed);  // 0 -> 0
+
+// The tone of a 90s 3-CCD camcorder (the VX1000), fitted to its footage
+// (upstream CCDResponse). `strength` blends every part from nothing (0) to
+// the full response (1).
+struct CCDResponse {
+    float strength = 0;
+    static constexpr float kTarget = 0.40f;
+    static constexpr float kKneePoint = 0.72f * 255;
+    float exposure(float meteredMean) const;
+    float flare(float meteredMean) const { return 0.03f * strength * meteredMean; }
+    float knee(float v) const {
+        if (!(v > kKneePoint)) return v;
+        const float slope = 1 - 0.62f * strength;
+        return std::min(255.0f, kKneePoint + (v - kKneePoint) * slope);
+    }
+    float setup() const { return 0.065f * strength; }
+};
 
 }  // namespace ntscrt::digital

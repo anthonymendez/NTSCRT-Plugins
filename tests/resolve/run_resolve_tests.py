@@ -13,7 +13,8 @@ Tests (see README.md next to this file):
   alpha     Text+ through NTSCRT: Clip keeps alpha = source alpha, Spill only adds alpha
   edit      Edit-page effect on a Text+ title: the transparent area stays clean
   order     random-access renders == sequential renders (default look, Digital, Screen Loop)
-  cli       plug-in output == ntscrt-cli on the same frames (default look + every CRT preset)
+  cli       plug-in output == ntscrt-cli on the same frames (default look + every CRT preset +
+            the bundled Digital video looks, chosen from the plug-in's Preset menu)
   depth     8-bit int / 16-bit int / 16-bit float / 32-bit float sources give the same result
   sizes     odd and portrait sizes render at the right size
   speed     ms per frame at 1920x1080 for every CRT preset (informational)
@@ -32,6 +33,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -484,6 +486,25 @@ class Suite:
             fx.SetInput(k, v)
         return fx
 
+    # Bundled looks with Digital video (the cli test applies them through the Preset menu).
+    DIGITAL_LOOKS = ("CD-ROM (low quality)", "Chunky webcam", "Webcam (low quality)")
+
+    def look_preset_index(self, name):
+        """Index of a bundled look in the plug-in's Preset menu (0 = "(none)"): released presets
+        in their shipped order (ofx/ofx_params.cpp released_preset_order), then newer ones
+        alphabetically."""
+        src = (ROOT / "ofx/ofx_params.cpp").read_text(encoding="utf-8")
+        block = src[src.index("released_preset_order() {"):]
+        block = block[:block.index("};")]
+        released = re.findall(r'"([^"]+)"', block)
+        looks = []
+        for f in sorted((ROOT / "presets").rglob("*.json")):
+            rel = f.relative_to(ROOT / "presets").with_suffix("").as_posix()
+            if json.loads(f.read_text(encoding="utf-8")).get("kind") != "ntscrt-video-feedback":
+                looks.append(rel)
+        order = sorted(looks, key=lambda n: (released.index(n) if n in released else len(released), n.encode()))
+        return order.index(name) + 1
+
     def crt_presets(self):
         p = next(p for p in self.schema["params"] if p["id"] == "crt.preset")
         return [o["value"] for o in p["options"]]
@@ -638,6 +659,30 @@ class Suite:
             if s > 2.0:
                 write_png(self.out / f"cli-{preset}-diff.png", diff_image(a, b))
                 problems.append(f"CRT {preset}: mean diff {s}")
+        # Digital video looks: a fresh tool with the look chosen from the Preset menu, several
+        # frames (the codec's stream reaches back), against ntscrt-cli given the preset file.
+        metrics["looks"] = {}
+        for name in self.DIGITAL_LOOKS:
+            slug = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()
+            lf = self.ntscrt(fu, src)
+            lf.SetInput("host_preset", self.look_preset_index(name))
+            # The source from the same render job: Fusion's source frames can differ slightly
+            # between jobs (mean ~0.2), and a look with full Aliasing point-samples them.
+            rr = fu.render({"src": src, "fx": lf}, (0, n - 1), f"cli-look-{slug}")
+            lpat = Path(str(rr["src"][0]).replace("-0000.png", "-%04d.png"))
+            look = json.loads((ROOT / "presets" / f"{name}.json").read_text(encoding="utf-8"))
+            self.run_cli(lpat, self.out / f"cli-look-{slug}-ref-%04d.png", 0, n, look)
+            worst = (0.0, 0)
+            for f in range(n):
+                a, b = read_png(rr["fx"][f]), read_png(self.out / f"cli-look-{slug}-ref-{f:04d}.png")
+                s = stats(a, b)["rgb"]["mean"]
+                if s >= worst[0]:
+                    worst = (s, f)
+                if s > 2.0 and s >= worst[0]:
+                    write_png(self.out / f"cli-look-{slug}-diff.png", diff_image(a, b))
+            metrics["looks"][name] = {"worst_mean": worst[0], "frame": worst[1]}
+            if worst[0] > 2.0:
+                problems.append(f"look {name}: frame {worst[1]} mean diff {worst[0]}")
         self.record("cli", "fail" if problems else "pass", metrics, "; ".join(problems))
 
     def t_depth(self):

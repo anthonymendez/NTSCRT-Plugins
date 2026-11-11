@@ -65,6 +65,7 @@ struct Param {
     std::string enabled_if;  // pointer; may start with "fb:"
     std::string visible_path;
     json visible_equals;
+    bool visible_truthy = false;  // visible_if without "equals": shown while the value there is truthy
     uint32_t host_id = 0;
 };
 

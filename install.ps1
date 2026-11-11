@@ -13,12 +13,15 @@
 # The copy asks for administrator rights (one UAC prompt). Then restart Resolve.
 # If the direct download fails it falls back to `gh release download`
 # (GitHub CLI, signed in) or the GITHUB_TOKEN environment variable.
+# A downloaded zip is checked against the release's SHA256SUMS before anything is
+# installed; a missing or mismatching checksum stops the install (-From skips the check).
 # Works in Windows PowerShell 5.1 and PowerShell 7.
 param(
-    [string]$Version = "latest",          # release tag, e.g. v0.3.0
+    [string]$Version = "latest",          # release tag, e.g. v0.4.1 or v0.5.0-rc.1
     [string]$From = "",                   # local .zip or NTSCRT.ofx.bundle folder instead of downloading
     [string]$Repo = $(if ($env:NTSCRT_REPO) { $env:NTSCRT_REPO } else { "anthonymendez/NTSCRT-Plugins" }),
     [string]$Dest = (Join-Path $env:CommonProgramFiles "OFX\Plugins"),   # OpenFX folder (override for testing)
+    [string]$BaseUrl = "",                # download <BaseUrl>/<asset> + <BaseUrl>/SHA256SUMS instead of the GitHub release (CI tests, mirrors)
     [switch]$Uninstall
 )
 $ErrorActionPreference = "Stop"
@@ -27,6 +30,9 @@ $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with
 
 $Asset = "NTSCRT-OFX-windows-x64.zip"
 $Target = Join-Path $Dest "NTSCRT.ofx.bundle"
+if ($Version -notmatch '^(latest|v\d+\.\d+\.\d+(-rc\.\d+)?)$') {
+    throw "-Version must be 'latest' or a release tag like v0.4.1 / v0.5.0-rc.1 (got '$Version')."
+}
 
 function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Test-Admin {
@@ -112,35 +118,69 @@ function Show-ResolveNote([string]$What) {
         Write-Warning "DaVinci Resolve is running. $What when you restart it."
     }
 }
-function Get-Release([string]$OutDir) {
-    $zip = Join-Path $OutDir $Asset
-    $url = if ($Version -eq "latest") { "https://github.com/$Repo/releases/latest/download/$Asset" }
-           else { "https://github.com/$Repo/releases/download/$Version/$Asset" }
-    Say "Downloading $Asset ($Version) from $Repo"
+# Download one asset of the release ($Version) into $OutDir; returns its path or $null.
+function Get-ReleaseAsset([string]$Name, [string]$OutDir) {
+    $file = Join-Path $OutDir $Name
+    if ($BaseUrl) {
+        Say "Downloading $Name from $BaseUrl"
+        try { Invoke-WebRequest -Uri ($BaseUrl.TrimEnd("/") + "/" + $Name) -OutFile $file -UseBasicParsing; return $file }
+        catch { Write-Host "    download failed: $($_.Exception.Message)"; return $null }
+    }
+    $url = if ($Version -eq "latest") { "https://github.com/$Repo/releases/latest/download/$Name" }
+           else { "https://github.com/$Repo/releases/download/$Version/$Name" }
+    Say "Downloading $Name ($Version) from $Repo"
     try {
-        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-        return $zip
+        Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing
+        return $file
     } catch { Write-Host "    direct download failed: $($_.Exception.Message)" }
     if (Get-Command gh -ErrorAction SilentlyContinue) {
         Say "Trying GitHub CLI (gh release download)"
-        $ghArgs = @("release", "download", "--repo", $Repo, "--pattern", $Asset, "--dir", $OutDir, "--clobber")
+        $ghArgs = @("release", "download", "--repo", $Repo, "--pattern", $Name, "--dir", $OutDir, "--clobber")
         if ($Version -ne "latest") { $ghArgs = @("release", "download", $Version) + $ghArgs[2..($ghArgs.Length - 1)] }
-        & gh @ghArgs
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $zip)) { return $zip }
+        & gh @ghArgs | Out-Host
+        if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $file)) { return $file }
     }
     if ($env:GITHUB_TOKEN) {
         Say "Trying the GitHub API with GITHUB_TOKEN"
         $h = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; "User-Agent" = "ntscrt-installer" }
         $rel = if ($Version -eq "latest") { "latest" } else { "tags/$Version" }
         $info = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/$rel" -Headers $h
-        $a = $info.assets | Where-Object { $_.name -eq $Asset } | Select-Object -First 1
+        $a = $info.assets | Where-Object { $_.name -eq $Name } | Select-Object -First 1
         if ($a) {
             $h.Accept = "application/octet-stream"
-            Invoke-WebRequest -Uri $a.url -Headers $h -OutFile $zip -UseBasicParsing
-            return $zip
+            Invoke-WebRequest -Uri $a.url -Headers $h -OutFile $file -UseBasicParsing
+            return $file
         }
     }
-    throw "Couldn't download $Asset. Check that a release with that file exists at https://github.com/$Repo/releases, or pass -From <zip>."
+    return $null
+}
+# SHA-256 of $Name listed in a SHA256SUMS file ("<hex>  <name>" or "<hex> *<name>"), or $null.
+function Get-ListedHash([string]$SumsFile, [string]$Name) {
+    foreach ($line in Get-Content -LiteralPath $SumsFile) {
+        if ($line -match '^([0-9a-fA-F]{64}) [ *](.+)$' -and $Matches[2].Trim() -eq $Name) { return $Matches[1].ToLowerInvariant() }
+    }
+    return $null
+}
+# Fails closed: no SHA256SUMS, no entry for the zip, or a different hash all stop the install.
+function Test-ReleaseChecksum([string]$Zip, [string]$OutDir) {
+    $help = "Nothing was installed. If you trust the file anyway, download it yourself and run with -From <zip>."
+    $sums = Get-ReleaseAsset "SHA256SUMS" $OutDir
+    if (-not $sums) { throw "Couldn't download SHA256SUMS for $Version (releases before v0.4.1 don't have one), so $Asset can't be verified. $help" }
+    $want = Get-ListedHash $sums $Asset
+    if (-not $want) { throw "SHA256SUMS of $Version doesn't list $Asset, so it can't be verified. $help" }
+    $have = (Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($have -ne $want) {
+        throw "Checksum mismatch for ${Asset}: expected $want, got $have. The download is corrupt or was tampered with. $help"
+    }
+    Say "Checksum OK (SHA-256 $have)"
+}
+function Get-Release([string]$OutDir) {
+    $zip = Get-ReleaseAsset $Asset $OutDir
+    if (-not $zip) {
+        throw "Couldn't download $Asset. Check that a release with that file exists at https://github.com/$Repo/releases, or pass -From <zip>."
+    }
+    Test-ReleaseChecksum $zip $OutDir
+    return $zip
 }
 
 if ($Uninstall) {

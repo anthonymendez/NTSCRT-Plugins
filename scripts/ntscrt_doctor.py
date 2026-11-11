@@ -13,10 +13,14 @@ Windows and macOS, Python 3.8+ standard library only. Read-only: it installs, ch
 nothing. The zip holds system info (OS, CPU, GPU), the NTSCRT install state, the plug-in's own log,
 the NTSCRT/OpenFX lines of Resolve's log (not the whole log: it names your projects), recent crash
 reports of Resolve / Final Cut / NTSCRT, installer logs, and the test report when --resolve-tests ran.
+Your user name, home folder and computer name are replaced by <user>, ~ and <computer> in every
+file it writes (and Mac serial numbers / hardware UUIDs are removed). Crash reports are trimmed to
+the crash itself: the exception, the crashed thread and the modules it ran through.
 Look through it before sending it on if you like: everything is plain text.
 """
 import argparse
 import datetime
+import getpass
 import json
 import os
 import platform
@@ -36,6 +40,133 @@ WIN = sys.platform == "win32"
 MAC = sys.platform == "darwin"
 HOME = Path.home()
 DAYS = 7  # crash reports / log lines this recent
+SEP = r"(?:\\\\|\\|/)"  # a path separator: /, \ or JSON-escaped \\
+
+
+# --------------------------------------------------------------- redaction --
+def _redactor():
+    """A function that removes the user name, home folder and computer name from text."""
+    names = {n for n in (os.environ.get("USERNAME"), os.environ.get("USER"), os.environ.get("LOGNAME"), HOME.name) if n}
+    try:
+        names.add(getpass.getuser())
+    except Exception:
+        pass
+    names = {n for n in names if n.lower() not in ("root", "public", "shared", "default")}
+    hosts = {platform.node(), platform.node().split(".")[0], os.environ.get("COMPUTERNAME") or ""}
+    if MAC:
+        hosts |= {run(["scutil", "--get", "ComputerName"]), run(["scutil", "--get", "LocalHostName"])}
+    hosts = {h.strip() for h in hosts if h and len(h.strip()) >= 3 and not h.startswith("[")}
+    subs = []  # (regex, replacement), applied in order
+    # The home folder itself, in any separator style -> ~
+    parts = [re.escape(p) for p in re.split(r"[\\/]+", str(HOME)) if p]
+    lead = SEP if str(HOME).startswith(("/", "\\")) else r"(?<![\w])"
+    subs.append((re.compile(lead + SEP.join(parts) + r"(?![\w])", re.I if WIN else 0), "~"))
+    # Any other /Users/<name>, C:\Users\<name>, /home/<name> (other accounts, short forms).
+    subs.append((re.compile(r"(?i)((?:[a-z]:)?" + SEP + r"(?:users|home)" + SEP + r")"
+                            r"(?!(?:public|shared|default|all users)\b)[^\\/\s\"'<>:|*?]+"), r"\1<user>"))
+    for n in sorted(names, key=len, reverse=True):
+        if len(n) > 6:  # Windows 8.3 short form, e.g. JOHNSM~1
+            subs.append((re.compile(re.escape(n[:6]) + r"~\d", re.I), "<user>"))
+        if len(n) >= 3:
+            subs.append((re.compile(r"(?<![\w])" + re.escape(n) + r"(?![\w])", re.I), "<user>"))
+    for h in sorted(hosts, key=len, reverse=True):
+        subs.append((re.compile(r"(?<![\w])" + re.escape(h) + r"(?![\w])", re.I), "<computer>"))
+    # Mac hardware identifiers (system_profiler, crash reports).
+    subs.append((re.compile(r"(?im)^(\s*(?:serial number[^:\n]*|hardware uuid|provisioning udid|platform uuid)\s*:).*$"),
+                 r"\1 <removed>"))
+    subs.append((re.compile(r'"(serialNumber|crashReporterKey|sleepWakeUUID|platformUUID|hardwareUUID|'
+                            r'deviceIdentifierForVendor|userID)"\s*:\s*("[^"]*"|\d+)'), r'"\1" : "<removed>"'))
+
+    def redact(text):
+        for rx, repl in subs:
+            text = rx.sub(repl, text)
+        return text
+    return redact
+
+
+def read_text_any(path):
+    """File contents as text (UTF-8, or UTF-16 with a BOM as Windows Error Reporting writes), or
+    None for a binary file."""
+    data = Path(path).read_bytes()
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", "replace")
+    if b"\0" in data[:8192]:
+        return None
+    return data.decode("utf-8", "replace")
+
+
+OURS = re.compile(r"ntscrt|librashader|\.ofx\b|fxplug", re.I)
+
+
+def trim_crash(name, text):
+    """What a crash report needs for debugging: the header, the exception, the crashed thread (plus
+    any thread running NTSCRT / librashader code) and the modules those threads ran through. Other
+    formats (Windows .wer, which is short) are kept whole."""
+    try:
+        if name.lower().endswith(".ips"):  # macOS 12+: a JSON header line, then a JSON body
+            head, body = text.split("\n", 1)
+            doc = json.loads(body)
+            threads, images = doc.get("threads") or [], doc.get("usedImages") or []
+            fault = doc.get("faultingThread", 0)
+
+            def image(j):
+                return images[j] if isinstance(j, int) and 0 <= j < len(images) else {}
+
+            def ours(t):
+                return any(OURS.search(f"{image(f.get('imageIndex')).get('name', '')} "
+                                       f"{image(f.get('imageIndex')).get('path', '')}") for f in t.get("frames", []))
+            keep = [dict(t, index=i) for i, t in enumerate(threads) if i == fault or ours(t)]
+            used = sorted({f.get("imageIndex") for t in keep for f in t.get("frames", [])
+                           if isinstance(f.get("imageIndex"), int)})
+            out = {k: doc[k] for k in ("procName", "procPath", "parentProc", "bundleInfo", "osVersion", "cpuType",
+                                       "captureTime", "exception", "termination", "asi", "vmRegionInfo",
+                                       "faultingThread", "lastExceptionBacktrace", "ktriageinfo") if k in doc}
+            out["threads (crashed thread and NTSCRT threads only)"] = keep
+            out["usedImages (only those referenced above)"] = {str(j): image(j) for j in used}
+            return head + "\n" + json.dumps(out, indent=1) + "\n"
+        if name.lower().endswith(".crash"):  # older macOS text format
+            out, keep = [], True
+            for line in text.splitlines():
+                if line.startswith("Thread "):
+                    keep = "Crashed" in line
+                elif line.startswith("Binary Images:"):
+                    keep = False  # images: only ours (system libraries are named in the frames)
+                    out.append(line)
+                    continue
+                if keep or OURS.search(line):
+                    out.append(line)
+            return "\n".join(out) + "\n"
+    except Exception:
+        pass
+    return text
+
+
+def redact_tree(work):
+    """Trim crash reports and remove personal names from every file about to go into the zip.
+    Files that aren't text are left out (listed in skipped-files.txt)."""
+    redact = _redactor()
+    skipped = []
+    for f in sorted(work.rglob("*")):
+        if not f.is_file() or f.suffix.lower() == ".png":
+            continue
+        try:
+            text = read_text_any(f)
+            if text is None:
+                skipped.append(f"{redact(str(f.relative_to(work)))} ({f.stat().st_size} bytes, binary)")
+                f.unlink()
+                continue
+            if f.name.startswith("crash-"):
+                text = trim_crash(f.name, text)
+            f.write_text(redact(text), encoding="utf-8")
+            new = f.with_name(redact(f.name))
+            if new != f:
+                f.replace(new)
+        except Exception as e:
+            skipped.append(f"{redact(str(f.relative_to(work)))} (couldn't redact: {e})")
+            f.unlink(missing_ok=True)
+    if skipped:
+        (work / "skipped-files.txt").write_text(
+            "Left out of the zip because they aren't plain text:\n" + "\n".join(skipped) + "\n", encoding="utf-8")
 
 
 def run(cmd, timeout=60):
@@ -370,6 +501,7 @@ def main():
     for title, body in r.sections:
         lines += ["", "=" * 78, title, "=" * 78, body]
     (work / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    redact_tree(work)
 
     dest.mkdir(parents=True, exist_ok=True)
     zpath = dest / f"{work.name}.zip"

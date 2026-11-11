@@ -4,6 +4,7 @@ cmake_policy(VERSION 3.24)
 # resources/shaders *now* lands in the bundle.
 #   -DBUNDLE=<.../NTSCRT.ofx.bundle> -DPRESETS=<dir> -DSHADERS=<dir>
 #   -DLIBRASHADER=<file or empty> -DPLIST=<Info.plist or empty>
+#   -DLICENSE_ROOT=<repo root: LICENSE, THIRD_PARTY_NOTICES.md, licenses/>
 set(res "${BUNDLE}/Contents/Resources")
 file(MAKE_DIRECTORY "${res}")
 
@@ -26,6 +27,19 @@ endif()
 # Plain-text version for installers and support ("which version do I have?").
 if(VERSION_FILE AND EXISTS "${VERSION_FILE}")
   file(COPY "${VERSION_FILE}" DESTINATION "${res}")
+endif()
+
+# Licence texts (MIT for our code, the third-party notices, and every
+# licence those notices refer to) travel with each binary copy.
+file(REMOVE_RECURSE "${res}/licenses")
+if(LICENSE_ROOT)
+  foreach(f LICENSE THIRD_PARTY_NOTICES.md)
+    if(NOT EXISTS "${LICENSE_ROOT}/${f}")
+      message(FATAL_ERROR "bundle_resources: ${LICENSE_ROOT}/${f} missing")
+    endif()
+    file(COPY "${LICENSE_ROOT}/${f}" DESTINATION "${res}")
+  endforeach()
+  file(COPY "${LICENSE_ROOT}/licenses/" DESTINATION "${res}/licenses")
 endif()
 
 if(PLIST AND EXISTS "${PLIST}")

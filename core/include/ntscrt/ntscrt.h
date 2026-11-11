@@ -3,7 +3,7 @@
  * FxPlug 4 (Final Cut Pro) hosts and by tools/ntscrt-cli.
  *
  * CONTRACT (Wave 0). Every agent codes against this file. Changing it needs a
- * note in docs/CONTRACT-CHANGES.md and coordination with the host owners.
+ * note in docs/dev/CONTRACT-CHANGES.md and coordination with the host owners.
  *
  * Model: the host owns params, keyframes and the timeline. For every frame it
  * builds a "look" JSON (upstream NTSCRT preset format, see presets/*.json and

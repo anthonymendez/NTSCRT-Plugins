@@ -1,9 +1,10 @@
-# Regenerates the README preview GIFs in docs/images/ (hero-before-after.gif, looks-grid.gif).
+# Regenerates the README previews in docs/images/ (hero-before-after.webp, looks-grid.webp).
 #
 #   powershell.exe -NoProfile -File scripts/make_previews.ps1 [-Cli path/to/ntscrt-cli.exe] [-Resources DIR]
 #
 # Draws a looping synthetic test scene (no third-party footage; the grid scrolls, so the temporal
-# effects show), renders it with a few looks and composites two animated GIFs with ffmpeg (on PATH):
+# effects show), renders it with a few looks and composites two animated WebP images with
+# ffmpeg (on PATH, built with libwebp):
 # the original vs the default look split-screen, and a labelled 2x2 grid of looks.
 #
 # Two ways to render the looks:
@@ -22,7 +23,8 @@ param(
     [int]$GifFrames = 60,
     [int]$GifWidth = 640,
     [int]$GridWidth = 640,
-    [int]$GifFps = 30
+    [int]$GifFps = 30,
+    [int]$WebpQuality = 85       # libwebp quality (0-100)
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -188,9 +190,12 @@ function New-Grid([object[]]$tiles, [string]$path) {
     $canvas.Save($path, [Drawing.Imaging.ImageFormat]::Png); $canvas.Dispose()
 }
 
-function New-Gif([string]$pattern, [int]$width, [string]$path) {
-    $vf = "fps=$GifFps,scale=${width}:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=full[p];[b][p]paletteuse=dither=sierra2_4a"
-    & $ffmpeg -hide_banner -loglevel error -y -framerate 30 -i $pattern -vf $vf -loop 0 $path
+# Animated WebP rather than GIF: full colour instead of a 128-colour dithered palette, and about 40%
+# smaller at quality 85 (the images live in git history, so every refresh adds their size).
+function New-Webp([string]$pattern, [int]$width, [string]$path) {
+    $vf = "fps=$GifFps,scale=${width}:-1:flags=lanczos"
+    & $ffmpeg -hide_banner -loglevel error -y -framerate 30 -i $pattern -vf $vf `
+        -c:v libwebp_anim -lossless 0 -q:v $WebpQuality -compression_level 6 -preset picture -loop 0 $path
     if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed for $path" }
 }
 
@@ -232,6 +237,6 @@ for ($k = 0; $k -lt $GifFrames; $k++) {
     $tiles = foreach ($l in $looks[1..4]) { @{ Label = $l.Label; Crop = $l.Crop; Path = (Frame $l $k) } }
     New-Grid $tiles (Join-Path $comp ('grid_{0:D4}.png' -f $k))
 }
-New-Gif (Join-Path $comp 'hero_%04d.png') $GifWidth (Join-Path $OutDir 'hero-before-after.gif')
-New-Gif (Join-Path $comp 'grid_%04d.png') $GridWidth (Join-Path $OutDir 'looks-grid.gif')
+New-Webp (Join-Path $comp 'hero_%04d.png') $GifWidth (Join-Path $OutDir 'hero-before-after.webp')
+New-Webp (Join-Path $comp 'grid_%04d.png') $GridWidth (Join-Path $OutDir 'looks-grid.webp')
 Get-ChildItem $OutDir | Select-Object Name, Length | Format-Table -AutoSize

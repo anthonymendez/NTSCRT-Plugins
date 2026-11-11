@@ -1,9 +1,21 @@
 /build*/
 /out/
+/dist/
 target/
 *.user
 .vs/
+.vscode/
+.idea/
 .DS_Store
 xcuserdata/
 DerivedData/
 .claude/
+
+# Python
+__pycache__/
+*.pyc
+
+# Test and installer output
+golden-out/
+msi-*.log
+ntscrt-diagnostics-*.zip

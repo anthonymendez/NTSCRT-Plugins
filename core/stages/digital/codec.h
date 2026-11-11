@@ -1,4 +1,4 @@
-// codec.h — port of upstream Sources/CrtCodec/DigitalCodec.swift.
+// codec.h — port of upstream Sources/CrtCodec/DigitalCodec.swift (v0.20.0).
 //
 // A small, real block-transform video codec in the MPEG/H.263/DV family:
 // BT.601 Y'CbCr with subsampled color, 8x8 DCT blocks against the JPEG
@@ -101,6 +101,12 @@ extern const float kChromaTable[64];
 const float *basis();  // orthonormal 8-point DCT-II, C[u*8+x]
 
 float tableScale(double quality);
+// Upstream DigitalCodec.scaleRoots: sqrt of the quantizer scale at Quality 0 and 1.
+constexpr double kScaleRootWorst = 5;
+double scaleRootBest();  // sqrt(0.1)
+// A Quality value from before 0.19 (JPEG quality 2 + 93u), as today's slider
+// value giving the same quantizer.
+double qualityFromJPEGScale(double old);
 
 struct Steps {
     std::array<float, 64> luma, chroma;

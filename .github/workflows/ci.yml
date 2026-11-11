@@ -1,18 +1,25 @@
 # Build + test the core, tools and plug-ins on Windows (MSVC) and macOS (universal),
 # package the OpenFX bundles, and build the Final Cut Pro FxPlug plug-in when the
-# FXPLUG_SDK_URL secret is configured (see fxplug/README.md).
+# FXPLUG_SDK_URL secret is configured (see fxplug/README.md). A vX.Y.Z / vX.Y.Z-rc.N tag
+# also publishes a GitHub Release (job "release", see docs/RELEASING.md).
 name: ci
 
 on:
   push:
     branches: [main]
     tags: ["v*"]   # a version tag also publishes a GitHub Release (job "release")
+    # Docs-only pushes don't build. GitHub never evaluates path filters for tag pushes,
+    # so a release tag always runs, whatever it changed.
+    paths-ignore: ["**.md", "docs/**"]
   pull_request:
-  workflow_dispatch:
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:   # also how to run CI on a branch: gh workflow run ci --ref <branch>
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR / branch runs are cancelled; main and tags always run to the end
+  # (main's runs fill the caches that tag runs restore).
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -27,30 +34,47 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # top-level submodules only (vendor/*, upstream/NTSCRT); upstream's own nested
           # submodules are only needed by the golden workflow
           submodules: true
 
-      - name: Rust stable (x86_64-pc-windows-msvc)
+      # Toolchain pinned in rust-toolchain.toml; the Rust cache key includes its version.
+      - name: Rust (rust-toolchain.toml, x86_64-pc-windows-msvc)
+        id: rust
         shell: bash
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add x86_64-pc-windows-msvc
+          tc="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$tc" --profile minimal --target x86_64-pc-windows-msvc
           rustc --version && cargo --version
+          echo "rustc=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "subs=$(git ls-tree HEAD vendor/librashader vendor/ntsc-rs | awk '{print substr($3,1,12)}' | paste -sd- -)" >> "$GITHUB_OUTPUT"
 
       - name: Cache cargo + FetchContent
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             build/_deps
-          key: win-deps-${{ hashFiles('cmake/*.cmake', '**/Cargo.lock', '**/Cargo.toml') }}
+          key: win-deps-${{ hashFiles('cmake/*.cmake', 'ofx/CMakeLists.txt', '**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: win-deps-
+
+      # Rust build outputs (librashader + ntsc-rs: ~6 of the ~9 build minutes). Keyed on the
+      # exact inputs; a fallback restore only reuses compiled third-party crates (cargo
+      # rebuilds anything whose sources or rustc changed). Saved by main / dispatched runs,
+      # restored by tags and PRs (they can read main's caches).
+      - name: Restore Rust target dirs
+        id: rust-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            build/librashader-target
+            build/cargo-ntscrs
+          key: win-rust-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.subs }}-${{ hashFiles('rust/**', 'rust-toolchain.toml', 'core/stages/crt/CMakeLists.txt') }}
+          restore-keys: win-rust-${{ steps.rust.outputs.rustc }}-
 
       - name: Configure
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
@@ -58,24 +82,67 @@ jobs:
       - name: Build
         run: cmake --build build --config Release -- -m
 
+      - name: Save Rust target dirs
+        if: steps.rust-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            build/librashader-target
+            build/cargo-ntscrs
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
       - name: Test
+        env:
+          NTSCRT_REQUIRE_GPU: "1"   # a missing D3D11 device fails the GPU tests instead of skipping them
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Check FxPlug parameter IDs cover the schema
-        continue-on-error: true
         run: python fxplug/tools/update_param_ids.py --check
 
       - name: Package OFX bundle
         shell: bash
         run: |
           strict=""; [ -f ofx/CMakeLists.txt ] || strict="--allow-empty"
-          python scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-windows-x64.zip $strict --extra "ofx/Install NTSCRT.cmd" install.ps1 README.md
+          extra=("ofx/Install NTSCRT.cmd" install.ps1 README.md)
+          for f in LICENSE THIRD_PARTY_NOTICES.md; do if [ -e "$f" ]; then extra+=("$f"); fi; done
+          python scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-windows-x64.zip $strict --extra "${extra[@]}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: NTSCRT-OFX-windows-x64
           path: dist/*.zip
           if-no-files-found: warn
+
+      # install.ps1's download path: serve the zip + a SHA256SUMS over local HTTP (-BaseUrl),
+      # install into a temp folder, then check that a tampered zip is refused.
+      - name: Smoke-test install.ps1 (checksum verified, tampered zip refused)
+        if: hashFiles('dist/NTSCRT-OFX-windows-x64.zip') != ''
+        shell: pwsh
+        run: |
+          $zipName = "NTSCRT-OFX-windows-x64.zip"
+          $srv = Join-Path $env:RUNNER_TEMP "srv"; $bad = Join-Path $env:RUNNER_TEMP "srv-bad"
+          New-Item -ItemType Directory -Force $srv, $bad | Out-Null
+          Copy-Item "dist/$zipName" $srv
+          $h = (Get-FileHash "$srv/$zipName" -Algorithm SHA256).Hash.ToLower()
+          "$h  $zipName" | Set-Content -Encoding ascii "$srv/SHA256SUMS"
+          Copy-Item "$srv/SHA256SUMS" $bad
+          $bytes = [IO.File]::ReadAllBytes("$srv/$zipName"); $bytes[100] = $bytes[100] -bxor 0xff
+          [IO.File]::WriteAllBytes("$bad/$zipName", $bytes)
+          $py = Start-Process python -ArgumentList "-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", $env:RUNNER_TEMP -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep 2
+            $dest = Join-Path $env:RUNNER_TEMP "ofx-test"
+            ./install.ps1 -BaseUrl "http://127.0.0.1:8765/srv" -Dest $dest
+            if (-not (Test-Path "$dest/NTSCRT.ofx.bundle/Contents/Win64/NTSCRT.ofx")) { throw "install.ps1 didn't install the bundle" }
+            $dest2 = Join-Path $env:RUNNER_TEMP "ofx-test-bad"
+            $failed = $false
+            try { ./install.ps1 -BaseUrl "http://127.0.0.1:8765/srv-bad" -Dest $dest2 } catch { $failed = $true; Write-Host "refused as expected: $_" }
+            if (-not $failed) { throw "install.ps1 accepted a tampered zip" }
+            if (Test-Path "$dest2/NTSCRT.ofx.bundle") { throw "the tampered bundle was installed" }
+            ./install.ps1 -Uninstall -Dest $dest
+            if (Test-Path "$dest/NTSCRT.ofx.bundle") { throw "uninstall left the bundle" }
+            Write-Host "install.ps1 checksum verification OK"
+          } finally { Stop-Process -Id $py.Id -ErrorAction SilentlyContinue }
 
       # MSI that runs install.ps1 (downloads the latest release when users run it).
       - name: Build MSI installer
@@ -104,14 +171,14 @@ jobs:
           if (Test-Path (Join-Path ${env:ProgramFiles} "NTSCRT Installer\install.ps1")) { throw "installer files left behind" }
           Write-Host "MSI install + uninstall OK"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: NTSCRT-Installer-windows
           path: dist/installer/NTSCRT-Installer-windows.msi
 
       - name: Upload MSI logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: msi-logs
           path: msi-*.log
@@ -119,7 +186,7 @@ jobs:
 
       - name: Upload golden mismatches
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: golden-mismatch-windows
           path: build/tests/golden/golden-out
@@ -130,30 +197,44 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
+      # Fails the job when the runner has no usable Metal device, which is what makes
+      # NTSCRT_REQUIRE_GPU below safe (macos-15 runners expose "Apple Paravirtual device").
       - name: Metal available?
         run: xcrun swift scripts/ci/metal_check.swift
 
-      - name: Rust stable (aarch64 + x86_64)
+      - name: Rust (rust-toolchain.toml, aarch64 + x86_64)
+        id: rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          tc="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$tc" --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
           rustc --version && cargo --version
+          echo "rustc=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "subs=$(git ls-tree HEAD vendor/librashader vendor/ntsc-rs | awk '{print substr($3,1,12)}' | paste -sd- -)" >> "$GITHUB_OUTPUT"
 
       - name: Cache cargo + FetchContent
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             build/_deps
-          key: mac-deps-${{ hashFiles('cmake/*.cmake', '**/Cargo.lock', '**/Cargo.toml') }}
+          key: mac-deps-${{ hashFiles('cmake/*.cmake', 'ofx/CMakeLists.txt', '**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: mac-deps-
+
+      - name: Restore Rust target dirs
+        id: rust-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            build/librashader-target
+            build/cargo-ntscrs
+          key: mac-rust-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.subs }}-${{ hashFiles('rust/**', 'rust-toolchain.toml', 'core/stages/crt/CMakeLists.txt') }}
+          restore-keys: mac-rust-${{ steps.rust.outputs.rustc }}-
 
       - name: Configure
         run: >
@@ -163,16 +244,30 @@ jobs:
       - name: Build
         run: cmake --build build --parallel "$(sysctl -n hw.ncpu)"
 
+      - name: Save Rust target dirs
+        if: steps.rust-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            build/librashader-target
+            build/cargo-ntscrs
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
       - name: Test
+        env:
+          NTSCRT_REQUIRE_GPU: "1"   # a missing Metal device fails the GPU tests instead of skipping them
         run: ctest --test-dir build --output-on-failure
 
       - name: Package OFX bundle (universal)
+        shell: bash
         run: |
           strict=""; [ -f ofx/CMakeLists.txt ] || strict="--allow-empty"
           find build -name '*.ofx' -type f -path '*.ofx.bundle/*' -exec sh -c 'echo "$1: $(lipo -archs "$1")"' _ {} \;
-          python3 scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-macos-universal.zip $strict --extra install.sh README.md
+          extra=(install.sh README.md)
+          for f in LICENSE THIRD_PARTY_NOTICES.md; do if [ -e "$f" ]; then extra+=("$f"); fi; done
+          python3 scripts/ci/package_bundles.py --build build --ext .ofx.bundle --out dist/NTSCRT-OFX-macos-universal.zip $strict --extra "${extra[@]}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: NTSCRT-OFX-macos-universal
           path: dist/*.zip
@@ -195,25 +290,54 @@ jobs:
           sudo NTSCRT_FROM="$PWD/dist/NTSCRT-OFX-macos-universal.zip" sh "$post"
           test -f /Library/OFX/Plugins/NTSCRT.ofx.bundle/Contents/MacOS/NTSCRT.ofx
           cat /Library/OFX/Plugins/NTSCRT.ofx.bundle/Contents/Resources/VERSION
-          sudo sh install.sh --resolve --uninstall
+          sudo test -s /Library/Logs/NTSCRT/install.log
+          sudo tail -n 5 /Library/Logs/NTSCRT/install.log
+          if sudo NTSCRT_VERSION='v1;x' sh "$post"; then echo "::error::postinstall accepted a bad NTSCRT_VERSION"; exit 1; fi
+          # no --resolve / --fcp: removes whatever is installed, even with no Resolve app present
+          sudo sh install.sh --uninstall
           test ! -e /Library/OFX/Plugins/NTSCRT.ofx.bundle
 
-      - uses: actions/upload-artifact@v4
+      # install.sh's download path: serve the zip + SHA256SUMS over local HTTP (--base-url),
+      # install, then check that a tampered zip is refused and the installed copy is untouched.
+      - name: Smoke-test install.sh (checksum verified, tampered zip refused)
+        if: hashFiles('dist/NTSCRT-OFX-macos-universal.zip') != ''
+        run: |
+          zipname=NTSCRT-OFX-macos-universal.zip
+          srv="$RUNNER_TEMP/srv"; bad="$RUNNER_TEMP/srv-bad"; mkdir -p "$srv" "$bad"
+          cp "dist/$zipname" "$srv/"
+          (cd "$srv" && shasum -a 256 "$zipname" > SHA256SUMS)
+          cp "$srv/SHA256SUMS" "$bad/"
+          python3 -c 'import sys; b = bytearray(open(sys.argv[1], "rb").read()); b[100] ^= 0xFF; open(sys.argv[2], "wb").write(b)' "$srv/$zipname" "$bad/$zipname"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$RUNNER_TEMP" >/dev/null 2>&1 &
+          srv_pid=$!; trap 'kill $srv_pid' EXIT; sleep 2
+          sudo sh install.sh --resolve --base-url "http://127.0.0.1:8765/srv"
+          test -f /Library/OFX/Plugins/NTSCRT.ofx.bundle/Contents/MacOS/NTSCRT.ofx
+          before="$(sudo find /Library/OFX/Plugins/NTSCRT.ofx.bundle -type f -exec shasum {} + | shasum)"
+          if sudo sh install.sh --resolve --base-url "http://127.0.0.1:8765/srv-bad"; then
+            echo "::error::install.sh accepted a tampered zip"; exit 1
+          fi
+          after="$(sudo find /Library/OFX/Plugins/NTSCRT.ofx.bundle -type f -exec shasum {} + | shasum)"
+          [ "$before" = "$after" ] || { echo "::error::the refused install changed the installed bundle"; exit 1; }
+          sudo sh install.sh --resolve --uninstall
+          test ! -e /Library/OFX/Plugins/NTSCRT.ofx.bundle
+          echo "install.sh checksum verification OK"
+
+      - uses: actions/upload-artifact@v7
         with:
           name: NTSCRT-Installer-macos
           path: dist/installer/NTSCRT-Installer-macos.pkg
 
       - name: Upload golden mismatches
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: golden-mismatch-macos
           path: build/tests/golden/golden-out
           if-no-files-found: ignore
 
+  # Independent of the macos job (it builds its own tree), so the two run in parallel.
   fxplug:
     name: fxplug (Final Cut Pro, universal)
-    needs: macos
     runs-on: macos-15
     timeout-minutes: 120
     env:
@@ -225,13 +349,17 @@ jobs:
         id: sdk
         run: |
           if [ -n "$FXPLUG_SDK_URL" ]; then
+            if [ -z "$FXPLUG_SDK_SHA256" ]; then
+              echo "::error title=FxPlug SDK not pinned::FXPLUG_SDK_URL is set but FXPLUG_SDK_SHA256 is not. Add the SDK file's SHA-256 (shasum -a 256) as a repository secret (fxplug/README.md, CI section)."
+              exit 1
+            fi
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=FxPlug skipped::Repository secret FXPLUG_SDK_URL is not set, so the Final Cut Pro plug-in was not built. See fxplug/README.md (CI section) to enable it."
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.sdk.outputs.available == 'true'
         with:
           submodules: true
@@ -240,24 +368,37 @@ jobs:
         if: steps.sdk.outputs.available == 'true'
         run: bash scripts/ci/install_fxplug_sdk.sh
 
-      - name: Rust stable (aarch64 + x86_64)
+      - name: Rust (rust-toolchain.toml, aarch64 + x86_64)
+        id: rust
         if: steps.sdk.outputs.available == 'true'
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          tc="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$tc" --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+          echo "rustc=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "subs=$(git ls-tree HEAD vendor/librashader vendor/ntsc-rs | awk '{print substr($3,1,12)}' | paste -sd- -)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache cargo + FetchContent
+      - name: Restore cargo + FetchContent
         if: steps.sdk.outputs.available == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             build/_deps
-          key: mac-deps-${{ hashFiles('cmake/*.cmake', '**/Cargo.lock', '**/Cargo.toml') }}
+          key: mac-deps-${{ hashFiles('cmake/*.cmake', 'ofx/CMakeLists.txt', '**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: mac-deps-
+
+      # Same cargo builds as the macos job: reuse (read-only) the target dirs it saves.
+      - name: Restore Rust target dirs
+        if: steps.sdk.outputs.available == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            build/librashader-target
+            build/cargo-ntscrs
+          key: mac-rust-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.subs }}-${{ hashFiles('rust/**', 'rust-toolchain.toml', 'core/stages/crt/CMakeLists.txt') }}
+          restore-keys: mac-rust-${{ steps.rust.outputs.rustc }}-
 
       - name: Configure
         if: steps.sdk.outputs.available == 'true'
@@ -291,46 +432,115 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -d --entitlements - "$pk"
 
+      # NTSCRT.app plus the licence files (when the repo has them) at the zip root.
       - name: Zip
         if: steps.sdk.outputs.available == 'true'
         run: |
-          mkdir -p dist
-          ditto -c -k --sequesterRsrc --keepParent build/fxplug/dist/NTSCRT.app dist/NTSCRT-FxPlug-macos-universal.zip
+          stage="$RUNNER_TEMP/fxzip"; rm -rf "$stage"; mkdir -p dist "$stage"
+          ditto build/fxplug/dist/NTSCRT.app "$stage/NTSCRT.app"
+          for f in LICENSE THIRD_PARTY_NOTICES.md; do if [ -e "$f" ]; then ditto "$f" "$stage/$f"; fi; done
+          ditto -c -k --sequesterRsrc "$stage" dist/NTSCRT-FxPlug-macos-universal.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.sdk.outputs.available == 'true'
         with:
           name: NTSCRT-FxPlug-macos-universal
           path: dist/NTSCRT-FxPlug-macos-universal.zip
 
-  # Tag push (vX.Y.Z): publish the zips as a GitHub Release, which is what
-  # install.ps1 / install.sh download ("releases/latest/download/<asset>").
+  # Lint the install / CI scripts (a minute; runs beside the builds).
+  lint:
+    name: lint (shellcheck, PSScriptAnalyzer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          # tracked *.sh plus extension-less sh/bash scripts (pkg postinstall); submodules aren't checked out
+          mapfile -t files < <(git ls-files -z | while IFS= read -r -d '' f; do
+            case "$f" in
+              *.sh) echo "$f" ;;
+              *.*) ;;
+              *) [ -f "$f" ] && head -n 1 "$f" | grep -qE '^#!(/bin/|/usr/bin/env )(ba)?sh' && echo "$f" ;;
+            esac
+          done)
+          printf '%s\n' "${files[@]}"
+          shellcheck --severity=warning "${files[@]}"
+
+      - name: PSScriptAnalyzer
+        if: success() || failure()   # run even when shellcheck found something
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Scope CurrentUser -Force }
+          # Excluded rules: Write-Host is the scripts' console UI (coloured "==>" lines), not pipeline
+          # output; PSReviewUnusedParameter flags script parameters that are only read inside
+          # functions (a known false positive); ShouldProcess (-WhatIf) doesn't apply to these
+          # one-shot scripts' internal New-* helpers.
+          $exclude = 'PSAvoidUsingWriteHost', 'PSReviewUnusedParameter', 'PSUseShouldProcessForStateChangingFunctions'
+          $r = @(git ls-files '*.ps1' | ForEach-Object {
+            Invoke-ScriptAnalyzer -Path $_ -Severity Warning, Error -ExcludeRule $exclude
+          })
+          $r | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-String -Width 300 | Write-Host
+          if ($r.Count) { throw "PSScriptAnalyzer: $($r.Count) finding(s)" }
+
+  # Tag push (vX.Y.Z or vX.Y.Z-rc.N): publish the zips, installers and SHA256SUMS as a GitHub
+  # Release with build provenance. install.ps1 / install.sh download from it
+  # ("releases/latest/download/<asset>", which skips -rc prereleases) and verify SHA256SUMS.
   release:
     name: publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos, fxplug]
+    needs: [windows, macos, fxplug, lint]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write       # create the release / upload assets
+      id-token: write       # sign the provenance attestation (Sigstore)
+      attestations: write   # store it: gh attestation verify <file> -R anthonymendez/NTSCRT-Plugins
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tag matches VERSION
+        id: tag
         env:
           TAG: ${{ github.ref_name }}
         run: |
           v="$(tr -d '[:space:]' < VERSION)"
           [ "$TAG" = "v$v" ] || { echo "::error::tag $TAG doesn't match VERSION ($v): run scripts/release.py"; exit 1; }
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' || { echo "::error::VERSION $v isn't X.Y.Z or X.Y.Z-rc.N"; exit 1; }
+          case "$v" in *-rc.*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
           python3 scripts/release.py --notes "$TAG" > release-notes.md
           cat release-notes.md
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
-      - name: Create release
+      - name: Collect assets, write SHA256SUMS
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name 'NTSCRT-*.zip' -o -name 'NTSCRT-*.msi' -o -name 'NTSCRT-*.pkg' \) -exec cp {} release-assets/ \;
+          cd release-assets
+          ls -la
+          [ -n "$(ls)" ] || { echo "::error::no NTSCRT-* artifacts"; exit 1; }
+          sha256sum NTSCRT-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: release-assets/SHA256SUMS
+      # Idempotent: re-running the job (say after a failed upload) updates the existing release.
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
-          mapfile -t files < <(find artifacts -type f \( -name 'NTSCRT-*.zip' -o -name 'NTSCRT-*.msi' -o -name 'NTSCRT-*.pkg' \) | sort)
+          files=(release-assets/*)
           printf 'asset: %s\n' "${files[@]}"
-          [ "${#files[@]}" -gt 0 ] || { echo "::error::no NTSCRT-* artifacts"; exit 1; }
-          gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --title "NTSCRT $TAG" --notes-file release-notes.md
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG exists: replacing its assets and notes"
+            gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md --prerelease="$PRERELEASE"
+          else
+            pre=(); if [ "$PRERELEASE" = true ]; then pre=(--prerelease); fi
+            gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --title "NTSCRT $TAG" \
+              --notes-file release-notes.md --verify-tag "${pre[@]}"
+          fi

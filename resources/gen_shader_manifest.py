@@ -23,6 +23,12 @@ PRESETS = [  # upstream Sources/CrtCore/Presets.swift
     "crt/crtsim.slangp",
 ]
 
+# Licence files shipped beside the shaders that need them (GPL: the licence text
+# travels with the files; THIRD_PARTY_NOTICES.md lists the rest).
+EXTRA = [
+    "crt/shaders/crt-royale/LICENSE.TXT",
+]
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "vendor", "slang-shaders")
 ROOT = os.path.abspath(ROOT)
@@ -91,6 +97,7 @@ def main():
                         hits.add(m.group(1))
         print(f"{preset}: {len(files)} files; temporal refs: {sorted(hits) or 'none'}", file=sys.stderr)
         allfiles |= files
+    allfiles |= set(EXTRA)
     missing = [f for f in allfiles if not os.path.exists(os.path.join(ROOT, f))]
     if missing:
         sys.exit("missing: " + ", ".join(sorted(missing)))

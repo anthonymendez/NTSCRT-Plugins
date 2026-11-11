@@ -1,6 +1,6 @@
 // howl_hooks.h — how the Screen Loop asks the façade for the TV's picture of a
 // frame it has to recompute (the run-up, or the history before a seek).
-// Included by stages.h; see docs/CONTRACT-CHANGES.md (2026-11-10, agent G).
+// Included by stages.h; see docs/dev/CONTRACT-CHANGES.md (2026-11-10, agent G).
 //
 // Upstream renders the loop strictly in order; in a plugin the host asks for
 // frames in any order, so Howlaround::camera() may need the TV picture of past

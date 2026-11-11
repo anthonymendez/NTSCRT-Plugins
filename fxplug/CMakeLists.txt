@@ -109,6 +109,7 @@ add_custom_target(ntscrt_fxplug ALL
     "--shaders=${NTSCRT_SHADERS_DIR}"
     "--librashader=${NTSCRT_LIBRASHADER_BUILT}"
     "--param-ids=${CMAKE_CURRENT_SOURCE_DIR}/param_ids.json"
+    "--license-root=${NTSCRT_ROOT}"
     "--template-dir=${CMAKE_CURRENT_BINARY_DIR}/template"
     "--renderer-entitlements=${CMAKE_CURRENT_SOURCE_DIR}/Renderer.entitlements"
     "--app-entitlements=${CMAKE_CURRENT_SOURCE_DIR}/App.entitlements"
@@ -116,5 +117,6 @@ add_custom_target(ntscrt_fxplug ALL
   DEPENDS ntscrt_fxplug_renderer ntscrt_fxplug_app ntscrt_resources "${FX_TEMPLATE}"
           "${CMAKE_CURRENT_BINARY_DIR}/Info-Renderer.plist"
           cmake/assemble_bundle.sh Renderer.entitlements App.entitlements param_ids.json
+          "${NTSCRT_ROOT}/LICENSE" "${NTSCRT_ROOT}/THIRD_PARTY_NOTICES.md"
   COMMENT "Assembling + signing ${FX_APP_NAME}.app (FxPlug)"
   VERBATIM)

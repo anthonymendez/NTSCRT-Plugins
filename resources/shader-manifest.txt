@@ -13,6 +13,7 @@ crt/crtglow_lanczos.slangp
 crt/crtsim.slangp
 crt/shaders/crt-aperture.slang
 crt/shaders/crt-easymode.slang
+crt/shaders/crt-royale/LICENSE.TXT
 crt/shaders/crt-royale/TileableLinearApertureGrille15Wide8And5d5Spacing.png
 crt/shaders/crt-royale/TileableLinearApertureGrille15Wide8And5d5SpacingResizeTo64.png
 crt/shaders/crt-royale/TileableLinearShadowMaskEDP.png

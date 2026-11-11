@@ -18,6 +18,8 @@
   <string>@PROJECT_VERSION@</string>
   <key>CFBundleVersion</key>
   <string>@PROJECT_VERSION@</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright (c) 2026 Anthony Mendez and Finn McKenty. MIT License; third-party components keep their own licences (see THIRD_PARTY_NOTICES.md).</string>
   <key>CFBundleSignature</key>
   <string>????</string>
 </dict>

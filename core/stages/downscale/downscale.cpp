@@ -2,11 +2,13 @@
 // Look key "downscale": {"enabled": bool, "method": "...", "width": int}.
 // Width-only: the height follows the chain input's aspect (AppState
 // downscaleHeight). Defaults follow upstream AppState: enabled, 320, nearest.
+// With ctx.line_height 2 (One field) it gives the chain the field's lines.
 #include <algorithm>
 #include <cmath>
 
 #include "../stages.h"
 #include "downscale_kernels.h"
+#include "../digital/fields.h"
 
 namespace ntscrt {
 
@@ -73,7 +75,8 @@ std::shared_ptr<gpu::Texture> Downscaler::run(const std::shared_ptr<gpu::Texture
     width = std::clamp(width, 1, 16384);
     std::string method = ds.contains("method") && ds["method"].is_string() ? ds["method"].get<std::string>() : "nearest";
     const auto &sd = in->desc();
-    int height = downscale_height(width, sd.width, sd.height);
+    // One field (Digital video): half the lines, each two rows tall.
+    int height = digital::field_lines(downscale_height(width, sd.width, sd.height), ctx.line_height);
 
     // Reuse the output while nobody else still holds the previous one.
     auto &o = impl_->out;

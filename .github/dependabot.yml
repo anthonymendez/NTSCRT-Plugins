@@ -1,0 +1,30 @@
+# Dependabot: weekly update PRs, grouped so each ecosystem is one PR.
+# Not covered here (bump by hand): cmake/Deps.cmake + ofx/CMakeLists.txt FetchContent pins
+# (commit SHAs / URL_HASH) and the Rust toolchain in rust-toolchain.toml.
+version: 2
+updates:
+  # actions/* majors in .github/workflows (they move to new Node runtimes over time)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # rust/ntscrs-capi/Cargo.lock (the C ABI crate over vendor/ntsc-rs). The ntsc-rs crates are
+  # path dependencies in a submodule, so only registry crates get update PRs.
+  - package-ecosystem: cargo
+    directory: /rust/ntscrs-capi
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  # vendor/* and upstream/NTSCRT. A submodule bump changes rendering (upstream/NTSCRT also
+  # needs the schema/preset sync in docs/), so review these by hand; monthly is plenty.
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: monthly

@@ -1,5 +1,7 @@
 #include "ofx_params.h"
 
+#include "../core/stages/digital/migrate.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -187,7 +189,32 @@ std::vector<Preset> parse_presets(const char *presets_json) {
         p.feedback = e.value("kind", std::string()) == "feedback" || is_feedback_preset(p.data);
         if (!p.name.empty()) out.push_back(std::move(p));
     }
+    // Hosts save the Preset menus by index: released presets keep their place,
+    // newer ones follow (alphabetically, as the core lists them).
+    const auto &released = released_preset_order();
+    auto rank = [&](const Preset &p) {
+        auto it = std::find(released.begin(), released.end(), p.name);
+        return size_t(it - released.begin());
+    };
+    std::stable_sort(out.begin(), out.end(), [&](const Preset &a, const Preset &b) { return rank(a) < rank(b); });
     return out;
+}
+
+const std::vector<std::string> &released_preset_order() {
+    // Every bundled preset of a released version, in that version's menu order
+    // (0.4.0: the core's alphabetical list). Append, never reorder: a sync that
+    // bundles new upstream presets adds them here at the next release.
+    static const std::vector<std::string> names = {
+        // v0.4.0
+        "15 second glitches", "5 second blips", "5 second glitch", "5 seconds mild glitch", "Clean CRT",
+        "Clean VHS", "Gentle waves loop", "Glitch 1", "Glitch 2", "Glitch loop 1", "Glitch pop", "Gltch 3",
+        "High Chroma static", "Low Res", "Medium VHS", "Mild VHS", "Obliterated", "Readable Text",
+        "Screen Loop/12 copies luma key", "Screen Loop/15 copies color drift", "Screen Loop/22 copies bottom left",
+        "Screen Loop/7 copies slow luma", "Screen Loop/Bottom to top", "Static loop 1", "Tracking Noise up",
+        "Two blips loop", "V Hold glitch", "Vertical Freak Out", "Vertical spike loop", "Very wavy", "Wavy loop",
+        "Webcam (low quality)",
+    };
+    return names;
 }
 
 std::optional<json> coerce(const ParamDef &p, const json &v) {
@@ -276,8 +303,13 @@ void build_look(const Schema &s, const ValueFn &value, json &look, json &feedbac
     }
 }
 
-std::optional<json> preset_value(const ParamDef &p, const json &preset, bool feedback_preset) {
+std::optional<json> preset_value(const ParamDef &p, const json &preset_in, bool feedback_preset) {
     if (p.feedback != feedback_preset || !p.in_presets) return std::nullopt;
+    // Older looks' Digital video values mapped onto today's controls, as the
+    // core does when it renders such a look (core/stages/digital/migrate.h).
+    std::optional<json> upgraded;
+    if (!feedback_preset && p.path.rfind("/digital/", 0) == 0) upgraded = ntscrt::digital::migrate::upgraded(preset_in);
+    const json &preset = upgraded ? *upgraded : preset_in;
     if (auto v = lookup(preset, p.path)) {
         if (auto c = coerce(p, *v)) return c;
     }

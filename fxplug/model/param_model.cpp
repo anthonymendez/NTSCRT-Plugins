@@ -1,5 +1,7 @@
 #include "param_model.h"
 
+#include "../../core/stages/digital/migrate.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -140,6 +142,7 @@ Model Model::from_schema(const json &schema, const json &id_map, std::vector<std
         if (q.contains("visible_if") && q["visible_if"].is_object()) {
             P.visible_path = q["visible_if"].value("path", "");
             P.visible_equals = q["visible_if"].value("equals", json());
+            P.visible_truthy = !q["visible_if"].contains("equals");
         }
         switch (P.kind) {
         case Kind::Bool:
@@ -293,9 +296,17 @@ json Model::build_look(const json &base_look, const std::function<json(const Par
     // (e.g. GAMMA_INPUT in aperture and easymode), so only the selected preset's
     // values may go into the look (docs/params.md). Their condition reads the look
     // built above (e.g. /shader/preset).
-    for (const auto &p : params)
-        if (!p.feedback && !p.visible_path.empty() && is_visible(p, look, json()))
+    for (const auto &p : params) {
+        if (p.feedback || p.visible_path.empty()) continue;
+        if (p.visible_truthy && p.visible_path == p.pointer) {
+            // Shown (and written) only while its own value is truthy: the
+            // Digital video controls kept from 0.4.0 (schema "legacy").
+            json v = to_look_value(p, get(p));
+            if (truthy(v)) set_at(look, p.pointer, v);
+        } else if (is_visible(p, look, json())) {
             set_at(look, p.pointer, to_look_value(p, get(p)));
+        }
+    }
     return look;
 }
 
@@ -308,8 +319,10 @@ std::optional<json> Model::build_feedback(bool on, const json &base, const std::
     return fb;
 }
 
-std::map<uint32_t, json> Model::host_values_from_preset(const json &preset, bool feedback) const {
+std::map<uint32_t, json> Model::host_values_from_preset(const json &preset_in, bool feedback) const {
     std::map<uint32_t, json> out;
+    // Older looks' Digital video values mapped onto today's controls (as the core does).
+    const json preset = feedback ? preset_in : ntscrt::digital::migrate::upgraded(preset_in);
     for (const auto &p : params) {
         if (p.feedback != feedback || !p.in_presets) continue;
         json v = value_at(preset, p.pointer);
@@ -336,7 +349,8 @@ bool Model::is_enabled(const Param &p, const json &look, const json &feedback) c
 bool Model::is_visible(const Param &p, const json &look, const json &feedback) const {
     if (p.visible_path.empty()) return true;
     auto [fb, ptr] = split_fb(p.visible_path);
-    return value_at(fb ? feedback : look, ptr) == p.visible_equals;
+    json v = value_at(fb ? feedback : look, ptr);
+    return p.visible_truthy ? truthy(v) : v == p.visible_equals;
 }
 
 bool needs_history(const json &look, const std::optional<json> &feedback) {

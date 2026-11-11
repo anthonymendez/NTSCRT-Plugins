@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "gpu/gpu.h"
@@ -21,10 +22,20 @@ inline gpu::Backend native_backend() {
 #endif
 }
 
-// Own device (hardware, WARP fallback). Tests skip themselves when null.
+// True when NTSCRT_REQUIRE_GPU is set to anything but "" / "0" (CI sets it).
+inline bool gpu_required() {
+    const char *v = std::getenv("NTSCRT_REQUIRE_GPU");
+    return v && *v && std::string(v) != "0";
+}
+
+// Own device (hardware, WARP fallback). Tests skip themselves when null, unless
+// NTSCRT_REQUIRE_GPU=1: then a missing device fails the test instead of passing silently.
 inline std::unique_ptr<gpu::Device> device() {
     auto d = gpu::Device::create(native_backend(), nullptr, nullptr);
-    if (!d) MESSAGE("no GPU device: " << gpu::Device::last_create_error());
+    if (!d) {
+        if (gpu_required()) FAIL("no GPU device and NTSCRT_REQUIRE_GPU is set: " << gpu::Device::last_create_error());
+        MESSAGE("no GPU device: " << gpu::Device::last_create_error());
+    }
     return d;
 }
 

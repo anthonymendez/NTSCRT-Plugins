@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Renders the README preview GIFs with the NTSCRT OpenFX plug-in inside DaVinci Resolve (headless).
+"""Renders the README preview animations with the NTSCRT OpenFX plug-in inside DaVinci Resolve (headless).
 
   python scripts/make_previews_resolve.py [--bundle C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle]
                                           [--build C:/ntb/main] [--work DIR] [--out docs/images]
@@ -10,11 +10,11 @@
    Loader (the scene frames) -> NTSCRT tool with the look's parameters, rendered to PNG through the
    render queue (no dialogs). Resolve quits afterwards.
 3. The Resolve frames are checked against ntscrt-cli (mean difference per look; when --build has it).
-4. scripts/make_previews.ps1 -Renders composites them and writes hero-before-after.gif and
-   looks-grid.gif with ffmpeg.
+4. scripts/make_previews.ps1 -Renders composites them and writes hero-before-after.webp and
+   looks-grid.webp (animated WebP) with ffmpeg.
 
 Needs Resolve Studio (external scripting), Windows PowerShell and ffmpeg on PATH. Without Resolve,
-scripts/make_previews.ps1 alone renders the same GIFs through ntscrt-cli.
+scripts/make_previews.ps1 alone renders the same previews through ntscrt-cli.
 Resolve must not be running: the script waits (up to --wait minutes) for it to quit.
 """
 import argparse
@@ -225,7 +225,7 @@ def main():
         log(f"FAIL: Resolve output differs from ntscrt-cli: {bad}")
         return 1
 
-    log("compositing GIFs ...")
+    log("compositing the WebP previews ...")
     subprocess.run(ps + ["-Renders", str(renders), "-WorkDir", str(work), "-OutDir", a.out], check=True)
     (work / "previews.json").write_text(json.dumps({"cli_diff": diffs}, indent=2), encoding="utf-8")
     log(f"done in {time.time() - t_all:.0f}s")

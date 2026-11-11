@@ -33,7 +33,8 @@ permissions:
   contents: read
 
 env:
-  LIBRASHADER_COMMIT: 76462c03
+  # full SHA (a shallow fetch needs it); the same commit as the vendor/librashader submodule
+  LIBRASHADER_COMMIT: 76462c030b75c4f2d56e5386c3d4d7d1128318b8
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -41,7 +42,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -54,15 +55,17 @@ jobs:
       - name: Metal available?
         run: xcrun swift scripts/ci/metal_check.swift
 
-      - name: Rust stable (aarch64 + x86_64, rustup like upstream expects)
+      # Upstream builds with stable; this repo's rust-toolchain.toml pin also applies to
+      # cargo runs under the checkout (scripts/build-ntscrs.sh), so install both.
+      - name: Rust stable + rust-toolchain.toml pin (aarch64 + x86_64)
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add --toolchain stable aarch64-apple-darwin x86_64-apple-darwin
+          rustup toolchain install stable --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+          tc="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$tc" --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
           rustc --version
 
       - name: Cache cargo, librashader build, SwiftPM
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -76,11 +79,15 @@ jobs:
       - name: Build librashader ${{ env.LIBRASHADER_COMMIT }} (universal, --features stable)
         run: |
           src="$RUNNER_TEMP/librashader-src"
+          # shallow: only the pinned commit (no history)
           if [ ! -d "$src/.git" ]; then
-            git clone https://github.com/SnowflakePowered/librashader.git "$src"
+            git init --quiet "$src"
+            git -C "$src" remote add origin https://github.com/SnowflakePowered/librashader.git
           fi
-          git -C "$src" fetch --quiet origin || true
-          git -C "$src" checkout --quiet "$LIBRASHADER_COMMIT"
+          if ! git -C "$src" cat-file -e "$LIBRASHADER_COMMIT^{commit}" 2>/dev/null; then
+            git -C "$src" fetch --quiet --depth 1 origin "$LIBRASHADER_COMMIT"
+          fi
+          git -C "$src" checkout --quiet --force "$LIBRASHADER_COMMIT"
           TC="$(rustup run stable rustc --print sysroot)"
           (cd "$src" && RUSTC="$TC/bin/rustc" "$TC/bin/cargo" build --release -p librashader-capi --features stable --target aarch64-apple-darwin)
           (cd "$src" && RUSTC="$TC/bin/rustc" "$TC/bin/cargo" build --release -p librashader-capi --features stable --target x86_64-apple-darwin)
@@ -133,7 +140,7 @@ jobs:
           sys.exit(1 if bad else 0)
           EOF
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: golden-refs
           path: golden-refs/

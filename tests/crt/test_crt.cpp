@@ -210,9 +210,13 @@ TEST_CASE("each bundled CRT preset renders the test frame") {
                 o = read(*d, *out);
             } catch (const std::exception &e) {
                 // GitHub's macOS runners are VMs with a paravirtualized GPU that times out
-                // ("GPU Hang") on the heaviest shaders (crt-sim). Only there is that a warning;
-                // on real hardware it fails the test.
-                if (std::getenv("CI") && std::string(e.what()).find("Hang") != std::string::npos) {
+                // ("GPU Hang") on the heaviest shaders (crt-sim). Only there (macOS + GitHub
+                // Actions) is that a warning; anywhere else, real hardware included, it fails.
+                bool gha_macos = false;
+#ifdef __APPLE__
+                if (const char *gha = std::getenv("GITHUB_ACTIONS")) gha_macos = std::string(gha) == "true";
+#endif
+                if (gha_macos && std::string(e.what()).find("Hang") != std::string::npos) {
                     MESSAGE("WARNING: " << id << " " << ow << "x" << oh << " hung the CI runner's virtual GPU: " << e.what());
                     break;  // the command queue may be unusable for this preset now
                 }

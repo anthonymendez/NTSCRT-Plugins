@@ -60,3 +60,53 @@ TEST_CASE("diagnostics are host extras: no schema param, never in the look or pr
         if (v) CHECK(*v == p.def);  // unknown keys are ignored: every param gets its default
     }
 }
+
+TEST_CASE("Digital video controls kept from 0.4.0: written only while non-zero, presets migrate") {
+    Schema s = Schema::parse(ntscrt_param_schema_json());
+    auto index = [&](const std::string &id) {
+        for (size_t i = 0; i < s.params.size(); ++i)
+            if (s.params[i].id == id) return i;
+        FAIL("no param " << id);
+        return size_t(0);
+    };
+    const size_t legacyQ = index("digital.quality"), q2 = index("digital.quality2"), ccd = index("digital.ccd_response");
+    CHECK(s.params[q2].path == "/digital/values/quality");
+    CHECK(s.params[legacyQ].path == "/digital/legacy/quality");
+    // A new instance: nothing under /digital/legacy.
+    json look, fb;
+    build_look(s, [&](size_t i) { return s.params[i].def; }, look, fb);
+    CHECK_FALSE(look["digital"].contains("legacy"));
+    CHECK(look["digital"]["values"]["quality"] == 0.749);
+    CHECK(look["digital"]["values"]["fields"] == 1);
+    // A 0.4.0 instance (old Quality 0.22 stored under the old id): written.
+    build_look(s, [&](size_t i) { return i == legacyQ ? json(0.22) : s.params[i].def; }, look, fb);
+    CHECK(look["digital"]["legacy"]["quality"] == 0.22);
+    CHECK_FALSE(look["digital"]["legacy"].contains("lens_blur"));  // never written: no effect
+    // Applying a version 1 preset: Quality converted, Exposure / Black level become CCD response,
+    // the legacy params reset.
+    json v1 = {{"version", 1},
+               {"digital", {{"enabled", true}, {"values", {{"quality", 0.22}, {"exposure", 0.3}, {"black_level", 0.0}}}}}};
+    CHECK(std::fabs(preset_value(s.params[q2], v1, false)->get<double>() - 0.749) < 0.001);
+    CHECK(std::fabs(preset_value(s.params[ccd], v1, false)->get<double>() - 0.5) < 1e-9);
+    CHECK(*preset_value(s.params[legacyQ], v1, false) == 0.0);
+    // Today's preset: as written.
+    json v2 = {{"version", 2}, {"digital", {{"enabled", true}, {"values", {{"quality", 0.22}}}}}};
+    CHECK(*preset_value(s.params[q2], v2, false) == 0.22);
+}
+
+TEST_CASE("bundled preset menu keeps released presets at their index") {
+    json arr = json::array();
+    for (const char *n : {"15 second glitches", "5 second blips", "CD-ROM (low quality)", "Chunky webcam", "Clean CRT",
+                          "Webcam (low quality)", "Zzz new"})
+        arr.push_back({{"name", n}, {"kind", "look"}, {"json", json::object()}});
+    auto p = parse_presets(arr.dump().c_str());
+    REQUIRE(p.size() == 7);
+    CHECK(p[0].name == "15 second glitches");
+    CHECK(p[2].name == "Clean CRT");
+    CHECK(p[3].name == "Webcam (low quality)");
+    CHECK(p[4].name == "CD-ROM (low quality)");  // new ones after the released ones, alphabetically
+    CHECK(p[5].name == "Chunky webcam");
+    CHECK(p[6].name == "Zzz new");
+    // v0.4.0 shipped 32 presets (looks and Screen Loops); none may move.
+    CHECK(released_preset_order().size() == 32);
+}

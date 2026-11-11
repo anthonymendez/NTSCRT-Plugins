@@ -3,6 +3,10 @@
 An FxPlug 4 effect for Final Cut Pro 12.4+ and Motion, built on the same
 `ntscrt_core` C ABI as the OpenFX plug-in.
 
+**Status: not released.** It compiles in CI when the FxPlug SDK secret is set (see below), but it has
+not run in Final Cut Pro or Motion yet, and releases don't include it. See
+[Not verified yet](#not-verified-yet-no-mac-here-ci-only-compiles-and-inspects-the-bundle).
+
 ## What gets built
 
 ```
@@ -13,6 +17,7 @@ NTSCRT.app                                   wrapper app (required by FxPlug 4)
     Contents/MacOS/NTSCRTRenderer            universal arm64 + x86_64
     Contents/Frameworks/FxPlug.framework, PluginManager.framework   (copied from the SDK)
     Contents/Resources/presets/, shaders/, param_ids.json
+    Contents/Resources/LICENSE, THIRD_PARTY_NOTICES.md, licenses/   (also in the app's Resources)
 ```
 
 - `src/NTSCRTPlugIn.mm` — `FxTileableEffect` (Objective-C++) over `ntscrt.h`:
@@ -86,7 +91,7 @@ the secret the job succeeds with a notice "FxPlug skipped".
    (or a zip of an installed `/Library/Developer` tree).
 3. In GitHub → *anthonymendez/NTSCRT-Plugins* → Settings → Secrets and variables
    → Actions → **New repository secret**: name `FXPLUG_SDK_URL`, value = that URL.
-   Optional: secret `FXPLUG_SDK_SHA256` = `shasum -a 256` of the file to pin it.
+   Also required: secret `FXPLUG_SDK_SHA256` = `shasum -a 256` of the file (the job fails without it).
 4. Re-run the `ci` workflow. The job installs the SDK (`scripts/ci/install_fxplug_sdk.sh`),
    builds `ntscrt_fxplug`, verifies plists / universal binary / signature and
    uploads `NTSCRT-FxPlug-macos-universal` (ad-hoc signed).
@@ -143,8 +148,10 @@ exactly this. This project avoids every likely cause we know of:
   `kFxImageOrigin_BOTTOM_LEFT` (Apple: Motion is bottom-left, FCP top-left).
   If output is upside down, set `NTSCRT_FXPLUG_FLIP=0` or `1` with `launchctl setenv`
   to test, then fix `BottomUp()` in `NTSCRTPlugIn.mm`.
-- `ntscrt_render_metal` was still a stub when this was written; until it lands
-  every frame takes the CPU fallback (logged once per process).
+- The Metal render path: `ntscrt_render_metal` is implemented in the core (Metal GPU device,
+  `core/gpu/metal/`) and the renderer uses it on the host's `MTLDevice`, but it has no test of
+  its own yet and has never run inside Final Cut. If it fails, frames take the CPU fallback
+  (logged once per process).
 - Parameter retrieval at earlier times for `look_at` is capped at 16 frames
   (each costs a full parameter sweep over XPC); older frames reuse the current look.
 - Whether hosts call `parameterChanged` while *opening* a project. If they do for the Preset / Screen Loop menus, the chosen preset would be re-applied over the saved values; move preset application behind a "last applied" hidden param if that shows up.

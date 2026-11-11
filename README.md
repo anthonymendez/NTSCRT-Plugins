@@ -3,26 +3,36 @@
 [NTSCRT](https://github.com/finnmckenty/NTSCRT)'s analog TV look (ntsc-rs signal emulation, TV/VCR glitch
 circuits, RetroArch CRT shaders via librashader, digital codec, Screen Loop) as video-editor effects:
 
-- **DaVinci Resolve 21.1.2+** — OpenFX plugin, Windows and macOS
-- **Final Cut Pro 12.4+** — FxPlug 4 plugin, macOS
+- **DaVinci Resolve 21.1.2+** — OpenFX plugin, Windows and macOS. Released.
+- **Final Cut Pro 12.4+** — FxPlug 4 plugin, macOS. **Not released yet:** the code is in `fxplug/`, but it
+  hasn't been built or tested in Final Cut, and releases don't include it. The Final Cut parts of this page
+  apply once a release does.
 
-Status: in development. See `docs/` for architecture and contracts.
+Free and open source under the [MIT licence](#licence). Synced with upstream NTSCRT v0.20.0.
 
-![Animated before/after: a scrolling synthwave test scene untouched on the left, through NTSCRT's default look on the right](docs/images/hero-before-after.gif)
+![Animated before/after: a scrolling synthwave test scene untouched on the left, through NTSCRT's default look on the right](docs/images/hero-before-after.webp)
 *Before / after with the default look, in motion: chroma bleed, moving noise, scanlines and CRT glow.*
 
-![Four animated NTSCRT looks: V Hold glitch, Obliterated, Webcam (low quality) and a close-up of the CRT Royale shader](docs/images/looks-grid.gif)
+![Four animated NTSCRT looks: V Hold glitch, Obliterated, Webcam (low quality) and a close-up of the CRT Royale shader](docs/images/looks-grid.webp)
 *A few of the bundled looks and CRT shaders. Both animations are rendered by the Resolve plug-in itself
 (DaVinci Resolve running headless) with `scripts/make_previews_resolve.py`; `scripts/make_previews.ps1`
-makes the same GIFs through `ntscrt-cli` when Resolve isn't available.*
+makes the same animations through `ntscrt-cli` when Resolve isn't available.*
 
 ## Install
 
 | App | Supported |
 |---|---|
-| DaVinci Resolve (Windows) | 21.1.2 and later, x64 |
-| DaVinci Resolve (macOS) | 21.1.2 and later, Apple silicon + Intel |
-| Final Cut Pro (macOS) | 12.4 and later, Apple silicon + Intel |
+| DaVinci Resolve (Windows) | 21.1.2 and later (free or Studio), x64 |
+| DaVinci Resolve (macOS) | 21.1.2 and later (free or Studio), Apple silicon + Intel |
+| Final Cut Pro (macOS) | not released yet (planned: 12.4 and later) |
+
+### Requirements
+
+- **Windows:** Windows 10 or 11 (tested on 11), x64, with a Direct3D 11 GPU (feature level 11.0; any GPU from the last
+  ten years). Without one the plug-in falls back to Windows' software renderer (WARP), which works but is slow.
+- **macOS:** macOS 12 Monterey or later, Apple silicon or Intel, with a Metal GPU (every Mac that runs macOS 12).
+- **DaVinci Resolve 21.1.2 or later.** Older versions aren't tested.
+- The installers need an internet connection (they download the latest release from GitHub).
 
 **Quit DaVinci Resolve / Final Cut Pro first.**
 
@@ -31,7 +41,7 @@ makes the same GIFs through `ntscrt-cli` when Resolve isn't available.*
 From the [latest release](https://github.com/anthonymendez/NTSCRT-Plugins/releases/latest):
 
 - **Windows:** `NTSCRT-Installer-windows.msi` (DaVinci Resolve)
-- **macOS:** `NTSCRT-Installer-macos.pkg` (DaVinci Resolve and/or Final Cut Pro, whichever you have)
+- **macOS:** `NTSCRT-Installer-macos.pkg` (DaVinci Resolve; Final Cut Pro too once a release includes it)
 
 Double-click it and follow the steps. The installer is small: when it runs it downloads the **latest release**
 from GitHub and installs that, so an old installer still gets you the newest plug-in (it needs an internet
@@ -57,7 +67,7 @@ macOS: the `--uninstall` line below.
 irm https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.ps1 | iex
 ```
 
-**macOS** (Terminal): installs for DaVinci Resolve and/or Final Cut Pro, whichever you have
+**macOS** (Terminal): installs for DaVinci Resolve (and Final Cut Pro once a release includes it)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.sh | sh
 ```
@@ -143,17 +153,74 @@ Testing it for someone, or something's wrong? [docs/TESTING.md](docs/TESTING.md)
 | Need a log for a bug report | In the effect's *Presets* group, tick **Debug logging**, reproduce the problem (play or render those frames), untick it, then click **Open logs folder** and attach `ntscrt-ofx.log` (Resolve) or `ntscrt-fxplug.log` (Final Cut). Or run `ntscrt_doctor.py` ([docs/TESTING.md](docs/TESTING.md)), which collects it for you. |
 | Picture is black or unchanged | Usually a partial copy: the `shaders/` folder or `librashader` file inside the bundle is missing. Run the install line again. Resolve shows the plugin's error message when it can't render. |
 
-Building from source instead: see [Build](#build-windows) below (Windows/Resolve) and `fxplug/README.md` (Final Cut).
+Building from source instead: see [Build from source](#build-from-source) below, and [fxplug/README.md](fxplug/README.md) for Final Cut.
+
+## Known issues and limitations
+
+- **Animated presets play as one frame.** Presets such as *15 second glitches* or *Glitch pop* animate in the
+  NTSCRT app; here they apply the look of their first frame. Keyframe the controls yourself to animate them.
+- **Downscale → Horizontal resolution** doesn't change the width yet; set **Width** in the same group directly.
+- **Edits and seeks can be slow** with the Glitch, Digital video or Screen Loop stages on: they depend on
+  earlier frames, so the plug-in re-renders those after a jump or a parameter change.
+- **Memory:** the plug-in keeps recent source frames per effect instance, which adds up on 4K timelines with
+  many instances.
+- **8-bit processing:** frames are processed at 8 bits per channel, so 16-bit / float timelines can show
+  banding in smooth gradients after heavy grading on top of the effect.
+- **Installers aren't code-signed or notarized** yet (see the extra click under [Install](#install)).
+- **macOS:** the CI runs on a virtual GPU, so the heaviest CRT shader (*sim*) hasn't been run on real Mac
+  hardware yet. Reports welcome ([docs/TESTING.md](docs/TESTING.md)).
+- **Final Cut Pro:** not released (see the top of this page).
+
+Bugs and requests: [open an issue](https://github.com/anthonymendez/NTSCRT-Plugins/issues/new/choose); the bug
+form asks for the `ntscrt_doctor.py` report.
 
 ## Credits
-All of the look comes from NTSCRT by Finn McKenty, [ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) (MIT/ISC/Apache-2.0),
+All of the look comes from [NTSCRT](https://github.com/finnmckenty/NTSCRT) by Finn McKenty (MIT),
+[ntsc-rs](https://github.com/ntsc-rs/ntsc-rs) (MIT/ISC/Apache-2.0),
 [librashader](https://github.com/SnowflakePowered/librashader) (MPL-2.0) and the
-[libretro slang-shaders](https://github.com/libretro/slang-shaders) authors (various licenses, largely GPL).
-Bundled third-party components keep their own licenses.
+[libretro slang-shaders](https://github.com/libretro/slang-shaders) authors (various licences, largely GPL).
 
-## Build (Windows)
+## Licence
+The plug-ins' own code is under the [MIT licence](LICENSE), Copyright (c) 2026 Anthony Mendez, and
+Copyright (c) 2026 Finn McKenty for the NTSCRT code it is ported from.
+
+Bundled third-party components keep their own licences: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+and [licenses/](licenses/). In particular, librashader (MPL-2.0) is a separate library file and the
+RetroArch CRT shaders (several under the GPL) are separate shader source files, both shipped unmodified next
+to the MIT plug-in; their licences cover those files only. The same notices ship inside every bundle
+(`Contents/Resources/`).
+
+## Build from source
+You need CMake 3.24+ (4.x works), Rust stable (`rustup`), Python 3, Git, and the submodules:
 ```
-cmake -S . -B C:/ntb/main -G "Visual Studio 17 2022" -A x64
-cmake --build C:/ntb/main --config Release -- -m
-ctest --test-dir C:/ntb/main -C Release
+git clone --recursive https://github.com/anthonymendez/NTSCRT-Plugins.git
+cd NTSCRT-Plugins
 ```
+(or `git submodule update --init --depth 1` in an existing clone). Other dependencies (OpenFX SDK,
+nlohmann/json, stb, doctest, the Slang compiler) are downloaded at configure time.
+
+### Windows
+Visual Studio 2022 (or its Build Tools) with the C++ workload. Use a **short build folder** such as
+`C:uild
+tscrt`: deep paths break MSBuild and the Rust builds.
+```
+cmake -S . -B C:/build/ntscrt -G "Visual Studio 17 2022" -A x64
+cmake --build C:/build/ntscrt --config Release -- -m
+ctest --test-dir C:/build/ntscrt -C Release
+```
+The plug-in is `C:/build/ntscrt/ofx/Release/NTSCRT.ofx.bundle`: copy it into
+`C:\Program Files\Common Files\OFX\Plugins\` and restart Resolve.
+
+### macOS
+Xcode 15 or later (or its Command Line Tools), CMake, and both Rust targets for a universal build:
+```
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+cmake --build build --parallel "$(sysctl -n hw.ncpu)"
+ctest --test-dir build --output-on-failure
+```
+The plug-in is `build/ofx/Release/NTSCRT.ofx.bundle`: copy it into `/Library/OFX/Plugins/` and restart Resolve.
+Leave out `CMAKE_OSX_ARCHITECTURES` to build for your Mac only. The Final Cut plug-in needs Apple's FxPlug SDK:
+see [fxplug/README.md](fxplug/README.md).
+
+Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Releasing: [docs/RELEASING.md](docs/RELEASING.md).
