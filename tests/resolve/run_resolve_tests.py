@@ -911,8 +911,38 @@ class Suite:
             fu.render({"fx": fx}, (n * (i + 1), n * (i + 2) - 1), f"speed-{preset}")
             m[preset] = round(((time.time() - t0) / n - base) * 1000)
         m.update(self.seek_edit_cost(fu, src))
-        self.record("speed", "pass", m, "ms per 1920x1080 frame added by NTSCRT; seek/edit: the plug-in's own "
-                    "time for one frame (informational)")
+        m.update(self.screenloop_seek_cost(fu, src))
+        self.record("speed", "pass", m, "ms per 1920x1080 frame added by NTSCRT; seek/edit/screenloop: the "
+                    "plug-in's own time for one frame (informational)")
+
+    def screenloop_seek_cost(self, fu, src):
+        """Screen Loop on (default look; the Bottom to top loop: zoomed in, auto exposure): a new
+        instance renders frame 140, 141, then back to 125 and 100, then 141 again. Resolve renders
+        other frames in between (the comp's current frame: 0), so each job is a jump from there;
+        the loop resumes from its checkpoints (every 30 frames) instead of re-running from frame 0.
+        Every render of the instance is listed as frame:ms (the plug-in's own time, debug log)."""
+        log = self.plugin_log()
+        start = self.log_size(log)
+        loop = json.loads((ROOT / "presets/Screen Loop/Bottom to top.json").read_text(encoding="utf-8"))
+        params = {"screenloop_enabled": 1}
+        params.update({f"screenloop_{k}": v for k, v in loop["values"].items()})
+        fx = self.ntscrt(fu, src, **params)
+        if fx.GetInput("host_debug_logging") is None:
+            return {}
+        fx.SetInput("host_debug_logging", 1)
+        t0 = time.time()
+        for f in (140, 141, 125, 100, 141):
+            fu.render({"fx": fx}, [f], f"speed-loop-{f}")
+        wall = time.time() - t0
+        time.sleep(0.3)
+        fx.SetInput("host_debug_logging", 0)
+        text = self.log_since(log, start)
+        ids = re.findall(r"instance #(\d+) created", text)
+        if not ids:
+            return {}
+        renders = [f"{m.group(1)}:{round(float(m.group(2)))}"
+                   for m in re.finditer(rf"instance #{ids[-1]} debug render #\d+ t=(\d+) .*? ms=([\d.]+)", text)]
+        return {"screenloop_renders_frame_ms": " ".join(renders), "screenloop_jobs_s": round(wall, 1)}
 
     def seek_edit_cost(self, fu, src, frame=140):
         """Glitch on (the default): an instance at frame 0 jumping to `frame` (it simulates every
