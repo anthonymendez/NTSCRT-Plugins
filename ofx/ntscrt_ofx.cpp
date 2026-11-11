@@ -102,7 +102,7 @@ const Globals &globals() {
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, gl->res_dir.c_str()};
         ntscrt_instance *tmp = nullptr;
         if (ntscrt_create(&ci, &tmp) == NTSCRT_OK && tmp) {
-            for (auto &p : parse_presets(ntscrt_bundled_presets_json(tmp)))
+            for (auto &p : parse_presets(ntscrt_bundled_presets_json(tmp), gl->schema.digital_formats))
                 (p.feedback ? gl->loops : gl->looks).push_back(std::move(p));
             ntscrt_destroy(tmp);
         }
@@ -437,7 +437,11 @@ public:
             if (name == kPresetParam) {
                 int i = 0;
                 preset_->getValue(i);
-                if (i > 0 && size_t(i) <= g_.looks.size()) apply_preset(g_.looks[size_t(i - 1)].data, false, args.time);
+                if (i > 0 && size_t(i) <= g_.looks.size()) {
+                    const Preset &pr = g_.looks[size_t(i - 1)];
+                    if (pr.format) apply_values(applies_values(g_.schema, pr.data), args.time, "NTSCRT Digital video format");
+                    else apply_preset(pr.data, false, args.time);
+                }
             } else if (loop_preset_ && name == kLoopPresetParam) {
                 int i = 0;
                 loop_preset_->getValue(i);
@@ -446,6 +450,8 @@ public:
                 load_preset_file(args.time);
             } else if (name == kSaveParam) {
                 save_preset_file(args.time);
+            } else {
+                apply_choice_effects(name, args.time);
             }
             // preset apply/load changed many params (keyframes too): flush once
             // more afterwards. Source frames are keyed by what shapes them.
@@ -652,12 +658,82 @@ private:
         }
     }
 
+    // A value at host time t as a keyframe.
+    void set_key(size_t i, const json &v, double t) {
+        const ParamDef &p = g_.schema.params[i];
+        OFX::Param *q = params_[i];
+        switch (p.type) {
+        case PType::Bool: static_cast<OFX::BooleanParam *>(q)->setValueAtTime(t, v.get<bool>()); break;
+        case PType::Int: static_cast<OFX::IntParam *>(q)->setValueAtTime(t, int(v.get<int64_t>())); break;
+        case PType::Float: static_cast<OFX::DoubleParam *>(q)->setValueAtTime(t, v.get<double>()); break;
+        case PType::Choice: {
+            int k = choice_index(p, v);
+            if (k >= 0) static_cast<OFX::ChoiceParam *>(q)->setValueAtTime(t, k);
+            break;
+        }
+        case PType::Color: {
+            auto c = color_components(p, v);
+            if (p.color_n == 4) static_cast<OFX::RGBAParam *>(q)->setValueAtTime(t, c[0], c[1], c[2], c[3]);
+            else static_cast<OFX::RGBParam *>(q)->setValueAtTime(t, c[0], c[1], c[2]);
+            break;
+        }
+        }
+    }
+
+    // Look presets replace the look: every param the preset sets loses its old
+    // keyframes. An animated preset (upstream timeline keys) then gets host
+    // keyframes: the timeline's duration in seconds from the effect's first frame
+    // at the source's frame rate, repeated until the effect ends (at most
+    // kMaxKeyedFrames; the last value holds after that). See docs/params.md.
+    void apply_look_preset(const json &preset, double t) {
+        const Schema &s = g_.schema;
+        const OfxRangeD range = source_frame_range();
+        const bool known = range.max - range.min < 1e8;  // source_frame_range's "unknown" fallback
+        const int64_t available = known ? int64_t(std::llround(range.max - range.min)) + 1 : 0;
+        const PresetKeys pk = preset_keys(s, preset, source_frame_rate(), available);
+        size_t keyed = 0;
+        for (size_t i = 0; i < s.params.size(); ++i) {
+            const ParamDef &p = s.params[i];
+            if (p.feedback || !p.in_presets) continue;
+            try {
+                static_cast<OFX::ValueParam *>(params_[i])->deleteAllKeys();
+            } catch (...) {
+            }
+            if (pk.animated()) {
+                auto it = pk.keys.find(i);
+                if (it == pk.keys.end() || it->second.empty()) continue;
+                if (it->second.size() == 1) {
+                    set_value(i, it->second.front().second, t);  // holds still: no keyframe
+                } else {
+                    for (const auto &[n, v] : it->second) set_key(i, v, range.min + double(n));
+                    keyed += it->second.size();
+                }
+            } else if (auto v = preset_value(p, preset, false)) {
+                set_value(i, *v, t);
+            }
+        }
+        if (pk.animated()) {
+            std::ostringstream o;
+            o << "instance #" << id_ << " animated preset: " << pk.pass << " frames per pass, " << pk.frames
+              << " frames keyed from t=" << range.min << ", " << keyed << " keyframes";
+            dlog::write(o.str());
+        }
+    }
+
     void apply_preset(const json &preset, bool feedback, double t) {
         applying_ = true;
         beginEditBlock(feedback ? "NTSCRT Screen Loop preset" : "NTSCRT preset");
         try {
-            for (size_t i = 0; i < g_.schema.params.size(); ++i)
-                if (auto v = preset_value(g_.schema.params[i], preset, feedback)) set_value(i, *v, t);
+            if (feedback) {
+                for (size_t i = 0; i < g_.schema.params.size(); ++i)
+                    if (auto v = preset_value(g_.schema.params[i], preset, true)) set_value(i, *v, t);
+            } else {
+                apply_look_preset(preset, t);
+                // Our preset files carry the Screen Loop settings too (save_preset_file).
+                if (preset.is_object() && preset.contains("screen_loop") && is_feedback_preset(preset["screen_loop"]))
+                    for (size_t i = 0; i < g_.schema.params.size(); ++i)
+                        if (auto v = preset_value(g_.schema.params[i], preset["screen_loop"], true)) set_value(i, *v, t);
+            }
         } catch (...) {
             endEditBlock();
             applying_ = false;
@@ -665,6 +741,38 @@ private:
         }
         endEditBlock();
         applying_ = false;
+    }
+
+    // Writes (param index, value) pairs at time t as one edit (Digital formats, choice "applies").
+    void apply_values(const std::vector<std::pair<size_t, json>> &vals, double t, const char *what) {
+        if (vals.empty()) return;
+        applying_ = true;
+        beginEditBlock(what);
+        try {
+            for (const auto &[i, v] : vals) set_value(i, v, t);
+        } catch (...) {
+            endEditBlock();
+            applying_ = false;
+            throw;
+        }
+        endEditBlock();
+        applying_ = false;
+    }
+
+    // A user edit of a schema param: a choice option with "applies" writes its values
+    // (Horizontal resolution sets the Width); a hand edit of a value a chosen option
+    // set demotes that choice to the option that sets nothing ("Custom").
+    void apply_choice_effects(const std::string &name, double t) {
+        auto it = by_name_.find(name);
+        if (it == by_name_.end()) return;
+        const Schema &s = g_.schema;
+        const size_t i = it->second;
+        if (s.params[i].type == PType::Choice) apply_values(option_applies(s, i, value_at(i, t)), t, "NTSCRT preset");
+        const json edited = value_at(i, t);
+        for (size_t c = 0; c < s.params.size(); ++c) {
+            if (c == i || s.params[c].type != PType::Choice || s.params[c].option_applies.empty()) continue;
+            if (auto d = demoted_choice(s, c, value_at(c, t), i, edited)) apply_values({{c, *d}}, t, "NTSCRT preset");
+        }
     }
 
     void update_dependents(double t) {
@@ -703,9 +811,24 @@ private:
         }
         std::string look, fb;
         look_at_time(t, look, fb);
+        // Upstream's look format; the Screen Loop settings ride along under
+        // "screen_loop" (upstream ignores the key; Load applies it) and, while the
+        // loop is on, also as an upstream Screen Loop file beside it.
+        json lj = json::parse(look);
+        json fj = fb.empty() ? json() : json::parse(fb);
+        if (fj.is_object()) lj["screen_loop"] = fj;
         std::ofstream f(std::filesystem::u8path(path), std::ios::binary | std::ios::trunc);
-        if (f) f << json::parse(look).dump(2) << "\n";
-        if (!f) sendMessage(OFX::Message::eMessageError, "", "Could not write " + path);
+        if (f) f << lj.dump(2) << "\n";
+        if (!f) {
+            sendMessage(OFX::Message::eMessageError, "", "Could not write " + path);
+            return;
+        }
+        if (fj.is_object() && fj.value("enabled", true)) {
+            std::filesystem::path side = std::filesystem::u8path(path);
+            side.replace_filename(side.stem().u8string() + u8" (Screen Loop)" + side.extension().u8string());
+            std::ofstream sf(side, std::ios::binary | std::ios::trunc);
+            if (sf) sf << fj.dump(2) << "\n";
+        }
     }
 
     // Errors during render: persistent message (no modal dialog per frame) when

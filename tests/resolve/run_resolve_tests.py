@@ -15,6 +15,9 @@ Tests (see README.md next to this file):
   order     random-access renders == sequential renders (default look, Digital, Screen Loop)
   cli       plug-in output == ntscrt-cli on the same frames (default look + every CRT preset +
             the bundled Digital video looks, chosen from the plug-in's Preset menu)
+  animated  an animated bundled preset chosen from the Preset menu becomes keyframes: frames match
+            ntscrt-cli --timeline (the preset's keys played per frame) and not the frozen look;
+            Horizontal resolution and a Digital video format set what they apply
   depth     8-bit int / 16-bit int / 16-bit float / 32-bit float sources give the same result
   sizes     odd and portrait sizes render at the right size
   speed     ms per frame at 1920x1080 for every CRT preset (informational)
@@ -502,6 +505,7 @@ class Suite:
             rel = f.relative_to(ROOT / "presets").with_suffix("").as_posix()
             if json.loads(f.read_text(encoding="utf-8")).get("kind") != "ntscrt-video-feedback":
                 looks.append(rel)
+        looks += ["Digital video/" + f["name"] for f in self.schema.get("digital_formats", [])]
         order = sorted(looks, key=lambda n: (released.index(n) if n in released else len(released), n.encode()))
         return order.index(name) + 1
 
@@ -623,12 +627,12 @@ class Suite:
         self.order_case("digital", {"digital_enabled": 1})
         self.order_case("screenloop", {"screenloop_enabled": 1})
 
-    def run_cli(self, seq_pattern, out_pattern, first, count, look):
+    def run_cli(self, seq_pattern, out_pattern, first, count, look, timeline=False):
         look_path = self.out / "cli-look.json"
         look_path.write_text(json.dumps(look), encoding="utf-8")
         cmd = [str(self.cli), "--seq", str(seq_pattern), "--in", str(seq_pattern).replace("%04d", f"{first:04d}"),
                "--out", str(out_pattern), "--frame", str(first), "--frames", str(count), "--fps", str(self.fps),
-               "--look", str(look_path), "--resources", str(self.res)]
+               "--look", str(look_path), "--resources", str(self.res)] + (["--timeline"] if timeline else [])
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode:
             raise RuntimeError(f"ntscrt-cli failed: {r.stderr.strip()}")
@@ -684,6 +688,89 @@ class Suite:
             if worst[0] > 2.0:
                 problems.append(f"look {name}: frame {worst[1]} mean diff {worst[0]}")
         self.record("cli", "fail" if problems else "pass", metrics, "; ".join(problems))
+
+    # An animated bundled look: 2 s of keys, every key Linear, NTSC and CRT values moving.
+    ANIMATED_LOOK = "Glitch pop"
+
+    def t_animated(self):
+        if not self.cli or not self.res:
+            return self.record("animated", "skip", notes="ntscrt-cli or bundle resources not found (pass --build)")
+        fu, _ = self.new_comp("animated")
+        src = self.scene(fu)
+        name = self.ANIMATED_LOOK
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()
+        fx = self.ntscrt(fu, src)
+        fx.SetInput("host_preset", self.look_preset_index(name))
+        look = json.loads((ROOT / "presets" / f"{name}.json").read_text(encoding="utf-8"))
+        problems, notes = [], []
+        # The preset became keyframes: a moving value differs between frames as the timeline says.
+        pass_frames = max(1, round(look["timeline"]["duration"] * self.fps))
+        keyed = {f: fx.GetInput("ntsc_composite_preemphasis", f) for f in (0, 12, 25)}
+        m = {"keyed_composite_preemphasis": keyed, "pass_frames": pass_frames}
+        if len({round(v or 0, 6) for v in keyed.values()}) < 2:
+            problems.append(f"Composite preemphasis doesn't move over time: {keyed}")
+        # Keyed values against the timeline evaluated here (this look's keys are all Linear; toggles hold).
+        keys = sorted(look["timeline"]["keys"], key=lambda k: k["t"])
+
+        def expected(name, f):
+            t = (f % pass_frames) / (pass_frames - 1)
+            a = max((k for k in keys if k["t"] <= t), key=lambda k: k["t"], default=keys[0])
+            later = [k for k in keys if k["t"] > t]
+            va = a["ntsc"][name]
+            if not later or isinstance(va, bool):
+                return float(va)
+            b = later[0]
+            return va + (b["ntsc"][name] - va) * (t - a["t"]) / (b["t"] - a["t"])
+        # Informational: Fusion's GetInput(name, time) reads the spline at comp time, which needn't be
+        # the render frame (the rendered frames are the check).
+        table = {}
+        for name in ("vhs_chroma_loss", "ringing", "vhs_edge_wave_enabled", "composite_preemphasis"):
+            table[name] = {f: [fx.GetInput(f"ntsc_{name}", f), round(expected(name, f), 6)]
+                           for f in (0, 1, 3, 5, 6, 7, 9, 10, 12, 20, 36, 39)}
+        m["keyed_values_got_vs_timeline"] = table
+        n = 16 if self.a.quick else 40
+        frames = (0, n - 1)
+        # source and effect from the same render job (Fusion's source frames differ slightly between jobs)
+        r = fu.render({"src": src, "fx": fx}, frames, f"anim-{slug}")
+        pat = Path(str(r["src"][0]).replace("-0000.png", "-%04d.png"))
+        self.run_cli(pat, self.out / f"anim-{slug}-ref-%04d.png", 0, n, look, timeline=True)
+        self.run_cli(pat, self.out / f"anim-{slug}-frozen-%04d.png", 0, n, look)
+        worst, frozen_max, moving = (0.0, 0), (0.0, 0), 0
+        for f in range(n):
+            a = read_png(r["fx"][f])
+            s = stats(a, read_png(self.out / f"anim-{slug}-ref-{f:04d}.png"))["rgb"]["mean"]
+            z = stats(a, read_png(self.out / f"anim-{slug}-frozen-{f:04d}.png"))["rgb"]["mean"]
+            if s >= worst[0]:
+                worst = (s, f)
+                if s > 2.0:
+                    write_png(self.out / f"anim-{slug}-diff.png",
+                              diff_image(a, read_png(self.out / f"anim-{slug}-ref-{f:04d}.png")))
+            if z >= frozen_max[0]:
+                frozen_max = (z, f)
+            moving += z > 4.0
+        m.update({"frames": n, "worst_mean_vs_timeline": worst[0], "worst_frame": worst[1],
+                  "max_mean_vs_frozen": frozen_max[0], "frames_unlike_frozen": moving})
+        if worst[0] > 2.0:
+            problems.append(f"frame {worst[1]}: mean diff {worst[0]} vs ntscrt-cli --timeline")
+        if frozen_max[0] <= 4.0:
+            problems.append("the output never departs from the frozen look: the animation isn't applied")
+        # Horizontal resolution sets the width; a Digital video format switches the stage on.
+        fx2 = self.ntscrt(fu, src)
+        ds = next(p for p in self.schema["params"] if p["id"] == "downscale.preset")
+        labels = [o["value"] for o in ds["options"]]
+        fx2.SetInput("downscale_preset", labels.index("Arcade (384px)"))
+        w = fx2.GetInput("downscale_width")
+        m["width_after_arcade"] = w
+        if w != 384:
+            problems.append(f"Horizontal resolution Arcade set the width to {w}, not 384")
+        fx2.SetInput("host_preset", self.look_preset_index("Digital video/MiniDV"))
+        got = {k: fx2.GetInput(k) for k in ("digital_enabled", "downscale_width", "downscale_preset")}
+        m["after_minidv"] = got
+        if got["digital_enabled"] != 1 or got["downscale_width"] != 720 or \
+                got["downscale_preset"] != labels.index("MiniDV (720px)"):
+            problems.append(f"Digital video/MiniDV: {got}")
+        self.record("animated", "fail" if problems else "pass", m, "; ".join(problems + notes),
+                    [f"anim-{slug}-diff.png"] if worst[0] > 2.0 else [])
 
     def t_depth(self):
         fu, _ = self.new_comp("depth")
@@ -885,7 +972,8 @@ class Suite:
         self.open_project()
         try:
             for name, fn in (("version", self.t_version), ("alpha", self.t_alpha), ("edit", self.t_edit),
-                             ("order", self.t_order), ("cli", self.t_cli), ("depth", self.t_depth),
+                             ("order", self.t_order), ("cli", self.t_cli),
+                             ("animated", self.t_animated), ("depth", self.t_depth),
                              ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug)):
                 self.run(name, fn)
         finally:
@@ -912,7 +1000,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", help="CMake build dir (finds ntscrt-cli and the bundle's resources)")
     ap.add_argument("--out", default=None, help="output folder (default: a new temp folder)")
-    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,depth,sizes,speed,debug)")
+    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,animated,depth,sizes,speed,debug)")
     ap.add_argument("--quick", action="store_true", help="fewer frames")
     ap.add_argument("--keep-project", action="store_true", help="stay in the test project afterwards")
     ap.add_argument("--headless", action="store_true",

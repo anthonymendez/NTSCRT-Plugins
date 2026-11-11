@@ -235,6 +235,8 @@ OfxStatus paramGetValueAtTime(OfxParamHandle h, OfxTime t, ...) {
         auto hi = p->keys.lower_bound(t);
         if (hi == p->keys.begin()) p->v = hi->second;
         else if (hi == p->keys.end()) p->v = std::prev(hi)->second;
+        else if (hi->first == t) p->v = hi->second;
+        else if (p->type == kOfxParamTypeBoolean || p->type == kOfxParamTypeChoice) p->v = std::prev(hi)->second;  // stepped
         else {
             auto lo = std::prev(hi);
             double a = (t - lo->first) / (hi->first - lo->first);
@@ -260,10 +262,13 @@ OfxStatus paramSetValue(OfxParamHandle h, ...) {
     return s;
 }
 OfxStatus paramSetValueAtTime(OfxParamHandle h, OfxTime t, ...) {
+    Param *p = PA(h);
     va_list ap;
     va_start(ap, t);
-    OfxStatus s = set_value(PA(h), ap);
+    OfxStatus s = set_value(p, ap);
     va_end(ap);
+    if (s == kOfxStatOK && !string_typed(p->type)) p->keys[t] = p->v;  // a keyframe, as hosts do
+    ++p->key_sets;
     return s;
 }
 OfxStatus paramGetNumKeys(OfxParamHandle h, unsigned int *n) {
@@ -273,7 +278,11 @@ OfxStatus paramGetNumKeys(OfxParamHandle h, unsigned int *n) {
 OfxStatus paramGetKeyTime(OfxParamHandle, unsigned int, OfxTime *) { return kOfxStatErrBadIndex; }
 OfxStatus paramGetKeyIndex(OfxParamHandle, OfxTime, int, int *) { return kOfxStatFailed; }
 OfxStatus paramDeleteKey(OfxParamHandle, OfxTime) { return kOfxStatErrBadIndex; }
-OfxStatus paramDeleteAllKeys(OfxParamHandle) { return kOfxStatOK; }
+OfxStatus paramDeleteAllKeys(OfxParamHandle h) {
+    PA(h)->keys.clear();
+    ++PA(h)->key_clears;
+    return kOfxStatOK;
+}
 OfxStatus paramCopy(OfxParamHandle, OfxParamHandle, OfxTime, const OfxRangeD *) { return kOfxStatErrUnsupported; }
 int g_edit_depth = 0;
 OfxStatus paramEditBegin(OfxParamSetHandle, const char *) { ++g_edit_depth; return kOfxStatOK; }

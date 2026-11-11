@@ -375,7 +375,9 @@ NTSC_RELABELS = {
 NTSC_DISPLAY_RANGE = {"bandwidth_scale": (0.125, 3.0), "vertical_scale": (0.125, 3.0)}
 NTSC_CHROMA_SECTION = ["chroma_phase_error", "chroma_phase_noise_intensity",
                        "chroma_delay_horizontal", "chroma_delay_vertical"]
-NTSC_NON_ANIMATABLE = {"random_seed"}  # a seed is structure, not a level
+# Every ntsc-rs setting animates: upstream's timeline keys them all (bools and enums hold
+# until the next key, ints round). Kept for a setting that must not.
+NTSC_NON_ANIMATABLE: set = set()
 
 
 def check_ntsc_house(up: Path):
@@ -431,7 +433,7 @@ def gen_ntsc(S: Schema, up: Path, dump: dict):
         if kind == "group":
             gid = S.group(f"ntsc.{name}", label, parent=group, hint=hint)
             S.param(id=f"ntsc.{name}", group=gid, label=label, hint=hint, type="bool",
-                    default=defaults[name], path=path, animatable=False, enabled_if=enabled_if)
+                    default=defaults[name], path=path, animatable=True, enabled_if=enabled_if)
             for c in d["children"]:
                 emit(c, gid, path)
             return
@@ -440,9 +442,9 @@ def gen_ntsc(S: Schema, up: Path, dump: dict):
         p = dict(id=f"ntsc.{name}", group=group, label=label, hint=hint, path=path,
                  enabled_if=enabled_if, default=num(defaults[name]))
         if kind == "boolean":
-            p.update(type="bool", animatable=False)
+            p.update(type="bool", animatable=True)  # upstream keys hold bools
         elif kind == "enum":
-            p.update(type="choice", animatable=False,
+            p.update(type="choice", animatable=True,
                      options=[{"value": o["index"], "label": o["label"],
                                **({"hint": o["description"]} if o.get("description") else {})}
                               for o in d["options"]])
@@ -499,7 +501,8 @@ def gen_glitch(S: Schema, up: Path):
         p = dict(id=f"glitch.{kw['id']}", group=gid, label=kw["label"], hint=kw["help"],
                  path=f"/glitch/values/{kw['id']}", enabled_if="/glitch/enabled")
         if isinstance(kind, Sym) and kind == ".toggle":
-            p.update(type="bool", default=kw["defaultValue"] >= 0.5, encode="number", animatable=False)
+            # upstream timeline keys hold toggles
+            p.update(type="bool", default=kw["defaultValue"] >= 0.5, encode="number", animatable=True)
         else:
             f = slider_fields(kind)
             p.update(type="float", default=num(kw["defaultValue"]), step=0.001 if f["max"] - f["min"] <= 2 else 0.01,
@@ -843,6 +846,15 @@ def main():
         gen_crop(S, up)
         gen_downscale(S, up)
         n_digital, n_formats = gen_digital(S, up, extra)
+        # A Digital video format names the Downscale preset after itself ("MiniDV
+        # (720px)", upstream applyDigitalFormat): offer those labels too, appended
+        # after "Custom" (options are append-only), so a look with one keeps it.
+        ds = next(p for p in S.params if p["id"] == "downscale.preset")
+        for f in extra.get("digital_formats", []):
+            label = f["applies"]["/downscale/preset"]
+            if all(o["value"] != label for o in ds["options"]):
+                ds["options"].append({"value": label, "label": label, "applies": {"/downscale/width": f["width"]},
+                                      "hint": f"Set by the Digital video format {f['name']}."})
         gen_ntsc(S, up, dump)
         n_glitch = gen_glitch(S, up)
         crt = gen_crt(S, up, src)

@@ -114,9 +114,12 @@ TEST_CASE("groups and params are well formed") {
         CHECK_NOTHROW(ptr(path));
         const json &d = p["default"];
         std::string t = p["type"];
+        // Bools and choices hold for a render, except the ones upstream's timeline keys
+        // (ntsc-rs settings, Glitch toggles: they hold until the next key).
+        const bool timeline_keyed = path.rfind("/ntsc/settings/", 0) == 0 || path.rfind("/glitch/values/", 0) == 0;
         if (t == "bool") {
             CHECK(d.is_boolean());
-            CHECK_FALSE(p["animatable"].get<bool>());
+            CHECK(p["animatable"].get<bool>() == timeline_keyed);
         } else if (t == "int" || t == "float") {
             CHECK(d.is_number());
             if (t == "int") CHECK(d.is_number_integer());
@@ -124,7 +127,7 @@ TEST_CASE("groups and params are well formed") {
             if (p.contains("max")) CHECK(d.get<double>() <= p["max"].get<double>() + 1e-9);
         } else if (t == "choice") {
             REQUIRE(p["options"].is_array());
-            CHECK_FALSE(p["animatable"].get<bool>());
+            CHECK(p["animatable"].get<bool>() == timeline_keyed);
             bool found = false;
             std::set<std::string> vals;
             for (auto &o : p["options"]) {

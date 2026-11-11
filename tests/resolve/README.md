@@ -49,6 +49,7 @@ timeline's resolution from a script crashed Resolve 21.1.2, so other sizes are m
 | edit | NTSCRT on a Text+ title on the Edit page (default Clip) | the empty area around the title is unchanged; the title changed |
 | order | default look, Digital codec on, Screen Loop on | a fresh instance rendering frames out of order matches sequential frames (mean diff ≤ 0.05) |
 | cli | default look on 8 frames, then every CRT preset | plug-in vs `ntscrt-cli` mean diff ≤ 2 (of 255) |
+| animated | *Glitch pop* chosen from the Preset menu, 40 frames; Horizontal resolution *Arcade*; the *Digital video/MiniDV* entry | the keyed values move over time; plug-in vs `ntscrt-cli --timeline` mean diff ≤ 2, and some frame differs from the frozen look by > 4; Width becomes 384; MiniDV turns Digital video on with Width 720 |
 | depth | 8-bit int, 16-bit int, 16-bit float sources | each within mean 1.5 of the 32-bit float result |
 | sizes | 1279×719, 1080×1920, 321×241 sources inside Fusion | renders, not black, lines up with the bypassed source |
 | speed | 1920×1080, every CRT preset | informational: ms per frame NTSCRT adds |
