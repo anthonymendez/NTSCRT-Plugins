@@ -58,6 +58,15 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   intended look change (tests/golden/README.md).
 - Tests for 16-bit and half-float frames (every alpha value round-trips; NaN, infinities, subnormals and
   out-of-range values come out in range), proxy render scale and crop with a transparent source.
+- Core: `ntscrt_source_frames_needed` tells a host which earlier source frames a render can fetch (Digital video
+  back to its keyframe, Screen Loop's window; none for Glitch or the CRT).
+- OpenFX hosts besides Resolve: the plug-in declares the source frames it reads (getFramesNeeded), passes the
+  source through untouched when every stage is off (isIdentity), says it is best rendered in frame order
+  (sequential render 2), stops fetching earlier frames when the host aborts a render, takes interlaced sources as
+  whole frames and renders both fields of a frame as that frame (a field at t + 0.5 used the next frame), asks the
+  host for RGBA when the source is RGB, and warns when the source has non-square pixels (processed as square).
+- CI: the Final Cut plug-in's Objective-C++ is syntax-checked on macOS against stub FxPlug headers
+  (`fxplug/tests/stubs`), so it is compiled even without the FxPlug SDK secret.
 
 ### Changed
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac
@@ -122,6 +131,16 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   `"screen_loop"`, which Load applies, plus `<name> (Screen Loop).json` while the loop is on).
 - Final Cut (model, unreleased): a look built over a version 1 preset no longer says version 1 (the core
   converted Digital video Quality twice).
+- Final Cut plug-in (not released yet, never run in Final Cut): Screen Loop presets turn the loop on (they
+  rendered nothing); earlier source frames are requested only for Digital video and Screen Loop, as many as they
+  read (Glitch alone asked for 8 per frame); each effect instance has its own renderers and caches (two clips
+  shared history) and parameter generation; looks of earlier frames are read only when something is keyframed and
+  built once per edit (was up to 16 parameter sweeps per frame); degraded frames (CRT shader skipped, a source
+  frame missing) count as rendered and are logged once; an edit drops only the caches it affects; the frame's other
+  tiles reuse its render; `MayRemapTime` is now YES (it reads frames before the output time) and
+  `PixelTransformSupport` says Scale. Like the OpenFX plug-in it now turns animated presets into
+  keyframes, lists the Digital video formats in the Preset menu, applies choice `applies` (Horizontal
+  resolution) and lets keyable menus take keyframes; saved looks carry the Screen Loop settings.
 - macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't
   installed; it now removes both plug-ins and forgets the .pkg installer's receipt.
 - Faster seeks and edits in Resolve with Glitch on (the default): when no parameter is keyframed the plug-in no

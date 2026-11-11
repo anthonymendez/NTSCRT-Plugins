@@ -2,8 +2,10 @@
 //
 // Flow per frame (FxPlug 4):
 //   pluginState:atTime:   read every param at renderTime (and at earlier frames when a
-//                         temporal stage is on), build look/feedback JSON -> RenderState blob
-//   scheduleInputs:       request the effect source at renderTime and N earlier frames
+//                         temporal stage is on and something is keyframed, cached per
+//                         parameter generation), build look/feedback JSON -> RenderState blob
+//   scheduleInputs:       request the effect source at renderTime and the earlier frames the
+//                         stages can read (ntscrt_source_frames_needed, capped by History Frames)
 //   renderDestinationImage: render with ntscrt_render_metal on the host's MTLDevice
 //                         (ntscrt_render_cpu through the IOSurfaces as fallback); earlier
 //                         source frames reach the core through fetch_source.
@@ -22,6 +24,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -74,7 +77,8 @@ void LogLine(const std::string &msg, bool also_nslog = true) {
 
 struct Shared {
     Model model;
-    std::vector<Preset> looks, loops;  // bundled look / Screen Loop presets
+    std::vector<MenuPreset> menu;  // look Preset menu (Model::look_menu: bundled looks, then Digital formats)
+    std::vector<Preset> loops;     // bundled Screen Loop presets
     std::string resource_dir;
 };
 
@@ -112,11 +116,11 @@ const Shared &GetShared() {
         if (ntscrt_create(&ci, &meta) == NTSCRT_OK && meta) {
             json arr = json::parse(ntscrt_bundled_presets_json(meta), nullptr, false);
             if (arr.is_array()) {
-                for (auto &p : arr) {
-                    Preset pr{p.value("name", std::string("?")), p.value("json", json::object())};
-                    (p.value("kind", std::string("look")) == "feedback" ? sh->loops : sh->looks).push_back(std::move(pr));
-                }
+                for (auto &p : arr)
+                    if (p.value("kind", std::string("look")) == "feedback")
+                        sh->loops.push_back({p.value("name", std::string("?")), p.value("json", json::object())});
             }
+            sh->menu = sh->model.look_menu(arr.is_array() ? arr : json::array());
             ntscrt_destroy(meta);
         }
         return sh;
@@ -124,48 +128,134 @@ const Shared &GetShared() {
     return *s;
 }
 
-// Bumped on every parameter change; a pooled instance whose generation differs flushes
-// its temporal caches before rendering (the core validates history only by sampling).
-std::atomic<uint64_t> gParamGeneration{1};
 // Render log bookkeeping (process-wide: one renderer process serves all the plug-in's instances).
 std::atomic<long> gRenders{0};
 std::atomic<size_t> gLastDebugLookHash{0};  // debug logging: the full look only when it changes
+
+// Render calls whose status still wrote a complete (possibly degraded) frame: the CRT shader
+// skipped (ERR_MISSING_RESOURCE / ERR_GPU) or an earlier source frame missing. ntscrt.h.
+inline bool FrameWritten(ntscrt_status s) {
+    return s == NTSCRT_OK || s == NTSCRT_ERR_GPU || s == NTSCRT_ERR_MISSING_RESOURCE || s == NTSCRT_ERR_SOURCE_UNAVAILABLE;
+}
 
 // One ntscrt instance renders one frame at a time; FxPlug renders on several threads.
 struct Slot {
     ntscrt_instance *inst = nullptr;
     __strong id<MTLDevice> device;
     __strong id<MTLCommandQueue> queue;
-    uint64_t generation = 0;
+    uint32_t pending_flush = 0;                     // caches to drop before the next render (InstanceState::m)
     std::unordered_map<int64_t, size_t> look_hash;  // frame -> hash of looks seen when rendered
+    ~Slot() {
+        if (inst) ntscrt_destroy(inst);
+    }
 };
 
-class Pool {
-public:
+// The whole frame a tiled render produced, so the frame's other tiles copy from it instead of
+// rendering the frame again (FxPlug may split the output into tiles despite NeedsFullBuffer).
+struct WholeFrame {
+    bool valid = false;
+    int64_t frame = 0;
+    size_t look = 0;
+    uint64_t device = 0;
+    int width = 0, height = 0;
+    ntscrt_pixel_format format = NTSCRT_RGBA8;
+    std::vector<uint8_t> cpu;  // CPU path: top row first, width * bpp per row
+    __strong id<MTLTexture> tex;  // Metal path: top row first
+    bool matches(int64_t f, size_t l, uint64_t d, int w, int h, ntscrt_pixel_format fmt) const {
+        return valid && frame == f && look == l && device == d && width == w && height == h && format == fmt;
+    }
+};
+
+// State of one effect instance (one NTSCRTPlugIn object): its own ntscrt instances (render
+// history and caches belong to one clip), its parameter generation and look cache.
+struct InstanceState {
+    std::mutex m;  // slots, free, last_warning
+    std::vector<std::unique_ptr<Slot>> slots;
+    std::vector<Slot *> free;
+    std::string last_warning;  // degraded-frame message logged
+    std::atomic<uint64_t> generation{1};  // bumped by every look-changing parameter change
+
+    // pluginState: looks of other frames, valid for one generation and keyframe layout.
+    std::mutex look_m;
+    uint64_t look_gen = 0, keys_sig = 0, keys_sig_gen = 0;
+    int keys_checks = 0;
+    std::map<std::pair<int64_t, int32_t>, std::string> looks;  // CMTime (value, timescale) -> look JSON
+
+    std::mutex tile_m;  // held while a tiled render produces / copies a whole frame
+    WholeFrame whole;
+
     Slot *acquire(id<MTLDevice> device) {
         {
-            std::lock_guard<std::mutex> l(m_);
-            auto &v = free_[device.registryID];
-            if (!v.empty()) { Slot *s = v.back(); v.pop_back(); return s; }
+            std::lock_guard<std::mutex> l(m);
+            for (size_t i = 0; i < free.size(); ++i) {
+                if (free[i]->device.registryID == device.registryID) {
+                    Slot *s = free[i];
+                    free.erase(free.begin() + ptrdiff_t(i));
+                    return s;
+                }
+            }
         }
-        auto *s = new Slot;
+        auto s = std::make_unique<Slot>();
         s->device = device;
         s->queue = [device newCommandQueue];
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_METAL, (__bridge void *)device,
                               (__bridge void *)s->queue, GetShared().resource_dir.c_str()};
-        if (ntscrt_create(&ci, &s->inst) != NTSCRT_OK || !s->inst) { delete s; return nullptr; }
-        return s;
+        if (!s->queue || ntscrt_create(&ci, &s->inst) != NTSCRT_OK || !s->inst) return nullptr;
+        std::lock_guard<std::mutex> l(m);
+        slots.push_back(std::move(s));
+        return slots.back().get();
     }
     void release(Slot *s) {
-        std::lock_guard<std::mutex> l(m_);
-        free_[s->device.registryID].push_back(s);
+        std::lock_guard<std::mutex> l(m);
+        free.push_back(s);
     }
-
-private:
-    std::mutex m_;
-    std::map<uint64_t, std::vector<Slot *>> free_;
+    // Every slot drops `mask` before its next render (a slot may be rendering right now).
+    void flush(uint32_t mask) {
+        if (!mask) return;
+        {
+            std::lock_guard<std::mutex> l(m);
+            for (auto &s : slots) s->pending_flush |= mask;
+        }
+        std::lock_guard<std::mutex> t(tile_m);
+        whole.valid = false;
+    }
+    uint32_t take_pending(Slot *s) {
+        std::lock_guard<std::mutex> l(m);
+        const uint32_t p = s->pending_flush;
+        s->pending_flush = 0;
+        return p;
+    }
 };
-Pool &GetPool() { static Pool *p = new Pool; return *p; }
+
+// Core caches a change of host parameter `pid` can invalidate (0 = none). Mirrors the OpenFX
+// plug-in's cache_mask (ofx/ntscrt_ofx.cpp). `keyed`: the parameter has keyframes.
+uint32_t CacheMask(const Model &m, uint32_t pid, bool keyed) {
+    switch (pid) {
+    case kPresetMenu:
+    case kLoadPreset:
+    case kSavePreset:
+    case kHistoryFrames:
+    case kDebugLogging:
+    case kOpenLogs:
+    case kTopGroup:
+    case kExtrasGroup: return 0;  // presets apply their values as edits of the params below
+    case kScreenLoopMenu:
+    case kBaseFeedback: return NTSCRT_CACHE_SCREENLOOP;
+    default: break;
+    }
+    const Param *p = m.find_host(pid);
+    if (!p) return NTSCRT_CACHE_ALL;  // the seed, the base look, groups, anything unknown
+    if (p->feedback) return NTSCRT_CACHE_SCREENLOOP;
+    uint32_t mask = NTSCRT_CACHE_SCREENLOOP;  // Screen Loop recomputes earlier frames through every stage
+    const size_t slash = p->pointer.find('/', 1);
+    const std::string top = p->pointer.substr(1, slash == std::string::npos ? std::string::npos : slash - 1);
+    if (top == "crop" || top == "alpha" || top == "downscale") mask |= NTSCRT_CACHE_DIGITAL | NTSCRT_CACHE_CRT;
+    else if (top == "digital") mask |= NTSCRT_CACHE_DIGITAL;
+    else if (top == "shader") mask |= NTSCRT_CACHE_CRT;
+    else if (top == "glitch") mask |= keyed ? NTSCRT_CACHE_GLITCH : 0u;  // the receiver re-checks unkeyed edits
+    else if (top != "ntsc") mask = NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE;
+    return mask;
+}
 
 // ---- IOSurface <-> ntscrt_image --------------------------------------------
 // C-style casts: these SDK option types may be enums, which C++ won't build from ints implicitly.
@@ -263,12 +353,17 @@ NSError *MakeError(NSInteger code, NSString *msg) {
 @implementation NTSCRTPlugIn {
     id<PROAPIAccessing> _apiManager;
     BOOL _applying;  // suppress re-entrant parameterChanged while we set values
+    // This effect instance's renderers, caches and generation. Apple doesn't state that one
+    // plug-in object serves exactly one effect instance, but addParameters / properties are
+    // documented per instance; two objects never share render history this way.
+    std::shared_ptr<InstanceState> _state;
 }
 
 - (nullable instancetype)initWithAPIManager:(id<PROAPIAccessing>)newApiManager {
     self = [super init];
     if (self) {
         _apiManager = newApiManager;
+        _state = std::make_shared<InstanceState>();
         (void)GetShared();
     }
     return self;
@@ -277,7 +372,13 @@ NSError *MakeError(NSInteger code, NSString *msg) {
 - (BOOL)properties:(NSDictionary *_Nonnull *_Nonnull)properties error:(NSError **)error {
     (void)error;
     *properties = @{
-        kFxPropertyKey_MayRemapTime : @NO,
+        // Temporal stages (Digital video, Screen Loop) read source frames before the output
+        // time (scheduleInputs); Apple: "may try to sample its input image(s) at any time
+        // other than the output time" (default YES).
+        kFxPropertyKey_MayRemapTime : @YES,
+        // Only scaling is handled (render scale = FxImageTile.scaleX); Apple's documented
+        // default is ScaleTranslate, so say it.
+        kFxPropertyKey_PixelTransformSupport : @(kFxPixelTransform_Scale),
         // whole-frame processing: NTSC/CRT stages are not tileable
         kFxPropertyKey_NeedsFullBuffer : @YES,
         // noise / glitches animate with time even when params are static
@@ -304,7 +405,7 @@ NSError *MakeError(NSInteger code, NSString *msg) {
     ok &= [api startParameterSubGroup:@"NTSCRT" parameterID:kTopGroup parameterFlags:PF(kFxParameterFlag_DEFAULT)];
     ok &= [api startParameterSubGroup:@"Preset & timing" parameterID:kExtrasGroup parameterFlags:PF(kFxParameterFlag_DEFAULT)];
     NSMutableArray *looks = [NSMutableArray arrayWithObject:@"(Custom)"];
-    for (const auto &p : sh.looks) [looks addObject:@(p.name.c_str())];
+    for (const auto &p : sh.menu) [looks addObject:@(p.name.c_str())];
     ok &= [api addPopupMenuWithName:@"Preset" parameterID:kPresetMenu defaultValue:0 menuEntries:looks parameterFlags:fixed];
     ok &= [api addPushButtonWithName:@"Load Preset…" parameterID:kLoadPreset selector:@selector(loadPresetPressed) parameterFlags:PF(kFxParameterFlag_DEFAULT)];
     ok &= [api addPushButtonWithName:@"Save Preset…" parameterID:kSavePreset selector:@selector(savePresetPressed) parameterFlags:PF(kFxParameterFlag_DEFAULT)];
@@ -353,7 +454,7 @@ NSError *MakeError(NSInteger code, NSString *msg) {
             NSMutableArray *entries = [NSMutableArray array];
             for (const auto &o : p.options) [entries addObject:@(o.label.c_str())];
             ok &= [api addPopupMenuWithName:name parameterID:p.host_id defaultValue:UInt32(d.get<int64_t>())
-                                menuEntries:entries parameterFlags:PF(bits | uint32_t(kFxParameterFlag_NOT_ANIMATABLE))];
+                                menuEntries:entries parameterFlags:flags];  // keyable when the schema says so
             break;
         }
         case Kind::Color:
@@ -467,11 +568,166 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     const Model &m = GetShared().model;
     _applying = YES;
     [set setStringParameterValue:@(preset.dump().c_str()) toParameter:feedback ? kBaseFeedback : kBaseLook];
-    for (const auto &[id, v] : m.host_values_from_preset(preset, feedback)) {
-        if (const Param *p = m.find_host(id)) SetHostValue(set, *p, v, t);
+    if (feedback) {
+        for (const auto &[id, v] : m.host_values_from_preset(preset, true))
+            if (const Param *p = m.find_host(id)) SetHostValue(set, *p, v, t);
+    } else {
+        [self applyLookPreset:preset atTime:t];
+    }
+    if (feedback) {
+        // Bundled Screen Loop files have no "enabled" (upstream only saves loops that are on), so
+        // the model writes the schema default (off) and the loop would render nothing: choosing
+        // or loading a loop turns it on (as the OpenFX plug-in does, ofx/ofx_params.cpp).
+        for (const Param &p : m.params)
+            if (p.feedback && p.pointer == "/enabled" && !value_at(preset, "/enabled").is_boolean())
+                SetHostValue(set, p, json(true), t);
     }
     _applying = NO;
-    gParamGeneration.fetch_add(1);
+    _state->generation.fetch_add(1);
+    _state->flush(feedback ? NTSCRT_CACHE_SCREENLOOP : (NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE));
+}
+
+// The effect's timing: host frame rate, one frame, its first frame and length in frames
+// (0 = unknown), from FxTimingAPI_v4. Keyframe times use startTimeForEffect's base, which is
+// assumed to be the one set*Value:atTime: takes (unverified, see README).
+- (void)effectFps:(double *)fps frame:(CMTime *)frameDur start:(CMTime *)start frames:(int64_t *)frames {
+    *fps = 30.0;
+    *frameDur = CMTimeMake(1, 30);
+    *start = kCMTimeZero;
+    *frames = 0;
+    id<FxTimingAPI_v4> timing = [_apiManager apiForProtocol:@protocol(FxTimingAPI_v4)];
+    if (!timing) return;
+    const NSUInteger num = [timing timelineFpsNumeratorForEffect:self], den = [timing timelineFpsDenominatorForEffect:self];
+    if (num > 0 && den > 0) {
+        *fps = double(num) / double(den);
+        *frameDur = CMTimeMake(int64_t(den), int32_t(num));
+    }
+    [timing startTimeForEffect:start];
+    CMTime dur = kCMTimeZero;
+    [timing durationTimeForEffect:&dur];
+    if (CMTIME_IS_NUMERIC(dur) && CMTimeGetSeconds(dur) > 0)
+        *frames = int64_t(std::llround(CMTimeGetSeconds(dur) * *fps));
+}
+
+// A look preset replaces the look: every look parameter presets set loses its keyframes; an
+// animated preset (upstream timeline keys, Model::preset_keys) then gets host keyframes from the
+// effect's first frame, one pass after another until the effect ends (at most kMaxKeyedFrames).
+// FxKeyframeAPI_v3's addKeyframe carries no value: a keyframe is added at the time, then the
+// value is set there. Called under _applying.
+- (void)applyLookPreset:(const json &)preset atTime:(CMTime)t {
+    id<FxParameterSettingAPI_v5> set = [_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
+    id<FxKeyframeAPI_v3> keys = [_apiManager apiForProtocol:@protocol(FxKeyframeAPI_v3)];
+    const Model &m = GetShared().model;
+    auto channels = [&](const Param &p) -> NSUInteger {
+        NSUInteger c = p.kind == Kind::Color ? 3 : 1;
+        if (keys) {
+            NSUInteger n = 0;
+            if ([keys channelCount:&n forParameter:p.host_id] == nil && n > 0) c = n;
+        }
+        return c;
+    };
+    if (keys) {
+        for (const Param &p : m.params) {
+            if (p.feedback || !p.in_presets || !p.animatable) continue;
+            for (NSUInteger c = 0, n = channels(p); c < n; ++c) [keys removeAllKeyframesForParameter:p.host_id andChannel:c];
+        }
+    }
+    double fps = 30;
+    CMTime fd = CMTimeMake(1, 30), start = kCMTimeZero;
+    int64_t frames = 0;
+    [self effectFps:&fps frame:&fd start:&start frames:&frames];
+    const PresetKeys pk = m.preset_keys(preset, fps, frames);
+    if (!pk.animated() || !keys) {
+        for (const auto &[id, v] : m.host_values_from_preset(preset, false))
+            if (const Param *p = m.find_host(id)) SetHostValue(set, *p, v, t);
+        if (pk.animated()) LogLine("animated preset applied without keyframes: FxKeyframeAPI_v3 unavailable");
+        return;
+    }
+    size_t keyed = 0;
+    for (const auto &[id, entries] : pk.keys) {
+        const Param *p = m.find_host(id);
+        if (!p || entries.empty()) continue;
+        if (entries.size() == 1) {  // holds still: a value, no keyframes
+            SetHostValue(set, *p, entries.front().second, t);
+            continue;
+        }
+        const bool stepped = p->kind == Kind::Bool || p->kind == Kind::Choice;
+        const NSUInteger nch = channels(*p);
+        for (const auto &[n, v] : entries) {
+            const CMTime tk = CMTimeAdd(start, CMTimeMultiply(fd, int32_t(n)));
+            FxKeyframe k{};
+            k.version = kFxKeyframe_CurrentVersion;
+            k.time = tk;
+            k.segmentStyle = stepped ? kFxKeyframeSegmentStyle_Constant : kFxKeyframeSegmentStyle_Linear;
+            for (NSUInteger c = 0; c < nch; ++c) [keys addKeyframe:&k toParameter:p->host_id andChannel:c];
+            SetHostValue(set, *p, v, tk);
+            ++keyed;
+        }
+    }
+    std::ostringstream o;
+    o << "animated preset: " << pk.pass << " frames per pass, " << pk.frames << " frames keyed, " << keyed << " keyframes";
+    LogLine(o.str(), false);
+}
+
+// Writes host values (a Digital video format, a choice option's "applies") at time t.
+- (void)applyHostValues:(const std::map<uint32_t, json> &)vals atTime:(CMTime)t {
+    if (vals.empty()) return;
+    id<FxParameterSettingAPI_v5> set = [_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
+    if (!set) return;
+    const Model &m = GetShared().model;
+    const BOOL was = _applying;
+    _applying = YES;
+    for (const auto &[id, v] : vals)
+        if (const Param *p = m.find_host(id)) SetHostValue(set, *p, v, t);
+    _applying = was;
+    _state->generation.fetch_add(1);
+    _state->flush(NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
+}
+
+// A user edit of schema parameter `pid`: a choice option with "applies" writes its values
+// (Horizontal resolution sets the Width); a hand edit of a value a chosen option set demotes
+// that choice to the option that sets nothing ("Custom"). Mirrors the OpenFX plug-in.
+- (void)applyChoiceEffectsOf:(UInt32)pid atTime:(CMTime)t {
+    id<FxParameterRetrievalAPI_v6> get = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
+    if (!get) return;
+    const Model &m = GetShared().model;
+    const Param *edited = m.find_host(pid);
+    if (!edited) return;
+    const json ev = GetHostValue(get, m, *edited, t);
+    if (edited->kind == Kind::Choice) [self applyHostValues:m.option_host_values(*edited, ev) atTime:t];
+    std::map<uint32_t, json> demote;
+    for (const Param &c : m.params) {
+        if (&c == edited || c.kind != Kind::Choice) continue;
+        bool has = false;
+        for (const auto &o : c.options) has |= !o.applies.is_null();
+        if (!has) continue;
+        if (auto d = m.demoted_choice(c, GetHostValue(get, m, c, t), *edited, ev)) demote[c.host_id] = *d;
+    }
+    [self applyHostValues:demote atTime:t];
+}
+
+// Does host parameter `pid` have keyframes (FxKeyframeAPI_v3, channel 0)? Unknown = yes.
+- (BOOL)parameterIsKeyed:(UInt32)pid {
+    id<FxKeyframeAPI_v3> keys = [_apiManager apiForProtocol:@protocol(FxKeyframeAPI_v3)];
+    if (!keys) return YES;
+    NSUInteger n = 0;
+    if ([keys keyframeCount:&n forParameter:pid andChannel:0] != nil) return YES;
+    return n > 0;
+}
+
+// Hash of the keyframe counts of every animatable parameter (0 = nothing keyframed anywhere,
+// so every frame has the current look). ~0 when the keyframe API is unavailable / errors.
+- (uint64_t)keyframeSignature {
+    id<FxKeyframeAPI_v3> keys = [_apiManager apiForProtocol:@protocol(FxKeyframeAPI_v3)];
+    if (!keys) return ~uint64_t(0);
+    uint64_t sig = 0;
+    for (const Param &p : GetShared().model.params) {
+        if (!p.animatable) continue;  // created NOT_ANIMATABLE
+        NSUInteger n = 0;
+        if ([keys keyframeCount:&n forParameter:p.host_id andChannel:0] != nil) return ~uint64_t(0);
+        if (n) sig = (sig ^ (uint64_t(p.host_id) << 32 | uint32_t(n))) * 0x100000001B3ull + 1;
+    }
+    return sig;
 }
 
 - (BOOL)parameterChanged:(UInt32)paramID atTime:(CMTime)time error:(NSError **)error {
@@ -486,16 +742,27 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
         }
         return YES;
     }
-    gParamGeneration.fetch_add(1);
+    // Drop only the caches this parameter can affect (the OpenFX plug-in does the same).
+    const uint32_t mask = CacheMask(GetShared().model, paramID, [self parameterIsKeyed:paramID]);
+    if (mask) {
+        _state->generation.fetch_add(1);
+        _state->flush(mask);
+    }
     if (_applying) return YES;
     id<FxParameterRetrievalAPI_v6> get = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
     const Shared &sh = GetShared();
     if (get && paramID == kPresetMenu) {
         int idx = GetInt(get, kPresetMenu, time, 0);
-        if (idx >= 1 && size_t(idx) <= sh.looks.size()) [self applyPreset:sh.looks[size_t(idx - 1)].data feedback:false atTime:time];
+        if (idx >= 1 && size_t(idx) <= sh.menu.size()) {
+            const MenuPreset &mp = sh.menu[size_t(idx - 1)];
+            if (mp.format) [self applyHostValues:sh.model.applies_host_values(mp.data) atTime:time];  // base look unchanged
+            else [self applyPreset:mp.data feedback:false atTime:time];
+        }
     } else if (get && paramID == kScreenLoopMenu) {
         int idx = GetInt(get, kScreenLoopMenu, time, 0);
         if (idx >= 2 && size_t(idx - 2) < sh.loops.size()) [self applyPreset:sh.loops[size_t(idx - 2)].data feedback:true atTime:time];
+    } else if (sh.model.find_host(paramID)) {
+        [self applyChoiceEffectsOf:paramID atTime:time];
     }
     [self updateParameterStatesAtTime:time];
     return YES;
@@ -523,10 +790,14 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
         [action startAction:strongSelf];
         CMTime t = [action currentTime];
         [strongSelf applyPreset:j feedback:fb atTime:t];
+        const bool with_loop = !fb && j.contains("screen_loop") && j["screen_loop"].is_object() &&
+                               j["screen_loop"].value("kind", std::string()) == "ntscrt-video-feedback";
+        if (with_loop) [strongSelf applyPreset:j["screen_loop"] feedback:true atTime:t];
         id<FxParameterSettingAPI_v5> set = [strongSelf->_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
         strongSelf->_applying = YES;
         if (fb) [set setIntValue:1 toParameter:kScreenLoopMenu atTime:t];  // "(Custom)" = on, base from file
         else [set setIntValue:0 toParameter:kPresetMenu atTime:t];          // "(Custom)"
+        if (with_loop) [set setIntValue:1 toParameter:kScreenLoopMenu atTime:t];
         strongSelf->_applying = NO;
         [strongSelf updateParameterStatesAtTime:t];
         [action endAction:strongSelf];
@@ -539,7 +810,9 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     if (!action || !get) return;
     // Host called us: the parameter APIs are valid right now.
     Built b = BuildAt(get, [action currentTime]);
-    std::string look = b.look.dump(2);
+    json saved = b.look;
+    if (b.feedback) saved["screen_loop"] = *b.feedback;  // Load applies it (upstream ignores the key)
+    std::string look = saved.dump(2);
     std::string loop = b.feedback ? b.feedback->dump(2) : std::string();
     dispatch_async(dispatch_get_main_queue(), ^{
         NSSavePanel *panel = [NSSavePanel savePanel];
@@ -605,20 +878,84 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     CMTime offset = CMTimeSubtract(tl, startTL);
     st.frame = std::max<int64_t>(0, frame_from_offset(offset.value, offset.timescale, frameDur.value, frameDur.timescale));
 
+    InstanceState &S = *_state;
+    const uint64_t gen = S.generation.load();
     Built now = BuildAt(get, renderTime);
     st.look = now.look.dump();
     st.feedback = now.feedback ? now.feedback->dump() : std::string();
     st.seed = uint64_t(std::max(0, GetInt(get, kSeed, renderTime, 0)));
     BOOL debug = NO;
     st.debug = [get getBoolValue:&debug fromParameter:kDebugLogging atTime:renderTime] && debug;
-    if (needs_history(now.look, now.feedback)) {
+
+    // Earlier source frames: only what the stages that read them (Digital video back to its
+    // keyframe, Screen Loop's window) can fetch, capped by "History Frames". Glitch and the
+    // CRT read only looks, so they schedule nothing extra.
+    {
+        ntscrt_render_args ra{};
+        ra.frame_index = st.frame;
+        ra.fps = st.fps;
+        ra.look_json = st.look.c_str();
+        ra.feedback_json = st.feedback.empty() ? nullptr : st.feedback.c_str();
+        ra.seed = st.seed;
+        int64_t first = st.frame;
+        if (ntscrt_source_frames_needed(&ra, &first) != NTSCRT_OK) first = st.frame;
         const int want = std::clamp(GetInt(get, kHistoryFrames, renderTime, 8), 0, kMaxHistory);
-        st.history = int(std::min<int64_t>(want, st.frame));
-        for (int k = 1; k <= std::min(st.history, kMaxPastLooks); ++k) {
-            CMTime tk = CMTimeSubtract(renderTime, CMTimeMultiply(frameDur, k));
-            std::string lk = BuildAt(get, tk).look.dump();
-            if (lk != st.look) st.past_looks[st.frame - k] = std::move(lk);
+        st.history = int(std::clamp<int64_t>(st.frame - first, 0, want));
+    }
+
+    // Looks of earlier frames (Glitch replays its receiver, Digital its stream): only when some
+    // parameter is keyframed (otherwise every frame has this look and look_at answers NULL),
+    // and each built once per parameter generation (playback reuses the previous frames').
+    if (needs_history(now.look, now.feedback) && st.frame > 0) {
+        uint64_t sig = 0;
+        bool recheck = false;
+        {
+            std::lock_guard<std::mutex> l(S.look_m);
+            // Keyframe layout: re-read after any parameter change and every 24 frames (an edit
+            // the host doesn't report through parameterChanged).
+            recheck = S.keys_sig_gen != gen || ++S.keys_checks >= 24;
+            if (recheck) S.keys_checks = 0;
+            sig = S.keys_sig;
         }
+        if (recheck) {
+            sig = [self keyframeSignature];  // a sweep over XPC: outside the lock
+            std::lock_guard<std::mutex> l(S.look_m);
+            S.keys_sig = sig;
+            S.keys_sig_gen = gen;
+        }
+        if (sig != 0) {
+            auto key = [](CMTime t) { return std::make_pair(int64_t(t.value), int32_t(t.timescale)); };
+            {
+                std::lock_guard<std::mutex> l(S.look_m);
+                if (S.look_gen != gen || S.keys_sig != sig || S.looks.size() > 1024) {
+                    S.looks.clear();
+                    S.look_gen = gen;
+                }
+                S.looks[key(renderTime)] = st.look;
+            }
+            for (int k = 1; k <= std::min<int64_t>(kMaxPastLooks, st.frame); ++k) {
+                const CMTime tk = CMTimeSubtract(renderTime, CMTimeMultiply(frameDur, k));
+                std::string lk;
+                {
+                    std::lock_guard<std::mutex> l(S.look_m);
+                    auto it = S.looks.find(key(tk));
+                    if (it != S.looks.end()) lk = it->second;
+                }
+                if (lk.empty()) {
+                    lk = BuildAt(get, tk).look.dump();
+                    std::lock_guard<std::mutex> l(S.look_m);
+                    if (S.look_gen == gen) S.looks[key(tk)] = lk;
+                }
+                if (lk != st.look) st.past_looks[st.frame - k] = std::move(lk);
+            }
+        }
+    }
+    if (st.debug) {
+        std::ostringstream o;
+        o << "debug state frame=" << st.frame << " renderTime=" << renderTime.value << '/' << renderTime.timescale
+          << " timeline=" << tl.value << '/' << tl.timescale << " effectStart=" << start.value << '/' << start.timescale
+          << " history=" << st.history << " past_looks=" << st.past_looks.size();
+        LogLine(o.str(), false);
     }
     const std::string bytes = st.serialize();
     *pluginState = [NSData dataWithBytes:bytes.data() length:bytes.size()];
@@ -630,7 +967,7 @@ static std::optional<RenderState> ParseState(NSData *d) {
     return RenderState::parse(std::string((const char *)d.bytes, d.length));
 }
 
-- (BOOL)scheduleInputs:(NSArray *_Nullable *_Nullable)inputImageRequests
+- (BOOL)scheduleInputs:(NSArray<FxImageTileRequest *> *_Nullable *_Nullable)inputImageRequests
        withPluginState:(NSData *)pluginState
                 atTime:(CMTime)renderTime
                  error:(NSError **)error {
@@ -706,20 +1043,23 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
         return NO;
     }
     FxImageTile *src = sourceImages[0];
+    InstanceState &S = *_state;
     id<MTLDevice> device = [NTSCRTMetal deviceForRegistryID:destinationImage.deviceRegistryID];
-    Slot *slot = device ? GetPool().acquire(device) : nullptr;
+    Slot *slot = device ? S.acquire(device) : nullptr;
     if (!slot) { if (outError) *outError = MakeError(kFxError_ThirdPartyDeveloperStart + 1, @"cannot create ntscrt instance"); return NO; }
 
-    // Flush temporal caches after any parameter / keyframe change.
-    const uint64_t gen = gParamGeneration.load();
+    // Caches this instance's parameter changes invalidated (only those: CacheMask), plus all
+    // temporal ones when a frame rendered before now has a different look (a keyframe edit the
+    // host didn't report).
     size_t h = std::hash<std::string>{}(st->look) ^ (std::hash<std::string>{}(st->feedback) << 1);
     for (const auto &[f, s] : st->past_looks) h ^= std::hash<std::string>{}(s) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2) + size_t(f);
+    uint32_t flush = S.take_pending(slot);
     auto seen = slot->look_hash.find(st->frame);
-    if (slot->generation != gen || (seen != slot->look_hash.end() && seen->second != h)) {
-        ntscrt_flush_caches(slot->inst);
+    if (seen != slot->look_hash.end() && seen->second != h) {
+        flush |= NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE;
         slot->look_hash.clear();
-        slot->generation = gen;
     }
+    if (flush) ntscrt_flush_caches_mask(slot->inst, flush);
     if (slot->look_hash.size() > 4096) slot->look_hash.clear();
     slot->look_hash[st->frame] = h;
 
@@ -729,6 +1069,8 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
     ra.fps = st->fps;
     ra.look_json = st->look.c_str();
     ra.feedback_json = st->feedback.empty() ? nullptr : st->feedback.c_str();
+    // With kFxPixelTransform_Scale the pixel transform is a pure scale; scaleX is documented as
+    // "the horizontal scale value" (its relation to pixelTransform isn't spelled out).
     ra.render_scale = destinationImage.scaleX > 0 ? destinationImage.scaleX : 1.0;
     ra.seed = st->seed;
     ra.fetch_source = FetchSource;
@@ -738,86 +1080,146 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
     ra.user = &ctx;
 
     const auto t0 = std::chrono::steady_clock::now();
-    bool used_cpu = false;
+    bool used_cpu = false, reused = false;
     const bool src_up = BottomUp(src), dst_up = BottomUp(destinationImage);
     const bool full = SameRect(destinationImage.tilePixelBounds, destinationImage.imagePixelBounds);
     int ox = 0, oy = 0;
     TileOffset(destinationImage, dst_up, &ox, &oy);
+    // A tile of a larger output: the frame's first tile renders the whole frame into S.whole,
+    // the others (other threads wait here) copy from it.
+    std::unique_lock<std::mutex> tile_lock(S.tile_m, std::defer_lock);
+    if (!full) tile_lock.lock();
 
     ntscrt_status status = NTSCRT_ERR_INTERNAL;
+    bool metal_done = false;  // the frame (maybe degraded) reached the destination texture
     NSString *why = nil;
     @autoreleasepool {
         id<MTLTexture> inTex = [src metalTextureForDevice:device];
         id<MTLTexture> outTex = [destinationImage metalTextureForDevice:device];
         id<MTLCommandBuffer> cb = [slot->queue commandBuffer];
         if (inTex && outTex && cb) {
-            id<MTLTexture> coreIn = inTex, coreOut = outTex;
-            if (src_up) {  // core works top row first
-                coreIn = [NTSCRTMetal scratchTextureForDevice:device format:inTex.pixelFormat width:inTex.width height:inTex.height];
-                if (coreIn) {
-                    // ntscrt_render_metal reads its source on its own command buffers, so the
-                    // flipped copy must have executed before the call.
-                    [NTSCRTMetal encodeCopyFrom:inTex to:coreIn offsetX:0 offsetY:0 flipY:YES commandBuffer:cb];
-                    [cb commit];
-                    [cb waitUntilCompleted];
-                    cb = [slot->queue commandBuffer];
+            const ntscrt_pixel_format wf = NTSCRT_RGBA8;  // key only: texture formats are compared below
+            if (!full && S.whole.tex && S.whole.matches(st->frame, h, device.registryID, int(inTex.width), int(inTex.height), wf) &&
+                S.whole.tex.pixelFormat == outTex.pixelFormat) {
+                [NTSCRTMetal encodeCopyFrom:S.whole.tex to:outTex offsetX:ox offsetY:oy flipY:dst_up commandBuffer:cb];
+                status = NTSCRT_OK;
+                reused = true;
+            } else {
+                id<MTLTexture> coreIn = inTex, coreOut = outTex;
+                if (src_up) {  // core works top row first
+                    coreIn = [NTSCRTMetal scratchTextureForDevice:device format:inTex.pixelFormat width:inTex.width height:inTex.height];
+                    if (coreIn) {
+                        // ntscrt_render_metal reads its source on its own command buffers, so the
+                        // flipped copy must have executed before the call.
+                        [NTSCRTMetal encodeCopyFrom:inTex to:coreIn offsetX:0 offsetY:0 flipY:YES commandBuffer:cb];
+                        [cb commit];
+                        [cb waitUntilCompleted];
+                        cb = [slot->queue commandBuffer];
+                    }
+                }
+                if (dst_up || !full || outTex.pixelFormat != inTex.pixelFormat) {
+                    coreOut = [NTSCRTMetal scratchTextureForDevice:device format:outTex.pixelFormat width:inTex.width height:inTex.height];
+                }
+                if (coreIn && coreOut && cb) {
+                    status = ntscrt_render_metal(slot->inst, &ra, (__bridge void *)coreIn, (__bridge void *)coreOut, (__bridge void *)cb);
+                    if (FrameWritten(status) && coreOut != outTex) {
+                        // dst row r <- core row (flip ? H-1-(oy+r) : oy+r)
+                        [NTSCRTMetal encodeCopyFrom:coreOut to:outTex offsetX:ox offsetY:oy flipY:dst_up commandBuffer:cb];
+                    }
+                    if (FrameWritten(status) && !full) {
+                        S.whole = WholeFrame{};
+                        S.whole.valid = true;
+                        S.whole.frame = st->frame;
+                        S.whole.look = h;
+                        S.whole.device = device.registryID;
+                        S.whole.width = int(inTex.width);
+                        S.whole.height = int(inTex.height);
+                        S.whole.format = wf;
+                        S.whole.tex = coreOut;
+                    }
                 }
             }
-            if (dst_up || !full || outTex.pixelFormat != inTex.pixelFormat) {
-                coreOut = [NTSCRTMetal scratchTextureForDevice:device format:outTex.pixelFormat width:inTex.width height:inTex.height];
+            if (cb) {
+                [cb commit];
+                [cb waitUntilCompleted];
             }
-            if (coreIn && coreOut) {
-                status = ntscrt_render_metal(slot->inst, &ra, (__bridge void *)coreIn, (__bridge void *)coreOut, (__bridge void *)cb);
-                if ((status == NTSCRT_OK || status == NTSCRT_ERR_SOURCE_UNAVAILABLE) && coreOut != outTex) {
-                    // dst row r <- core row (flip ? H-1-(oy+r) : oy+r)
-                    [NTSCRTMetal encodeCopyFrom:coreOut to:outTex offsetX:ox offsetY:oy flipY:dst_up commandBuffer:cb];
-                }
+            if (cb.error) {
+                why = cb.error.localizedDescription;
+                status = NTSCRT_ERR_GPU;
+                if (!full) S.whole.valid = false;  // under tile_m
+            } else {
+                metal_done = FrameWritten(status);
             }
-            [cb commit];
-            [cb waitUntilCompleted];
-            if (cb.error) { why = cb.error.localizedDescription; status = NTSCRT_ERR_GPU; }
         }
-        if (status != NTSCRT_OK && status != NTSCRT_ERR_SOURCE_UNAVAILABLE && !why) why = @(ntscrt_last_error(slot->inst));
+        if (!metal_done && !why) why = @(ntscrt_last_error(slot->inst));
     }
 
-    if (status != NTSCRT_OK && status != NTSCRT_ERR_SOURCE_UNAVAILABLE) {
+    if (!metal_done) {
         // CPU fallback straight through the IOSurfaces.
         static std::atomic<bool> logged{false};
         if (!logged.exchange(true))
             LogLine("Metal path failed (" + std::to_string(int(status)) + ": " + std::string(why ? why.UTF8String : "") +
                     "), using CPU (logged once)");
         used_cpu = true;
-        SurfaceView in, out;
-        if (in.lock((__bridge IOSurfaceRef)src.ioSurface, true, src_up) &&
-            out.lock((__bridge IOSurfaceRef)destinationImage.ioSurface, false, dst_up)) {
-            if (full && out.img.width == in.img.width && out.img.height == in.img.height) {
-                status = ntscrt_render_cpu(slot->inst, &ra, &in.img, &out.img);
-            } else {  // tile: render the whole frame, copy the tile's rows
-                const int bpp = out.img.format == NTSCRT_RGBA32F ? 16 : (out.img.format == NTSCRT_RGBA16F || out.img.format == NTSCRT_RGBA16) ? 8 : 4;
-                std::vector<uint8_t> tmp(size_t(in.img.width) * in.img.height * bpp);
-                ntscrt_image whole{in.img.width, in.img.height, ptrdiff_t(in.img.width) * bpp, out.img.format, tmp.data()};
-                status = ntscrt_render_cpu(slot->inst, &ra, &in.img, &whole);
-                if (status == NTSCRT_OK || status == NTSCRT_ERR_SOURCE_UNAVAILABLE) {
-                    // out.img rows are top-first (row_bytes sign handles orientation); its tile starts at
-                    // image row top-first = (H - tileTop) for bottom-left tiles, or oy otherwise.
-                    const FxRect t = destinationImage.tilePixelBounds, im = destinationImage.imagePixelBounds;
-                    const int top_row = dst_up ? (im.top - t.top) : oy;
-                    for (int r = 0; r < out.img.height && top_row + r < whole.height; ++r) {
-                        const uint8_t *s = tmp.data() + size_t(top_row + r) * whole.row_bytes + size_t(ox) * bpp;
-                        uint8_t *d = static_cast<uint8_t *>(out.img.data) + ptrdiff_t(r) * out.img.row_bytes;
-                        memcpy(d, s, size_t(std::min(out.img.width, whole.width - ox)) * bpp);
+        @autoreleasepool {
+            SurfaceView in, out;
+            if (in.lock((__bridge IOSurfaceRef)src.ioSurface, true, src_up) &&
+                out.lock((__bridge IOSurfaceRef)destinationImage.ioSurface, false, dst_up)) {
+                if (full && out.img.width == in.img.width && out.img.height == in.img.height) {
+                    status = ntscrt_render_cpu(slot->inst, &ra, &in.img, &out.img);
+                } else {  // tile: the whole frame once (S.whole), then this tile's rows
+                    const int bpp = out.img.format == NTSCRT_RGBA32F ? 16 : (out.img.format == NTSCRT_RGBA16F || out.img.format == NTSCRT_RGBA16) ? 8 : 4;
+                    WholeFrame &W = S.whole;
+                    if (W.matches(st->frame, h, device.registryID, in.img.width, in.img.height, out.img.format) && !W.cpu.empty()) {
+                        status = NTSCRT_OK;
+                        reused = true;
+                    } else {
+                        W = WholeFrame{};
+                        W.cpu.assign(size_t(in.img.width) * in.img.height * bpp, 0);
+                        ntscrt_image whole{in.img.width, in.img.height, ptrdiff_t(in.img.width) * bpp, out.img.format, W.cpu.data()};
+                        status = ntscrt_render_cpu(slot->inst, &ra, &in.img, &whole);
+                        if (FrameWritten(status)) {
+                            W.valid = true;
+                            W.frame = st->frame;
+                            W.look = h;
+                            W.device = device.registryID;
+                            W.width = in.img.width;
+                            W.height = in.img.height;
+                            W.format = out.img.format;
+                        }
+                    }
+                    if (FrameWritten(status)) {
+                        // out.img rows are top-first (row_bytes sign handles orientation); its tile starts at
+                        // image row top-first = (H - tileTop) for bottom-left tiles, or oy otherwise.
+                        const FxRect t = destinationImage.tilePixelBounds, im = destinationImage.imagePixelBounds;
+                        const int top_row = dst_up ? (im.top - t.top) : oy;
+                        const ptrdiff_t wrb = ptrdiff_t(W.width) * bpp;
+                        for (int r = 0; r < out.img.height && top_row + r < W.height; ++r) {
+                            const uint8_t *s = W.cpu.data() + size_t(top_row + r) * size_t(wrb) + size_t(ox) * bpp;
+                            uint8_t *d = static_cast<uint8_t *>(out.img.data) + ptrdiff_t(r) * out.img.row_bytes;
+                            memcpy(d, s, size_t(std::max(0, std::min(out.img.width, W.width - ox))) * bpp);
+                        }
                     }
                 }
+            } else {
+                why = @"unsupported IOSurface pixel format";
+                status = NTSCRT_ERR_INVALID_ARG;
             }
-        } else {
-            why = @"unsupported IOSurface pixel format";
         }
     }
-    const std::string err = ntscrt_last_error(slot->inst);  // copy before another thread reuses the slot
-    GetPool().release(slot);
+    if (tile_lock.owns_lock()) tile_lock.unlock();
+    const std::string err = reused ? std::string() : std::string(ntscrt_last_error(slot->inst));  // before another thread reuses the slot
+    S.release(slot);
     const long n = ++gRenders;
-    const bool failed = status != NTSCRT_OK && status != NTSCRT_ERR_SOURCE_UNAVAILABLE;
-    if (n <= 20 || n % 500 == 0 || st->debug || failed) {
+    const bool failed = !FrameWritten(status);
+    const bool degraded = !failed && status != NTSCRT_OK;
+    bool new_warning = false;
+    {
+        std::lock_guard<std::mutex> l(S.m);
+        if (degraded && err != S.last_warning) new_warning = true;
+        if (!failed) S.last_warning = degraded ? err : std::string();
+    }
+    if (n <= 20 || n % 500 == 0 || st->debug || failed || new_warning) {
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         const FxRect ib = destinationImage.imagePixelBounds, tb = destinationImage.tilePixelBounds;
         std::ostringstream o;
@@ -826,10 +1228,13 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
           << " tile=" << (tb.right - tb.left) << 'x' << (tb.top - tb.bottom)
           << " srcfmt=" << uint32_t(IOSurfaceGetPixelFormat((__bridge IOSurfaceRef)src.ioSurface))
           << " flip=" << int(src_up) << int(dst_up) << " history=" << st->history << " path=" << (used_cpu ? "cpu" : "metal")
-          << " status=" << int(status) << (failed ? " error=" + err : std::string()) << " ms=" << ms;
+          << (reused ? " tile-from-cache" : "") << " status=" << int(status)
+          << (failed ? " error=" + err : degraded ? " degraded=" + err : std::string()) << " ms=" << ms;
         if (st->debug) {
             const size_t lh = std::hash<std::string>{}(st->look) ^ (std::hash<std::string>{}(st->feedback) << 1);
-            o << " seed=" << st->seed << " past_looks=" << st->past_looks.size() << " look#" << std::hex << lh << std::dec;
+            o << " seed=" << st->seed << " past_looks=" << st->past_looks.size() << " flushed=" << flush
+              << " scaleX=" << destinationImage.scaleX << " scaleY=" << destinationImage.scaleY
+              << " pixelAspect=" << destinationImage.pixelAspect << " look#" << std::hex << lh << std::dec;
             if (gLastDebugLookHash.exchange(lh) != lh) {
                 o << " look=" << st->look;
                 if (!st->feedback.empty()) o << " feedback=" << st->feedback;
@@ -837,13 +1242,15 @@ static void TileOffset(FxImageTile *dst, bool bottom_up, int *ox, int *oy) {
         } else if (n == 1) {
             o << " look=" << st->look.substr(0, 400) << (st->look.size() > 400 ? "..." : "");
         }
-        LogLine(o.str(), failed);  // per-frame detail stays out of the system log
+        LogLine(o.str(), failed || new_warning);  // per-frame detail stays out of the system log
     }
-    if (status != NTSCRT_OK && status != NTSCRT_ERR_SOURCE_UNAVAILABLE) {
+    if (failed) {
         if (outError) *outError = MakeError(kFxError_ThirdPartyDeveloperStart + 2,
                                             [NSString stringWithFormat:@"NTSCRT render failed (%d): %s %@", int(status), err.c_str(), why ?: @""]);
         return NO;
     }
+    // Degraded (CRT shader skipped, a source frame missing): the frame is complete, so it's a
+    // success; the reason was logged once above.
     return YES;
 }
 

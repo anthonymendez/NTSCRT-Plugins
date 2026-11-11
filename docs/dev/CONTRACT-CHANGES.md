@@ -136,3 +136,10 @@ migrated). NTSCRT-Plugins extensions, all optional:
   on, BGRA8 otherwise (8-bit hosts and the bypass are unchanged; `NTSCRT_OUTPUT_8BIT=1` forces BGRA8). The CRT
   stage's supersample target follows its output's format. `core/src/pixel_convert.h`: `from_rgba16f()`.
   `facade/alpha_merge` saturates RGB (a no-op for 8-bit input).
+- 2026-11-11, agent H (host protocol), `ntscrt.h`: appended `ntscrt_source_frames_needed(args, &first)` (ABI
+  version unchanged: additive). Reason: hosts that declare an effect's inputs up front (OpenFX getFramesNeeded,
+  FxPlug scheduleInputs) need the source frames the temporal stages can fetch, which only the core knows (Digital
+  video's stream back to its last real keyframe, datamosh-dropped keys included; Screen Loop's window start).
+  Pure function of look/feedback/fps/frame/seed. Implementation in the new `core/src/frames_needed.cpp` (one line
+  added to `core/CMakeLists.txt`) and `digital::first_source_frame` (new `core/stages/digital/frames_needed.h`,
+  defined in `digital.cpp` next to the renderer it mirrors).

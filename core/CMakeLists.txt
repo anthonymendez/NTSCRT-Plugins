@@ -4,6 +4,7 @@
 add_library(ntscrt_core STATIC
   src/ntscrt.cpp
   src/pixel_convert.cpp
+  src/frames_needed.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/embedded_schema.cpp)
 
 ntscrt_embed_text(${CMAKE_CURRENT_BINARY_DIR}/embedded_schema.cpp
