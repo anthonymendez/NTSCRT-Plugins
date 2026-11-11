@@ -28,16 +28,25 @@ NTSCRT.app                                   wrapper app (required by FxPlug 4)
     loops), *Seed*, *History Frames*, *Debug Logging* and *Open Logs Folder*;
   - `pluginState:` evaluates every parameter at the render time and builds the
     look JSON (and Screen Loop JSON); with a temporal stage on (Digital, Glitch,
-    Screen Loop) it also evaluates the look at up to 16 earlier frames (`look_at`);
-  - `scheduleInputs:` requests the effect source at the render time plus
-    *History Frames* earlier frames; those reach the core through `fetch_source`;
+    Screen Loop) and some parameter keyframed (`FxKeyframeAPI_v3`) it also evaluates
+    the look at up to 16 earlier frames (`look_at`), each built once per parameter
+    generation and reused by the next frames;
+  - `scheduleInputs:` requests the effect source at the render time plus the earlier
+    frames the stages read (`ntscrt_source_frames_needed`: Digital video back to its
+    keyframe, Screen Loop's window; none for Glitch or the CRT), at most *History
+    Frames*; those reach the core through `fetch_source`;
   - renders the whole frame (`kFxPropertyKey_NeedsFullBuffer`) with
     `ntscrt_render_metal` on the host's `MTLDevice` (one `ntscrt_instance` +
     command queue per concurrent render per GPU), falling back to
-    `ntscrt_render_cpu` directly on the IOSurfaces;
-  - any parameter change bumps a generation counter; an instance whose
-    generation is stale (or that sees a different look for a frame it rendered
-    before, e.g. after a keyframe edit) calls `ntscrt_flush_caches` first.
+    `ntscrt_render_cpu` directly on the IOSurfaces; renderers, caches and the
+    parameter generation belong to one effect instance (one `NTSCRTPlugIn` object);
+    a tiled output renders the frame once and copies the other tiles from it;
+  - a parameter change drops only the core caches it can affect
+    (`ntscrt_flush_caches_mask`, the same mapping as the OpenFX plug-in); a frame
+    rendered before that now has a different look (an unreported keyframe edit)
+    drops every temporal cache;
+  - `NTSCRT_ERR_GPU` / `NTSCRT_ERR_MISSING_RESOURCE` / `NTSCRT_ERR_SOURCE_UNAVAILABLE`
+    still wrote a complete frame: the render succeeds and the reason is logged once.
 - `model/` — host-independent parameter model (stable IDs, value conversion,
   look assembly, plug-in state). Built and unit-tested on every platform
   (`test_fxplug_model`).
@@ -154,4 +163,30 @@ exactly this. This project avoids every likely cause we know of:
   (logged once per process).
 - Parameter retrieval at earlier times for `look_at` is capped at 16 frames
   (each costs a full parameter sweep over XPC); older frames reuse the current look.
+  Whether `FxKeyframeAPI_v3` may be called from `pluginState:` (it's used there to
+  skip earlier looks when nothing is keyframed; an error counts as "keyframed").
+- Time: the effect's frame number is `timelineTime:fromInputTime:(renderTime)` minus
+  the same conversion of `startTimeForEffect:`. Apple says FCP's input and timeline
+  times are independent and that `startTimeForEffect:` is relative to the clip's
+  native start, but not which base `renderTime` uses; with *Debug Logging* on the
+  log prints the raw times (`debug state ...`) to check this.
+- One plug-in object per effect instance: per-instance render history relies on it
+  (Apple documents `addParametersWithError:` and `properties:` per instance, not the
+  object's lifetime).
+- Render scale comes from `FxImageTile.scaleX` with `kFxPixelTransform_Scale` declared;
+  Apple's docs recommend the pixel transforms and don't spell out how `scaleX` relates
+  to them (the debug log prints scaleX / scaleY / pixelAspect).
+- `addPushButtonWithName:parameterID:selector:parameterFlags:`: Apple's reference shows
+  the selector as `SEL *`; the code passes `@selector(...)` like Apple's samples.
+- CI's macOS job compiles the sources against `tests/stubs/FxPlug/FxPlugSDK.h`, a stub
+  of the documented API (names and types from Apple's reference, placeholder values):
+  it catches typos and C++ errors, not differences from the real SDK.
+
+Checked against Apple's FxPlug 4 reference (developer.apple.com/documentation/professional_video_applications,
+2026-11-11): `protocolNames` = `FxFilter` is right for an FxTileableEffect (the plist article: it "still
+requires either FxFilter or FxGenerator"); `FxImageTile.imageOrigin` / `kFxImageOrigin_BOTTOM_LEFT` exist
+(Motion bottom-left, FCP top-left); `scaleX`, `requestError`, `ioSurface`, `deviceRegistryID`,
+`metalTextureForDevice:` and `kFxImageTileRequestSourceEffectClip` are spelled as used;
+`kFxPropertyKey_MayRemapTime` was wrong (NO, though the effect reads earlier frames; now YES) and
+`kFxPropertyKey_PixelTransformSupport` was missing (now Scale).
 - Whether hosts call `parameterChanged` while *opening* a project. If they do for the Preset / Screen Loop menus, the chosen preset would be re-applied over the saved values; move preset application behind a "last applied" hidden param if that shows up.

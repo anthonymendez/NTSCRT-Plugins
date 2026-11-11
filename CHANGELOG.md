@@ -79,6 +79,14 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   unchanged.
 
 ### Fixed
+- Final Cut plug-in (not released yet, never run in Final Cut): Screen Loop presets turn the loop on (they
+  rendered nothing); earlier source frames are requested only for Digital video and Screen Loop, as many as they
+  read (Glitch alone asked for 8 per frame); each effect instance has its own renderers and caches (two clips
+  shared history) and parameter generation; looks of earlier frames are read only when something is keyframed and
+  built once per edit (was up to 16 parameter sweeps per frame); degraded frames (CRT shader skipped, a source
+  frame missing) count as rendered and are logged once; an edit drops only the caches it affects; the frame's other
+  tiles reuse its render; `MayRemapTime` is now YES (it reads frames before the output time) and
+  `PixelTransformSupport` says Scale.
 - macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't
   installed; it now removes both plug-ins and forgets the .pkg installer's receipt.
 - Faster seeks and edits in Resolve with Glitch on (the default): when no parameter is keyframed the plug-in no
