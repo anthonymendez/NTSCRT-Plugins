@@ -20,6 +20,10 @@ makes the same animations through `ntscrt-cli` when Resolve isn't available.*
 
 **[Presets gallery](docs/PRESETS-GALLERY.md)**: an animated GIF of every bundled preset, Digital video format, Screen Loop preset and CRT shader.
 
+More: [what changed](CHANGELOG.md) · [testing guide and bug reports](docs/TESTING.md) ·
+[environment variables](docs/ENVIRONMENT.md) · [contributing](CONTRIBUTING.md) · [security](SECURITY.md) ·
+[releasing](docs/RELEASING.md) · [licence](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+
 ## Install
 
 | App | Supported |
@@ -88,9 +92,18 @@ same line to update. You can read them first: [install.ps1](install.ps1), [insta
 | | Windows (`install.ps1`) | macOS (`install.sh`) |
 |---|---|---|
 | Uninstall | `-Uninstall` | `--uninstall` |
-| Specific release | `-Version v0.3.0` | `--version v0.3.0` |
+| Specific release | `-Version vX.Y.Z` | `--version vX.Y.Z` |
 | Only one app | (Resolve only on Windows) | `--resolve` or `--fcp` |
 | Install a zip you downloaded | `-From path\to.zip` | `--from path/to.zip` |
+
+The scripts check each download against the release's `SHA256SUMS` file and refuse to install a zip that
+isn't listed in it or doesn't match. Releases before v0.4.1 (v0.3.0, v0.4.0) have no `SHA256SUMS`, so
+`-Version` / `--version` refuse them: download that release's zip and install it with `-From` / `--from`,
+which skips the check. `-Version` / `--version` take `latest` (the default) or a tag like `v1.2.3`.
+
+**Release candidates** (`vX.Y.Z-rc.N` tags, marked *Pre-release* on the releases page) are for testers:
+the installers and `latest` skip them. Install one with `-Version` / `--version` and its tag (for example
+`v1.2.0-rc.1`); run the install line again without it to go back to the latest release.
 
 Passing options to a one-liner:
 ```powershell
@@ -120,20 +133,28 @@ or `NTSCRT-FxPlug-macos-universal.zip`.
 Run the installer or the same install line again (on Windows, also **Update NTSCRT plug-in** in the Start
 menu): it installs the latest release over the old one and prints both versions.
 Your projects keep their effects and settings. See what changed in [CHANGELOG.md](CHANGELOG.md). In Resolve, the
-installed version shows in the effect's **Presets → Version** field. A specific version: `-Version v0.3.0`
-(Windows) or `--version v0.3.0` (macOS).
+installed version shows in the effect's **Presets → Version** field. A specific version: `-Version vX.Y.Z`
+(Windows) or `--version vX.Y.Z` (macOS), see the options above.
 
 ### Using it
 
-- **Preset** menu: pick a look (Clean VHS, Medium VHS, V Hold glitch, Webcam…). It sets every control (and
-  replaces their keyframes), and you can then tweak and keyframe any of them. Animated looks (*Glitch pop*,
-  *15 second glitches*, …) arrive as keyframes that play the NTSCRT app's animation from the clip's first frame,
-  looping until its end. The **Digital video/…** entries (Webcam (2005), MiniDV, CD-ROM…) are upstream's formats:
-  they switch Digital video on and set its controls and the Downscale width, leaving the rest of the look alone.
+- **Preset** menu: pick a look (Clean VHS, Medium VHS, V Hold glitch, Webcam…). It sets every look control
+  and removes their keyframes (undo brings them back); you can then tweak and keyframe any of them. Animated
+  looks (*Glitch pop*, *15 second glitches*, …) arrive as keyframes that play the NTSCRT app's animation from
+  the clip's first frame, looping until its end. The **Digital video/…** entries (Webcam (2005), Video call,
+  MiniDV, Early web video, CD-ROM (Video 1), Datamosh) are upstream's digital formats: they switch Digital
+  video on and set its controls and the Downscale width, leaving the rest of the look alone.
+- **Downscale → Horizontal resolution** sets the Width (SNES 256, VGA 320, …); typing a Width of your own
+  switches it to *Custom*.
 - **Screen Loop preset**: video feedback (a camcorder filming its own TV).
 - **Load preset… / Save preset…**: preset files are the same JSON as the NTSCRT app, and the NTSC section is
-  compatible with ntsc-rs presets. Saved files also carry the Screen Loop settings (and, while Screen Loop is
-  on, a second file `<name> (Screen Loop).json` for the NTSCRT app).
+  compatible with ntsc-rs presets. Save writes the look at the playhead (keyframes aren't saved). Saved
+  files also carry the Screen Loop settings (and, while Screen Loop is on, a second file
+  `<name> (Screen Loop).json` for the NTSCRT app). Presets saved by older versions load as they looked.
+- With every stage switched off (Crop, Downscale, Digital video, NTSC, Glitch, CRT, Screen Loop) the effect
+  passes the clip through untouched.
+- **16-bit and float projects** get the CRT shader's output at half-float precision, so its glow and
+  gradients don't band when graded afterwards. The stages before the CRT shader work at 8 bits per channel.
 - Apply it to the clip at its **native resolution**. On a low-res clip in a high-res timeline, the analog artifacts get
   scaled up with the picture.
 - **Titles and clips that don't fill the frame**: *Transparency → Transparent areas* picks how the effect treats
@@ -157,7 +178,10 @@ Testing it for someone, or something's wrong? [docs/TESTING.md](docs/TESTING.md)
 | macOS: "NTSCRT.ofx is damaged / can't be verified" | Run the install line again: it clears the quarantine. For a manual copy, run the `xattr` command above. |
 | Final Cut: effect missing | Open `/Applications/NTSCRT.app` once more and restart Final Cut. In Terminal, `pluginkit -mAvvv -p FxPlug` should list `NTSCRT Renderer`. |
 | Need a log for a bug report | In the effect's *Presets* group, tick **Debug logging**, reproduce the problem (play or render those frames), untick it, then click **Open logs folder** and attach `ntscrt-ofx.log` (Resolve) or `ntscrt-fxplug.log` (Final Cut). Or run `ntscrt_doctor.py` ([docs/TESTING.md](docs/TESTING.md)), which collects it for you. |
-| Picture is black or unchanged | Usually a partial copy: the `shaders/` folder or `librashader` file inside the bundle is missing. Run the install line again. Resolve shows the plugin's error message when it can't render. |
+| Warning "CRT shader '…' unavailable, showing the picture without it" | The CRT shader couldn't load, usually because of a partial copy (the `shaders/` folder or `librashader` file inside the bundle is missing). The effect keeps rendering without the shader and gives the reason once, as a warning on the effect and in the log. Run the install line again. |
+| Picture is black or unchanged | Resolve shows the plug-in's error message when it can't render; send us the log. With every stage off the effect passes the clip through on purpose. |
+| Warning about non-square pixels | The effect processes anamorphic clips as if their pixels were square, so the result is squeezed or stretched. Use square-pixel media for clips you put NTSCRT on. |
+| Resolve uses a lot of memory | Each NTSCRT effect keeps up to 512 MB of recent source frames for Digital video and Screen Loop. Fewer instances, or a smaller budget with the `NTSCRT_SOURCE_CACHE_MB` environment variable ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)), help. |
 
 Building from source instead: see [Build from source](#build-from-source) below, and [fxplug/README.md](fxplug/README.md) for Final Cut.
 
@@ -165,22 +189,27 @@ Building from source instead: see [Build from source](#build-from-source) below,
 
 - **Animated presets are keyframed, not linked.** Choosing *Glitch pop*, *15 second glitches* and the other
   animated looks writes their animation as keyframes (one per frame on each moving control), repeated from the
-  clip's first frame to its end (at most 3600 frames; the last values hold after that). Changing the clip's
-  length or frame rate later doesn't re-time them: choose the preset again. **Save preset…** saves the look
-  at the playhead, not the animation.
-- **Edits and seeks can be slow** with the Glitch, Digital video or Screen Loop stages on: they depend on
-  earlier frames, so the plug-in re-renders those after a jump or a parameter change.
-- **Memory:** the plug-in keeps recent source frames per effect instance, which adds up on 4K timelines with
-  many instances.
-- **8-bit processing:** frames are processed at 8 bits per channel, so 16-bit / float timelines can show
-  banding in smooth gradients after heavy grading on top of the effect.
+  clip's first frame to its end (at most 3600 frames, two minutes at 30 fps; the last values hold after
+  that). Changing the clip's length or frame rate later doesn't re-time them: choose the preset again.
+  **Save preset…** saves the look at the playhead, not the animation.
+- **Seeks can take a moment** with Digital video or Screen Loop on: they depend on earlier frames, so after
+  a jump the plug-in renders those first (Digital video back to its last keyframe, Screen Loop over its
+  length). After a Glitch edit, the Glitch simulation runs again from the clip's first frame.
+- **Memory:** each effect keeps up to 512 MB of recent source frames (`NTSCRT_SOURCE_CACHE_MB` changes it,
+  see [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)), which adds up with many instances.
+- **8 bits before the CRT shader, no HDR:** every stage before the CRT shader works at 8 bits per channel, and
+  values above 1.0 (HDR, super-whites) are clipped. On 16-bit / float timelines only the CRT shader's output is
+  half-float; with the CRT shader off, or without a GPU, the output is 8-bit, so heavy grading on top can show
+  banding.
+- **Non-square pixels** (anamorphic media) are processed as square, with a warning on the effect.
 - **Installers aren't code-signed or notarized** yet (see the extra click under [Install](#install)).
 - **macOS:** the CI runs on a virtual GPU, so the heaviest CRT shader (*sim*) hasn't been run on real Mac
   hardware yet. Reports welcome ([docs/TESTING.md](docs/TESTING.md)).
 - **Final Cut Pro:** not released (see the top of this page).
 
 Bugs and requests: [open an issue](https://github.com/anthonymendez/NTSCRT-Plugins/issues/new/choose); the bug
-form asks for the `ntscrt_doctor.py` report.
+form asks for the `ntscrt_doctor.py` report. Security problems: please report them privately, see
+[SECURITY.md](SECURITY.md).
 
 ## Credits
 All of the look comes from [NTSCRT](https://github.com/finnmckenty/NTSCRT) by Finn McKenty (MIT),
@@ -209,8 +238,7 @@ nlohmann/json, stb, doctest, the Slang compiler) are downloaded at configure tim
 
 ### Windows
 Visual Studio 2022 (or its Build Tools) with the C++ workload. Use a **short build folder** such as
-`C:uild
-tscrt`: deep paths break MSBuild and the Rust builds.
+`C:\build\ntscrt`: deep paths break MSBuild and the Rust builds.
 ```
 cmake -S . -B C:/build/ntscrt -G "Visual Studio 17 2022" -A x64
 cmake --build C:/build/ntscrt --config Release -- -m
