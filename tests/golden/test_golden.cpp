@@ -132,7 +132,7 @@ TEST_CASE("golden: ntscrt_core matches upstream crt-smoke references") {
         ra.render_scale = 1.0;
         const ntscrt_status st = ntscrt_render_cpu(inst, &ra, &si, &di);
         INFO("entry ", id, " look ", look_s);
-        REQUIRE_MESSAGE(st == NTSCRT_OK, "render failed: ", ntscrt_last_error(inst));
+        REQUIRE_MESSAGE(st == NTSCRT_OK, "render failed: ", std::string(ntscrt_last_error(inst)));
 
         Image diff;
         DiffStats s = compare_rgb(out, ref, &diff);

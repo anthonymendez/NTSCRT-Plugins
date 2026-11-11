@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "Golden references: each entry is rendered by UPSTREAM NTSCRT's crt-smoke (golden workflow, macOS) into ref/<id>.png + ref/<id>.json, and by ntscrt_core in test_golden. Inputs live in upstream/NTSCRT/TestAssets. Output size = input size. Editing this file re-runs the golden workflow; commit the artifact's files under tests/golden/ref/. Only setups where crt-smoke renders what the app renders are comparable: the chain input's height must divide the output height (else the app supersamples, ScanlineGrid, and crt-smoke doesn't), and ntsc must be a full preset (\"default\" = pure ntsc-rs defaults in crt-smoke but the app's house defaults in ntscrt_core). crt-smoke --frame N = ntscrt frame_index N - 1. See docs/TESTING.md.",
+  "note": "Golden references: each entry is rendered by UPSTREAM NTSCRT's crt-smoke (golden workflow, macOS) into ref/<id>.png + ref/<id>.json, and by ntscrt_core in test_golden. Inputs live in upstream/NTSCRT/TestAssets. Output size = input size. Editing this file re-runs the golden workflow; commit the artifact's files under tests/golden/ref/. Only setups where crt-smoke renders what the app renders are comparable: the chain input's height must divide the output height (else the app supersamples, ScanlineGrid, and crt-smoke doesn't), and ntsc must be a full preset (\"default\" = pure ntsc-rs defaults in crt-smoke but the app's house defaults in ntscrt_core). crt-smoke --frame N = ntscrt frame_index N - 1. See docs/TESTING.md. Nearest downscales use an odd ratio (320 -> 107): at an exact even ratio every sample point falls on a texel edge and D3D11 and Metal pick different neighbours (a one-pixel phase difference).",
   "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
   "librashader_commit": "76462c03",
   "default_threshold": 2.0,
@@ -28,11 +28,11 @@
       "frame": 1
     },
     {
-      "id": "gameframe-crt-hyllian-down160nearest",
+      "id": "gameframe-crt-hyllian-down107nearest",
       "input": "game-frame.png",
       "shader": "crt/crt-hyllian.slangp",
       "downscale": {
-        "width": 160,
+        "width": 107,
         "method": "nearest"
       },
       "frame": 1
@@ -78,11 +78,11 @@
       "threshold": 3.0
     },
     {
-      "id": "gameframe-mildvhs-crtglow_gauss-down160nearest-f5",
+      "id": "gameframe-mildvhs-crtglow_gauss-down107nearest-f5",
       "input": "game-frame.png",
       "shader": "crt/crtglow_gauss.slangp",
       "downscale": {
-        "width": 160,
+        "width": 107,
         "method": "nearest"
       },
       "ntsc": {

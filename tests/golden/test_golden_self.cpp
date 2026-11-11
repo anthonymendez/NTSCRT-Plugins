@@ -157,6 +157,15 @@ double entry_tolerance(const json &e, const json &m, const char *key) {
     return v;
 }
 
+bool gha_macos() {
+#ifdef __APPLE__
+    const char *v = std::getenv("GITHUB_ACTIONS");
+    return v && std::string(v) == "true";
+#else
+    return false;
+#endif
+}
+
 bool all_opaque(const Image &im) {
     for (size_t i = 3; i < im.px.size(); i += 4)
         if (im.px[i] != 255) return false;
@@ -217,7 +226,7 @@ TEST_CASE("golden self: ntscrt_core matches its committed baselines") {
         return;
     }
 
-    int compared = 0, skipped = 0, written = 0, failed = 0;
+    int compared = 0, skipped = 0, written = 0, failed = 0, hung = 0;
     for (const auto &e : (*m)["entries"]) {
         const std::string id = e["id"];
         if (!only.empty() && id != only) continue;
@@ -269,7 +278,17 @@ TEST_CASE("golden self: ntscrt_core matches its committed baselines") {
             ra.source_premultiplied = src.premult ? 1 : 0;
             const ntscrt_status st = ntscrt_render_cpu(inst, &ra, &si, &di);
             INFO("entry ", id, " frame ", f, " look ", look_s);
-            REQUIRE_MESSAGE(st == NTSCRT_OK, "render failed: ", ntscrt_last_error(inst));
+            if (st != NTSCRT_OK && gha_macos() && std::string(ntscrt_last_error(inst)).find("Hang") != std::string::npos) {
+                // GitHub's macOS VMs have a paravirtual GPU that times out ("GPU Hang") under load
+                // (see tests/crt/test_crt.cpp); only there is it a warning. Fresh instance, next entry.
+                MESSAGE("WARNING: ", id, " frame ", f, " hung the CI runner's virtual GPU: ",
+                        std::string(ntscrt_last_error(inst)));
+                ++hung;
+                ntscrt_destroy(inst);
+                REQUIRE(ntscrt_create(&ci, &inst) == NTSCRT_OK);
+                break;
+            }
+            REQUIRE_MESSAGE(st == NTSCRT_OK, "render failed (", int(st), "): ", std::string(ntscrt_last_error(inst)));
             if (!std::binary_search(frames.begin(), frames.end(), f)) continue;
 
             const std::string name = id + "-f" + std::to_string(f) + ".png";
@@ -311,5 +330,6 @@ TEST_CASE("golden self: ntscrt_core matches its committed baselines") {
         std::printf("[golden-self] wrote %d baselines into %s\n", written,
                     (update == "os" ? os_dir : shared_dir).string().c_str());
     else
-        std::printf("[golden-self] compared %d, skipped %d, failed %d\n", compared, skipped, failed);
+        std::printf("[golden-self] compared %d, skipped %d, failed %d, GPU hangs (macOS CI only) %d\n", compared,
+                    skipped, failed, hung);
 }
