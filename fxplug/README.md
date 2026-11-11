@@ -3,8 +3,10 @@
 An FxPlug 4 effect for Final Cut Pro 12.4+ and Motion, built on the same
 `ntscrt_core` C ABI as the OpenFX plug-in.
 
-**Status: not released.** It compiles in CI when the FxPlug SDK secret is set (see below), but it has
-not run in Final Cut Pro or Motion yet, and releases don't include it. See
+**Status: not released.** CI syntax-checks the Objective-C++ on every macOS run against stub FxPlug
+headers (`tests/stubs/`), and builds the full plug-in only when the FxPlug SDK secret is set (see below; it
+isn't yet), so the plug-in has never been built against the real SDK, nor run in Final Cut Pro or Motion,
+and releases don't include it. See
 [Not verified yet](#not-verified-yet-no-mac-here-ci-only-compiles-and-inspects-the-bundle).
 
 ## What gets built
@@ -194,6 +196,9 @@ exactly this. This project avoids every likely cause we know of:
 - CI's macOS job compiles the sources against `tests/stubs/FxPlug/FxPlugSDK.h`, a stub
   of the documented API (names and types from Apple's reference, placeholder values):
   it catches typos and C++ errors, not differences from the real SDK.
+- Whether hosts call `parameterChanged` while *opening* a project. If they do for the Preset / Screen Loop
+  menus, the chosen preset would be re-applied over the saved values; move preset application behind a
+  "last applied" hidden param if that shows up.
 
 Checked against Apple's FxPlug 4 reference (developer.apple.com/documentation/professional_video_applications,
 2026-11-11): `protocolNames` = `FxFilter` is right for an FxTileableEffect (the plist article: it "still
@@ -202,4 +207,3 @@ requires either FxFilter or FxGenerator"); `FxImageTile.imageOrigin` / `kFxImage
 `metalTextureForDevice:` and `kFxImageTileRequestSourceEffectClip` are spelled as used;
 `kFxPropertyKey_MayRemapTime` was wrong (NO, though the effect reads earlier frames; now YES) and
 `kFxPropertyKey_PixelTransformSupport` was missing (now Scale).
-- Whether hosts call `parameterChanged` while *opening* a project. If they do for the Preset / Screen Loop menus, the chosen preset would be re-applied over the saved values; move preset application behind a "last applied" hidden param if that shows up.

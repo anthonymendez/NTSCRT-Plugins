@@ -1,6 +1,6 @@
 # Testing NTSCRT on your computer
 
-Thanks for trying NTSCRT. This page covers installing it, a 5-minute manual check in DaVinci Resolve
+Thanks for trying NTSCRT. This page covers installing it, a 10-minute manual check in DaVinci Resolve
 and/or Final Cut Pro, an automatic test run (Resolve Studio), and how to send a debug report if
 anything misbehaves.
 
@@ -15,26 +15,60 @@ Use the installer from the [latest release](https://github.com/anthonymendez/NTS
 
 Then restart Resolve / Final Cut.
 
-## 2. Manual check (5 minutes)
+**Testing a release candidate** (a `vX.Y.Z-rc.N` tag marked *Pre-release* on the
+[releases page](https://github.com/anthonymendez/NTSCRT-Plugins/releases)): the installers and the plain
+install line skip those, so pass the tag to the install line (here `v1.2.0-rc.1`; use the one you were asked
+to test):
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.ps1))) -Version v1.2.0-rc.1
+```
+```bash
+curl -fsSL https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/install.sh | sh -s -- --version v1.2.0-rc.1
+```
+The script checks the download against the release's `SHA256SUMS` and stops if it doesn't match. Running the
+install line again without `-Version` / `--version` goes back to the latest release.
+
+## 2. Manual check (10 minutes)
 **DaVinci Resolve** (free or Studio, 21.1.2 or newer):
 1. Put a video clip on a timeline. *Effects → OpenFX → Filters → NTSCRT*: drag it onto the clip.
    The picture should get the VHS/CRT look within a second or two.
 2. In the Inspector, *Presets → Version* shows the installed version. Pick a few presets
-   (V Hold glitch, Webcam, …) and a few *CRT → Preset* shaders; each should change the look.
-   On a Mac, please include the **sim** CRT preset: it's the heaviest shader and hasn't run on real
+   (V Hold glitch, Webcam, …) and a few *CRT → Shader* choices; each should change the look.
+   On a Mac, please include the **sim** shader: it's the heaviest and hasn't run on real
    Mac hardware yet (CI's virtual GPU times out on it).
-3. Scrub around and play: no black frames, no error banner over the viewer.
-4. Add a *Text+* title on a track above the clip and put NTSCRT on the title. *Transparency →
+3. **Animated preset:** choose *Glitch pop* in *Presets → Preset* and play: the glitch should repeat
+   every 2 seconds until the clip ends, and the NTSC and CRT controls it moves show keyframes. Then choose
+   *Clean VHS*: the keyframes go away and the glitch stops repeating.
+4. **Digital video formats:** choose *Digital video/MiniDV* in the same menu: *Digital video* switches on and
+   *Downscale → Width* becomes 720, the rest of the look stays. Then *Digital video/CD-ROM (Video 1)*: the
+   Microsoft Video 1 codec (*Digital video → Compression → Codec: Block colors*): a 12 fps picture made of
+   flat colour blocks, 240 pixels wide. The *CD-ROM (low quality)* preset is the full look built on it.
+5. **Horizontal resolution:** *Downscale → Horizontal resolution → Arcade (384px)* sets the Width to 384;
+   typing another Width switches it to *Custom*.
+6. **Everything off:** untick *Crop*, *Downscale before shader*, *Digital video*, *NTSC signal*, *Glitch*,
+   *CRT shader* and *Screen Loop*: the picture should be exactly the original clip.
+7. Scrub around and play: no black frames, no error banner over the viewer. Jump far into the clip with
+   Digital video on: the first frame there may take a moment, the next ones shouldn't.
+8. Add a *Text+* title on a track above the clip and put NTSCRT on the title. *Transparency →
    Transparent areas*: **Clip to element** keeps the effect inside the letters; **Let effect spill**
    lets ghosting and glow spread over the video underneath.
-5. Render a few seconds on the Deliver page and play the file back.
+9. **Float precision** (optional, Fusion page): add a *Background* tool with *Type: Horizontal* gradient from
+   black to white, *Image → Depth: float32*, then NTSCRT (CRT shader *Glow (Gauss)*) and a *Brightness
+   Contrast* tool with a high *Gain*. The glow should stay smooth; with *Depth: int8* on the Background it
+   shows steps.
+10. **Debug logging:** in *Presets*, tick **Debug logging**, play a few frames, untick it, then click
+    **Open logs folder**: Explorer / Finder opens the folder with `ntscrt-ofx.log`, which has one detailed line
+    per frame you played.
+11. Render a few seconds on the Deliver page and play the file back.
 
 **Final Cut Pro** (12.4 or newer, macOS). Only if the release you installed includes the Final Cut plug-in.
 The Final Cut plug-in hasn't been released yet: releases without it have no `NTSCRT-FxPlug-macos-universal.zip`
 on their release page, and the installer says "skipping Final Cut Pro". Skip this part then.
 1. Effects browser → *NTSCRT* → drag onto a clip. The look should appear in the viewer.
-2. Change a few parameters and the preset; scrub; render/share a few seconds.
-3. Put it on a title as in step 4 above.
+2. Change a few parameters and the preset (include an animated one such as *Glitch pop*, and a
+   *Digital video/…* format); scrub; render/share a few seconds. Check the picture isn't upside down.
+3. Put it on a title as in step 8 above.
+4. *Debug Logging* and *Open Logs Folder* as in step 10 (the log is `ntscrt-fxplug.log`, see below).
 
 Note anything that looks wrong, along with what you did just before.
 
@@ -54,9 +88,12 @@ python3 ntscrt_doctor.py --resolve-tests
 irm https://raw.githubusercontent.com/anthonymendez/NTSCRT-Plugins/main/scripts/ntscrt_doctor.py -OutFile ntscrt_doctor.py
 python ntscrt_doctor.py --resolve-tests
 ```
-- `--resolve-tests` runs about 10 automatic checks inside DaVinci Resolve: alpha, the Edit page,
-  frame order, every CRT preset, bit depths, sizes and speed. This takes about 5 minutes. **Quit Resolve
-  first:** the doctor starts Resolve without a window (headless), runs the tests and quits it again.
+- `--resolve-tests` runs about ten automatic checks inside DaVinci Resolve: alpha, the Edit page,
+  frame order, every CRT shader against the reference renderer, bit depths, sizes, speed and debug logging
+  (and, from v0.4.1 on, animated presets and 16-bit / float precision). It downloads the test suite of the
+  version you have installed. This takes about 5 minutes (`--quick` renders fewer frames). **Quit Resolve
+  first:** the doctor starts Resolve without a window (headless), runs the tests and quits it again (with
+  Resolve open it tests in it instead: don't touch Resolve until it finishes).
   It needs **Resolve Studio** with *Preferences → System → General → External scripting using: Local*.
   On free Resolve, or for Final Cut only, leave `--resolve-tests` off.
 - Either way it checks the install and collects logs into
