@@ -103,3 +103,15 @@ migrated). NTSCRT-Plugins extensions, all optional:
   sources). Look gains `"alpha": {"mode": "clip"|"spill"}` (schema `alpha.mode`, `"preset": false`, a new
   optional schema field hosts honour when applying presets). OFX sets output premultiplication = source's;
   FxPlug passes premultiplied. `facade/alpha_merge` params gained `mode`, `premult` (32-byte cbuffer).
+
+- 2026-11-11, agent D (responsiveness), `ntscrt.h`: appended `ntscrt_flush_caches_mask(inst, bits)` with
+  `NTSCRT_CACHE_SOURCE|DIGITAL|GLITCH|CRT|SCREENLOOP|ALL` (ABI version unchanged: additive), so hosts flush only
+  what an edit can affect. Documented that `NTSCRT_ERR_GPU`, `NTSCRT_ERR_MISSING_RESOURCE` and
+  `NTSCRT_ERR_SOURCE_UNAVAILABLE` returns still wrote a complete degraded frame (CRT shader skipped, or CPU stages
+  after a lost GPU) and that a render returning OK clears `ntscrt_last_error`. Hosts should show those as a
+  warning, not fail the frame (OFX and ntscrt-cli do; the FxPlug host still treats them as failures).
+- 2026-11-11, agent D, `core/gpu/gpu.h`: `virtual bool Device::lost() const` (default false; D3D11 reports
+  device removal). `core/stages/stages.h`: `Crop::apply(look, ImageBGRA8 &&in, out)` (moves when nothing is cut);
+  `CrtStage::fallback_status()`, `fallback_reason()`, `chain_load_attempts()`. `core/src/pixel_convert.h`: an
+  empty alpha vector means fully opaque. Look history: `FrameContext::look_at` references stay valid for at
+  least 256 further lookups in the same render (stages read them on the spot).

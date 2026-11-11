@@ -12,9 +12,11 @@
 // Cache validity: the per-frame timing settings each checkpoint was built from
 // are remembered (as hashes). Before resuming, the resume frame itself and up
 // to kProbes earlier recorded frames are re-read through ctx.look_at and
-// compared; the first mismatch drops everything from there on. Edits that
-// change only frames between probes can go unnoticed until flush(), so hosts
-// should flush on parameter edits (OFX instanceChanged / FxPlug).
+// compared; the first mismatch drops everything from there on. That catches
+// edits that hold for every frame (unanimated params); edits that change only
+// frames between probes can go unnoticed until flush(), so hosts flush after
+// editing keyframed Glitch values (OFX instanceChanged / FxPlug). Probes sit
+// on whole seconds so they repeat from one render to the next.
 // Owner: agent B.
 #pragma once
 

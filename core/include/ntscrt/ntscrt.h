@@ -49,6 +49,12 @@ typedef enum ntscrt_status {
     NTSCRT_ERR_SOURCE_UNAVAILABLE = 5, /* temporal fetch failed; frame rendered degraded */
     NTSCRT_ERR_INTERNAL = 99
 } ntscrt_status;
+/* Render calls returning NTSCRT_ERR_GPU, NTSCRT_ERR_MISSING_RESOURCE or
+ * NTSCRT_ERR_SOURCE_UNAVAILABLE still wrote a complete, degraded frame to dst
+ * (CRT shader replaced by the plain picture, or CPU stages only after the GPU
+ * was lost); ntscrt_last_error says what is missing. Show it as a warning,
+ * don't fail the frame. Other non-OK statuses leave dst unspecified.
+ * ntscrt_last_error is cleared by a render that returns NTSCRT_OK. */
 
 typedef enum ntscrt_pixel_format {
     NTSCRT_RGBA8 = 0,
@@ -171,6 +177,19 @@ NTSCRT_API ntscrt_status ntscrt_render_metal(ntscrt_instance *inst,
 
 /* Drop cached temporal state (call on seek far away, param reset, purge). */
 NTSCRT_API void ntscrt_flush_caches(ntscrt_instance *inst);
+
+/* Drop only some caches (bits below), e.g. after an edit that can only change
+ * one stage. Source frames are cached by frame, render scale, size, alpha mode
+ * and crop, so edits to those never need NTSCRT_CACHE_SOURCE; the Glitch
+ * receiver checks its own history for edits that apply to every frame alike,
+ * so it only needs flushing when keyframed values change. */
+#define NTSCRT_CACHE_SOURCE     0x01u /* converted + cropped source frames */
+#define NTSCRT_CACHE_DIGITAL    0x02u /* Digital codec state */
+#define NTSCRT_CACHE_GLITCH     0x04u /* Glitch receiver simulation */
+#define NTSCRT_CACHE_CRT        0x08u /* CRT feedback history, failed-preset memo */
+#define NTSCRT_CACHE_SCREENLOOP 0x10u /* Screen Loop history and its CRT */
+#define NTSCRT_CACHE_ALL        0xFFFFFFFFu
+NTSCRT_API void ntscrt_flush_caches_mask(ntscrt_instance *inst, uint32_t which);
 
 /* Human-readable message for the last non-OK status on this instance. */
 NTSCRT_API const char *ntscrt_last_error(ntscrt_instance *inst);

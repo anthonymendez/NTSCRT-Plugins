@@ -18,8 +18,19 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 - A CRT shader that can't load (missing or broken preset, librashader missing) no longer fails every frame and
   retries the load each time: the frame renders without the shader and the reason is shown once (Resolve: a
   persistent warning on the effect, plus the log). `ntscrt-cli` writes such frames and prints a warning.
+- Source-frame cache memory: it kept up to 65 full-size frames per effect with no limit (about 2 GB at UHD with
+  Screen Loop); it now stays within 512 MB per effect (`NTSCRT_SOURCE_CACHE_MB` changes it), dropping the least
+  recently used frames. Frames are also keyed by render scale, size, alpha mode and crop, so switching to proxy
+  or editing the crop never reuses a wrong-size or stale picture.
+- After the GPU device is lost (driver reset, GPU removed) the effect makes a new device and renders the frame
+  again, instead of failing every frame from then on; if that fails it keeps rendering with the CPU stages and
+  says so. Without a GPU, a cropped picture now fills the whole frame (letterboxed) instead of leaving part of it
+  unwritten.
 
 ### Changed
+- Core: identical look JSON is parsed once (the host sends the same string for every frame of an unanimated
+  look), the history of other frames' looks is bounded, upload / output / Glitch textures are reused across
+  frames, and `ntscrt_flush_caches_mask` lets a host drop only the caches an edit can affect.
 - Less work per frame: opaque sources (most video) no longer get a per-pixel alpha buffer, the pixel-format
   conversion loops are specialised per format, and an uncropped picture is moved instead of copied. Output is
   unchanged.
