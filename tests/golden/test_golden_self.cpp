@@ -157,15 +157,6 @@ double entry_tolerance(const json &e, const json &m, const char *key) {
     return v;
 }
 
-bool gha_macos() {
-#ifdef __APPLE__
-    const char *v = std::getenv("GITHUB_ACTIONS");
-    return v && std::string(v) == "true";
-#else
-    return false;
-#endif
-}
-
 bool all_opaque(const Image &im) {
     for (size_t i = 3; i < im.px.size(); i += 4)
         if (im.px[i] != 255) return false;
@@ -278,7 +269,7 @@ TEST_CASE("golden self: ntscrt_core matches its committed baselines") {
             ra.source_premultiplied = src.premult ? 1 : 0;
             const ntscrt_status st = ntscrt_render_cpu(inst, &ra, &si, &di);
             INFO("entry ", id, " frame ", f, " look ", look_s);
-            if (st != NTSCRT_OK && gha_macos() && std::string(ntscrt_last_error(inst)).find("Hang") != std::string::npos) {
+            if (st != NTSCRT_OK && gpu_hang_on_gha_macos(ntscrt_last_error(inst))) {
                 // GitHub's macOS VMs have a paravirtual GPU that times out ("GPU Hang") under load
                 // (see tests/crt/test_crt.cpp); only there is it a warning. Fresh instance, next entry.
                 MESSAGE("WARNING: ", id, " frame ", f, " hung the CI runner's virtual GPU: ",

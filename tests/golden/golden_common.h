@@ -159,4 +159,17 @@ inline std::string env_or(const char *name, const std::string &fallback) {
     return (v && *v) ? std::string(v) : fallback;
 }
 
+// GitHub's macOS runners are VMs with a paravirtual GPU that times out ("GPU Hang") on
+// shader work (tests/crt/test_crt.cpp). Only there is a hung render a warning (the entry
+// is skipped and counted); anywhere else, real hardware included, it fails.
+inline bool gpu_hang_on_gha_macos(const char *error) {
+#ifdef __APPLE__
+    const char *v = std::getenv("GITHUB_ACTIONS");
+    return v && std::string(v) == "true" && error && std::string(error).find("Hang") != std::string::npos;
+#else
+    (void)error;
+    return false;
+#endif
+}
+
 }  // namespace golden

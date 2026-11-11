@@ -85,7 +85,7 @@ TEST_CASE("golden: ntscrt_core matches upstream crt-smoke references") {
     const std::string only = env_or("NTSCRT_GOLDEN_ONLY", "");
     const double default_thr = m->value("default_threshold", 2.0);
 
-    int compared = 0, skipped = 0;
+    int compared = 0, skipped = 0, hung = 0;
     ntscrt_instance *inst = nullptr;
     for (const auto &e : (*m)["entries"]) {
         const std::string id = e["id"];
@@ -132,7 +132,14 @@ TEST_CASE("golden: ntscrt_core matches upstream crt-smoke references") {
         ra.render_scale = 1.0;
         const ntscrt_status st = ntscrt_render_cpu(inst, &ra, &si, &di);
         INFO("entry ", id, " look ", look_s);
-        REQUIRE_MESSAGE(st == NTSCRT_OK, "render failed: ", std::string(ntscrt_last_error(inst)));
+        if (st != NTSCRT_OK && gpu_hang_on_gha_macos(ntscrt_last_error(inst))) {
+            MESSAGE("WARNING: ", id, " hung the CI runner's virtual GPU: ", std::string(ntscrt_last_error(inst)));
+            ++hung;
+            ntscrt_destroy(inst);  // fresh instance for the next entry
+            inst = nullptr;
+            continue;
+        }
+        REQUIRE_MESSAGE(st == NTSCRT_OK, "render failed (", int(st), "): ", std::string(ntscrt_last_error(inst)));
 
         Image diff;
         DiffStats s = compare_rgb(out, ref, &diff);
@@ -150,5 +157,5 @@ TEST_CASE("golden: ntscrt_core matches upstream crt-smoke references") {
     }
     if (inst) ntscrt_destroy(inst);
     if (compared == 0) MESSAGE("no golden references present (", skipped, " entries skipped) - run the 'golden' GitHub workflow and commit its artifact to tests/golden/ref/");
-    std::printf("[golden] compared %d, skipped %d\n", compared, skipped);
+    std::printf("[golden] compared %d, skipped %d, GPU hangs (macOS CI only) %d\n", compared, skipped, hung);
 }
