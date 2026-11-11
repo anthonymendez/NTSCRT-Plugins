@@ -90,6 +90,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   again, instead of failing every frame from then on; if that fails it keeps rendering with the CPU stages and
   says so. Without a GPU, a cropped picture now fills the whole frame (letterboxed) instead of leaving part of it
   unwritten.
+- The plug-in no longer risks hanging when the host unloads it: the Digital video worker threads are
+  stopped when the last NTSCRT instance is deleted, never during unload.
 
 ## [0.4.0] - 2026-11-10
 

@@ -4,6 +4,7 @@
 #include <ntscrt/ntscrt.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <unordered_map>
 
 #include "../stages/digital/fields.h"
+#include "../stages/digital/parallel.h"
 #include "../stages/stages.h"
 #include "embedded_schema.h"
 #include "pixel_convert.h"
@@ -196,6 +198,11 @@ bool init_gpu(ntscrt_instance *inst, std::string &err) {
     return true;
 }
 
+std::atomic<int> &live_instances() {
+    static std::atomic<int> n{0};
+    return n;
+}
+
 bool device_lost(const ntscrt_instance *inst) {
     return inst->dev && (inst->test_lose_device || inst->dev->lost());
 }
@@ -260,10 +267,17 @@ ntscrt_status ntscrt_create(const ntscrt_create_info *info, ntscrt_instance **ou
     std::string err;
     if (!init_gpu(inst.get(), err)) inst->last_error = err;
     *out = inst.release();
+    live_instances().fetch_add(1);
     return NTSCRT_OK;
 }
 
-void ntscrt_destroy(ntscrt_instance *inst) { delete inst; }
+void ntscrt_destroy(ntscrt_instance *inst) {
+    if (!inst) return;
+    delete inst;
+    // The last instance: join the Digital stage's worker threads now, from
+    // ordinary code, rather than ever in a static destructor (DLL unload).
+    if (live_instances().fetch_sub(1) == 1) digital::shutdown_threads();
+}
 
 const char *ntscrt_last_error(ntscrt_instance *inst) { return inst ? inst->last_error.c_str() : ""; }
 

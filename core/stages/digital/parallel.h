@@ -16,6 +16,11 @@ namespace ntscrt::digital {
 // 0 = hardware concurrency. Mainly for tests; safe to call while idle.
 void set_thread_count(int n);
 int thread_count();
+// Joins the worker threads (they start again on the next parallel_for).
+// Call from ordinary code, never from a static destructor / DllMain; the
+// façade calls it when its last instance is destroyed.
+void shutdown_threads();
+bool threads_running();  // for tests
 
 namespace detail {
 using RangeFn = void (*)(void *ctx, int begin, int end);
