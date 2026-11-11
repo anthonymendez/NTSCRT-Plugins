@@ -148,6 +148,13 @@ TEST_CASE("groups and params are well formed") {
         if (p.contains("visible_if")) {
             auto it = all_paths.find(p["visible_if"]["path"].get<std::string>());
             REQUIRE(it != all_paths.end());
+            if (it->second == &p) {
+                // On its own value: the Digital video controls kept from 0.4.0
+                // (shown and written while non-zero, or never).
+                CHECK(p.value("legacy", false));
+                CHECK(p["path"].get<std::string>().rfind("/digital/legacy/", 0) == 0);
+                continue;
+            }
             bool ok = false;
             for (auto &o : (*it->second)["options"]) ok |= o["value"] == p["visible_if"]["equals"];
             CHECK(ok);
@@ -236,6 +243,9 @@ TEST_CASE("bundled presets only use known paths (unknown ones are reported)") {
     std::set<std::string> known;
     for (auto &p : schema()["params"]) known.insert(p["path"].get<std::string>());
     for (auto &[k, v] : schema()["constants"].items()) known.insert(k);
+    // Pre-0.19 Digital video controls: the core migrates them (core/stages/digital/migrate.h).
+    for (const char *k : {"/digital/values/exposure", "/digital/values/black_level", "/digital/values/lens_blur"})
+        known.insert(k);
     std::map<std::string, int> unknown;
     int files = 0;
     for (auto &e : fs::recursive_directory_iterator(fs::path(NTSCRT_SOURCE_DIR) / "presets")) {

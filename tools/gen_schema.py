@@ -509,58 +509,113 @@ def gen_glitch(S: Schema, up: Path):
     return count
 
 
+# Digital video controls of the 0.4.0 plug-ins (upstream before 0.19) that
+# upstream replaced or reinterpreted. Saved projects store params by id, so
+# these ids stay as hidden params written under /digital/legacy only while
+# non-zero (visible_if on their own value: they show up only in old projects
+# that use them); core/stages/digital/migrate.h maps them onto today's
+# controls. Today's Quality (a new curve) therefore needs a new id.
+DIGITAL_RENAMED = {"quality": "digital.quality2"}
+DIGITAL_LEGACY = [
+    # (after this upstream id, legacy id, label, min, max, hint)
+    ("aliasing", "lens_blur", "Lens softness (removed)", 0, 1,
+     "From NTSCRT 0.4.0. Lens softness is gone (upstream 0.19); kept so older projects load. No effect."),
+    ("ccd_response", "exposure", "Exposure (from 0.4.0)", -2, 2,
+     "This instance was made with NTSCRT 0.4.0, whose Exposure became CCD response. While CCD response is 0 "
+     "it sets CCD response (the stronger of this and Black level decides). Set it to 0 to drop it."),
+    ("ccd_response", "black_level", "Black level (from 0.4.0)", 0, 0.25,
+     "This instance was made with NTSCRT 0.4.0, whose Black level became CCD response. While CCD response is 0 "
+     "it sets CCD response (the stronger of this and Exposure decides). Set it to 0 to drop it."),
+    ("quality", "quality", "Quality (from 0.4.0)", 0, 1,
+     "This instance was made with NTSCRT 0.4.0, whose Quality slider ran on JPEG's own curve. While Quality "
+     "above is at its default, this value (converted to the same quantizer) is used instead. Set it to 0 to drop it."),
+]
+
+
 def gen_digital(S: Schema, up: Path, schema_extra: dict):
     app = read(up / "Sources/CrtApp/AppState.swift")
     t = read(up / "Sources/CrtCodec/DigitalVideoParams.swift")
-    group_labels = dict(re.findall(r'case\s+(\w+)\s*=\s*"([^"]+)"', t[t.index("enum Group"):t.index("enum Kind")]))
+    group_cases = re.findall(r'case\s+(\w+)\s*=\s*"([^"]+)"', t[t.index("enum Group"):t.index("enum Kind")])
+    group_labels = dict(group_cases)
+    group_order = [g for g, _ in group_cases]  # upstream Group.allCases = the panel's order
     items = swift_array_after(t, "public static let all: [DigitalParam]")
     structure = set(swift_array_after(t, "public static let structureIDs"))
     formats = swift_array_after(t, "public static let all: [DigitalFormat]")
+    # DigitalParam.unusedBy: controls a codec doesn't have (hidden in the panel).
+    unused = {}
+    m = re.search(r"unusedBy:[^=]*=\s*\[(.*?)\n\s*\]", t, re.S)
+    if m:
+        for case, ids in re.findall(r"\.(\w+)\s*:\s*\[([^\]]*)\]", m.group(1)):
+            unused[case] = re.findall(r'"([^"]+)"', ids)
+    codec_cases = re.findall(r"case\s+(\w+)", t[t.index("enum DigitalCodecKind"):t.index("enum ChromaSubsampling")])
+    codec_value = {c: i for i, c in enumerate(codec_cases)}
 
     S.group("digital", "Digital video")
     S.param(id="digital.enabled", group="digital", label="Digital video",
-            hint="A small video codec run for real: capture, 8×8 DCT blocks, quantization, motion-compensated prediction, data loss.",
+            hint="A small video codec run for real: capture, 8×8 DCT blocks or Microsoft Video 1's 4×4 color blocks, "
+                 "quantization, motion-compensated prediction, data loss.",
             type="bool", default=var_default(app, "digitalEnabled"), path="/digital/enabled", animatable=False)
-    made = set()
-    count = 0
+    by_group = {g: [] for g in group_order}
     for c in items:
-        kw = c.kw()
-        g = kw["group"].lstrip(".")
-        gid = f"digital.{g}"
-        if gid not in made:
-            S.group(gid, group_labels[g], parent="digital")
-            made.add(gid)
-        kind = kw["kind"]
-        pid = kw["id"]
-        p = dict(id=f"digital.{pid}", group=gid, label=kw["label"], hint=kw["help"],
-                 path=f"/digital/values/{pid}", enabled_if="/digital/enabled",
-                 animatable=pid not in structure)
-        if isinstance(kind, Call) and kind.name == ".choice":
-            labels = kind.pos()[0]
-            p.update(type="choice", default=int(kw["defaultValue"]),
-                     options=[{"value": i, "label": l} for i, l in enumerate(labels)], animatable=False)
-        else:
-            f = slider_fields(kind)
-            p.update(type="float", default=num(kw["defaultValue"]),
-                     step=0.001 if f["max"] - f["min"] <= 2 else 0.01, **f)
-        if pid in structure:
-            p["structure"] = True
-        S.param(**p)
-        count += 1
+        by_group[c.kw()["group"].lstrip(".")].append(c)
+    legacy_after = {}
+    for after, lid, label, lo, hi, hint in DIGITAL_LEGACY:
+        legacy_after.setdefault(after, []).append((lid, label, lo, hi, hint))
+    count = 0
+    for g in group_order:
+        if not by_group[g]:
+            continue
+        gid = S.group(f"digital.{g}", group_labels[g], parent="digital")
+        for c in by_group[g]:
+            kw = c.kw()
+            kind = kw["kind"]
+            pid = kw["id"]
+            p = dict(id=DIGITAL_RENAMED.get(pid, f"digital.{pid}"), group=gid, label=kw["label"], hint=kw["help"],
+                     path=f"/digital/values/{pid}", enabled_if="/digital/enabled",
+                     animatable=pid not in structure)
+            if isinstance(kind, Call) and kind.name == ".choice":
+                labels = kind.pos()[0]
+                p.update(type="choice", default=int(kw["defaultValue"]),
+                         options=[{"value": i, "label": l} for i, l in enumerate(labels)], animatable=False)
+            else:
+                f = slider_fields(kind)
+                p.update(type="float", default=num(kw["defaultValue"]),
+                         step=0.001 if f["max"] - f["min"] <= 2 else 0.01, **f)
+            if pid in structure:
+                p["structure"] = True
+            # Hidden (and so not written) under a codec that doesn't have it.
+            for case, ids in unused.items():
+                if pid in ids and len(codec_value) == 2:
+                    p["visible_if"] = {"path": "/digital/values/codec", "equals": 1 - codec_value[case]}
+            S.param(**p)
+            count += 1
+            for lid, label, lo, hi, hint in legacy_after.get(pid, []):
+                S.param(id=f"digital.{lid}", group=gid, label=label, hint=hint, type="float", default=0,
+                        min=lo, max=hi, step=0.001 if hi - lo <= 2 else 0.01, path=f"/digital/legacy/{lid}",
+                        animatable=True, enabled_if="/digital/enabled",
+                        # Shown (and written) only while non-zero; Lens softness never (no effect).
+                        visible_if={"path": f"/digital/legacy/{lid}"} if lid != "lens_blur"
+                        else {"path": "/digital/legacy/lens_blur", "equals": "never"},
+                        legacy=True)
+                count += 1
 
-    # Formats: named starting points (upstream DigitalFormat.all). Applying one
-    # writes defaults+values into /digital/values, enables downscale and sets
-    # its width and preset label (upstream AppState.applyDigitalFormat).
+    # Formats: named starting points (upstream DigitalFormat.all), in upstream
+    # 0.20 offered in the toolbar's Preset menu. Applying one switches the
+    # stage on, writes defaults+values into /digital/values, enables downscale
+    # and sets its width and preset label (upstream AppState.applyDigitalFormat
+    # + setDigitalEnabled), and clears the 0.4.0 legacy controls.
     defaults = {c.kw()["id"]: num(c.kw()["defaultValue"]) for c in items}
     fl = []
     for f in formats:
         kw = f.kw()
         values = dict(defaults)
         values.update({k: num(v) for k, v in kw["values"].items()})
+        applies = {"/digital/enabled": True, "/digital/values": values}
+        applies.update({f"/digital/legacy/{lid}": 0 for _, lid, *_ in DIGITAL_LEGACY})
+        applies.update({"/downscale/enabled": True, "/downscale/width": kw["width"],
+                        "/downscale/preset": f"{kw['name']} ({kw['width']}px)"})
         fl.append({"id": kw["id"], "name": kw["name"], "width": kw["width"], "hint": kw["blurb"],
-                   "applies": {"/digital/values": values, "/downscale/enabled": True,
-                               "/downscale/width": kw["width"],
-                               "/downscale/preset": f"{kw['name']} ({kw['width']}px)"}})
+                   "applies": applies})
     schema_extra["digital_formats"] = fl
     return count, len(fl)
 
@@ -808,7 +863,8 @@ def main():
         "sources": {"upstream_ntscrt": upstream_rev, "slang_shaders": SLANG_COMMIT,
                     "ntsc_rs": "vendor/ntsc-rs (see .gitmodules / submodule pin)"},
         # Fixed values hosts write alongside the params (not user-editable).
-        "constants": {"/version": 1, "/ntsc/settings/version": 1,
+        # /version 2: upstream look version since 0.19 (Digital video's Quality curve).
+        "constants": {"/version": 2, "/ntsc/settings/version": 1,
                       "fb:/kind": "ntscrt-video-feedback", "fb:/version": 2},
         "groups": S.groups,
         "params": S.params,

@@ -1,4 +1,4 @@
-// codec.cpp — port of upstream Sources/CrtCodec/DigitalCodec.swift (2b3013d).
+// codec.cpp — port of upstream Sources/CrtCodec/DigitalCodec.swift (upstream v0.20.0, c6ab639).
 // Arithmetic follows the Swift source operation for operation, in single
 // precision, so results match upstream as closely as the platform's libm
 // allows. Hot loops use raw pointers (fast in Debug as well).
@@ -51,9 +51,21 @@ const float *basis() {
     return c.data();
 }
 
+// The quantizer scale (a multiple of the reference tables) for the Quality
+// control: 25x at 0 (JPEG quality 2) to 0.1x at 1 (JPEG 95). Damage grows
+// with the square root of the step, so the square root runs linearly (0.19).
 float tableScale(double quality) {
-    double q = 2 + 93 * std::min(1.0, std::max(0.0, quality));
-    return float(q < 50 ? 5000 / q : 200 - 2 * q) / 100;
+    double q = std::min(1.0, std::max(0.0, quality));
+    double r = kScaleRootWorst + (scaleRootBest() - kScaleRootWorst) * q;
+    return float(r * r);
+}
+
+double scaleRootBest() { return std::sqrt(0.1); }
+
+double qualityFromJPEGScale(double old) {
+    double q = 2 + 93 * std::min(1.0, std::max(0.0, old));
+    double scale = (q < 50 ? 5000 / q : 200 - 2 * q) / 100;
+    return std::min(1.0, std::max(0.0, (kScaleRootWorst - std::sqrt(scale)) / (kScaleRootWorst - scaleRootBest())));
 }
 
 Steps::Steps(double quality, float squeeze) {

@@ -34,6 +34,11 @@ struct FrameContext {
     double render_scale = 1.0;
     uint64_t seed = 0;
     const json *look = nullptr;  // look at `frame`
+    // Picture rows each chain line stands for: 2 when the chain gets one field
+    // (Digital video's One field, upstream DownscaleSpec.lineHeight), else 1.
+    // Set by the façade; the Downscale halves its lines and the CRT keeps the
+    // picture's shape.
+    int line_height = 1;
 
     // Source frame at a past/future frame index, converted to BGRA8 and with
     // the crop stage already applied (façade caches these). Returns nullptr

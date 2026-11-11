@@ -8,7 +8,7 @@ circuits, RetroArch CRT shaders via librashader, digital codec, Screen Loop) as 
   hasn't been built or tested in Final Cut, and releases don't include it. The Final Cut parts of this page
   apply once a release does.
 
-Free and open source under the [MIT licence](#licence).
+Free and open source under the [MIT licence](#licence). Synced with upstream NTSCRT v0.20.0.
 
 ![Animated before/after: a scrolling synthwave test scene untouched on the left, through NTSCRT's default look on the right](docs/images/hero-before-after.webp)
 *Before / after with the default look, in motion: chroma bleed, moving noise, scanlines and CRT glow.*

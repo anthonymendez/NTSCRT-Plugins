@@ -21,6 +21,12 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   ship them in `Contents/Resources/`, plus crt-royale's own `LICENSE.TXT` next to its shaders.
 - `SECURITY.md`, `CONTRIBUTING.md`, issue forms (the bug form asks for the `ntscrt_doctor.py` zip, the Resolve
   version and the GPU) and a pull-request template.
+- Digital video: a second codec, **Microsoft Video 1** (Codec: Block colors), with the **CD-ROM (Video 1)** format.
+- Bundled looks from upstream: *Chunky webcam*, *CD-ROM (low quality)*.
+- Looks and preset files saved by older NTSCRT / the 0.4.0 plug-ins are migrated on load (core and both hosts).
+- Ported upstream tests: Video1Tests, FieldLinesTests and the DigitalVideoTests changes; the Resolve `cli`
+  test also compares the bundled Digital video looks against `ntscrt-cli`.
+- docs/dev/UPSTREAM-SYNC.md: how to sync with a later upstream release.
 
 ### Changed
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac
@@ -30,6 +36,22 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 - README previews are animated WebP instead of GIF, about 40% smaller (12.7 MB → 7.7 MB); `scripts/make_previews.ps1`
   now writes WebP from the full-colour frames (no 128-colour palette).
 - Agent working notes moved to `docs/dev/` (`AGENTS.md`, `CONTRACT-CHANGES.md`).
+- Synced with upstream NTSCRT v0.20.0 (was v0.18.0). Digital video: **CCD response** replaces Exposure and
+  Black level (a 90s 3-CCD camcorder's auto exposure, flare, knee and setup lift); Aliasing samples red,
+  green and blue a third of a pixel apart (rainbow moiré) and boosts fine detail above 50%; Lens softness is
+  gone; **Quality** runs on an even curve (new default 0.749 = the old default's quantizer); the Compression
+  group comes first.
+- Digital video **Fields** defaults to **One field**, and One field now sends the CRT the field itself (half
+  the Downscale's lines, each two rows tall): a scanline per field line, the 240p look.
+- Changed defaults (new instances only; Resolve saves every value with the project, so existing instances
+  keep theirs): Digital Fields Progressive → One field; Quality 0.22 → 0.749 on the new curve (the same
+  quantizer). Existing 0.4.0 projects with Digital video on: Quality and Exposure / Black level are kept as
+  hidden "(from 0.4.0)" controls that show up in those instances and are converted as upstream does (same
+  quantizer; CCD response from the stronger of Exposure / Black level); Lens softness no longer has an effect
+  and Aliasing looks different (upstream's new sampling).
+- Bundled presets keep their place in the Preset menu (saved projects store the index); new ones are added
+  after the released ones.
+
 
 ## [0.4.0] - 2026-11-10
 

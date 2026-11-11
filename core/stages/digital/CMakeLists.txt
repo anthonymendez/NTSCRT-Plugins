@@ -8,6 +8,7 @@ add_library(ntscrt_digital OBJECT
   ${CMAKE_CURRENT_SOURCE_DIR}/digital.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/renderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/codec.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/video1.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/parallel.cpp)
 target_include_directories(ntscrt_digital PRIVATE
   ${NTSCRT_ROOT}/core ${NTSCRT_ROOT}/core/src ${NTSCRT_ROOT}/core/include)

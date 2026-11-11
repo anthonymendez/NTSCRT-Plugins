@@ -8,19 +8,18 @@
 #include <algorithm>
 #include <cmath>
 
+#include "migrate.h"
 #include "renderer.h"
 
 namespace ntscrt {
 
 namespace {
 
+// The look's Digital values, migrated from older versions (migrate.h).
 digital::Settings parse_settings(const json &look) {
     digital::Settings s;
-    auto d = look.find("digital");
-    if (d == look.end() || !d->is_object()) return s;
-    auto v = d->find("values");
-    if (v == d->end() || !v->is_object()) return s;
-    for (auto it = v->begin(); it != v->end(); ++it) {
+    const json v = digital::migrate::values_for(look);
+    for (auto it = v.begin(); it != v.end(); ++it) {
         const json &val = it.value();
         if (val.is_number()) s.set(it.key(), val.get<double>());
         else if (val.is_boolean()) s.set(it.key(), val.get<bool>() ? 1.0 : 0.0);
@@ -30,7 +29,8 @@ digital::Settings parse_settings(const json &look) {
 
 // Upstream DigitalFrameInput.captureSize: the Downscale's size when it's on
 // (width from the look, height from the picture's aspect, even), else the
-// picture's own, capped at 1280 wide.
+// picture's own, capped at 1280 wide. With One field the camera still
+// captures the whole frame (the picture height, not the field's lines).
 digital::Size capture_size(const json &look, int width, int height) {
     bool on = true;
     double dw = 320;
