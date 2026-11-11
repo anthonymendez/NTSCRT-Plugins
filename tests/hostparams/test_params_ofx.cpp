@@ -1,10 +1,10 @@
-// ofx_params: look building from the real schema.
+// Shared host param model (hostparams/): look building from the real schema, as the OpenFX plug-in uses it.
 #include <doctest/doctest.h>
 #include <ntscrt/ntscrt.h>
 
-#include "ofx_params.h"
+#include "ntscrt_host/params.h"
 
-using namespace ntscrt_ofx;
+using namespace ntscrt::host;
 
 namespace {
 // The look the plug-in sends with every param at its default, except `crt.preset`.

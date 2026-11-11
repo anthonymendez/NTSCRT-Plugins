@@ -1,9 +1,8 @@
-# One-off: the OpenFX plug-in's looks per bundled preset, from the param model
-# before the shared host library (writes ofx_reference.json).
-add_executable(gen_ofx_reference gen_ofx_reference.cpp ${NTSCRT_ROOT}/ofx/ofx_params.cpp)
-target_include_directories(gen_ofx_reference PRIVATE ${NTSCRT_ROOT}/ofx ${NTSCRT_ROOT}/core)
-target_link_libraries(gen_ofx_reference PRIVATE ntscrt_core nlohmann_json::nlohmann_json)
-target_compile_definitions(gen_ofx_reference PRIVATE NTSCRT_BUILT_RESOURCES_DIR="${NTSCRT_RESOURCES_BUILD_DIR}")
-if(TARGET ntscrt_resources)
-  add_dependencies(gen_ofx_reference ntscrt_resources)
-endif()
+# The shared host param model (hostparams/) both plug-ins use: its rules, the
+# OpenFX plug-in's looks before / after the merge, and the two hosts agreeing.
+ntscrt_add_test(test_hostparams
+  test_params_model.cpp
+  test_params_ofx.cpp
+  test_params_timeline.cpp
+  test_ofx_reference.cpp)
+target_link_libraries(test_hostparams PRIVATE ntscrt_hostparams)

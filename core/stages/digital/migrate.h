@@ -1,6 +1,6 @@
 // migrate.h — Digital video values saved by older versions, mapped onto
 // today's controls. Header-only (nlohmann::json + <cmath>) so the hosts'
-// param models (ofx/ofx_params.cpp, fxplug/model/param_model.cpp) can apply
+// param model (hostparams/, shared by the OpenFX and FxPlug plug-ins) can apply
 // the same rules as the core when they load a preset.
 //
 // Port of upstream DigitalSettings.migrated (DigitalVideoParams.swift, 0.19):

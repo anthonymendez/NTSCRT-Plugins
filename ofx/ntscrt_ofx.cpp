@@ -6,7 +6,8 @@
 // the core's fetch_source / look_at callbacks.
 #include <ntscrt/ntscrt.h>
 
-#include "ofx_params.h"
+#include "ntscrt_host/file_log.h"
+#include "ntscrt_host/params.h"
 #include "ofxsImageEffect.h"
 
 #include <algorithm>
@@ -44,7 +45,7 @@
 extern char **environ;
 #endif
 
-using namespace ntscrt_ofx;
+using namespace ntscrt::host;
 
 namespace {
 const char kPluginId[] = "com.ntscrt.plugins.ntscrt";
@@ -180,9 +181,8 @@ bool wrap_padded(OFX::Image &im, const OfxRectI &r, ntscrt_image &out, std::vect
 //   Windows: %LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log    macOS: ~/Library/Logs/NTSCRT/ntscrt-ofx.log
 //   NTSCRT_OFX_LOG=<file> logs there instead ("off" disables), NTSCRT_OFX_LOG_VERBOSE=1 logs every frame.
 //   The per-instance "Debug logging" checkbox logs every frame of that instance in detail.
-// Rotated to ntscrt-ofx.old.log at 1 MB.
+// Rotated to ntscrt-ofx.old.log at 1 MB (ntscrt::host::FileLog, shared with the FxPlug plug-in).
 namespace dlog {
-std::mutex &mu() { static std::mutex m; return m; }
 std::filesystem::path default_path() {
     namespace fs = std::filesystem;
 #ifdef _WIN32
@@ -212,35 +212,8 @@ bool verbose() {
     return v;
 }
 void write(const std::string &msg) {
-    try {
-        namespace fs = std::filesystem;
-        const fs::path p = path();
-        if (p.empty()) return;
-        std::lock_guard<std::mutex> lk(mu());
-        std::error_code ec;
-        fs::create_directories(p.parent_path(), ec);
-        if (fs::exists(p, ec) && fs::file_size(p, ec) > (1u << 20)) {
-            fs::path old = p;
-            old.replace_filename("ntscrt-ofx.old.log");
-            fs::rename(p, old, ec);
-        }
-        std::ofstream f(p, std::ios::app);
-        auto now = std::chrono::system_clock::now();
-        std::time_t t = std::chrono::system_clock::to_time_t(now);
-        int ms = int(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
-        char ts[32];
-        std::tm tm{};
-#ifdef _WIN32
-        localtime_s(&tm, &t);
-#else
-        localtime_r(&t, &tm);
-#endif
-        std::strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tm);
-        std::ostringstream tid;
-        tid << std::this_thread::get_id();
-        f << ts << '.' << (ms < 100 ? (ms < 10 ? "00" : "0") : "") << ms << " [" << tid.str() << "] " << msg << '\n';
-    } catch (...) {
-    }
+    static const ntscrt::host::FileLog log(u8(path()));  // empty path: logging off
+    log.write(msg);
 }
 const char *depth_name(OFX::BitDepthEnum d) {
     switch (d) {
@@ -442,7 +415,7 @@ public:
             ra.fps = source_frame_rate();
             ra.look_json = look.c_str();
             ra.feedback_json = fb.empty() ? nullptr : fb.c_str();
-            ra.seed = uint64_t(uint32_t(seed));
+            ra.seed = render_seed(seed);
             if (ntscrt_source_frames_needed(&ra, &first) != NTSCRT_OK) first = n;
         }
         const OfxRangeD need{std::min(args.time, range.min + double(first)),
@@ -513,12 +486,12 @@ public:
                 if (i > 0 && size_t(i) <= g_.looks.size()) {
                     const Preset &pr = g_.looks[size_t(i - 1)];
                     if (pr.format) apply_values(applies_values(g_.schema, pr.data), args.time, "NTSCRT Digital video format");
-                    else apply_preset(pr.data, false, args.time);
+                    else apply_preset(pr.data, args.time);
                 }
             } else if (loop_preset_ && name == kLoopPresetParam) {
                 int i = 0;
                 loop_preset_->getValue(i);
-                if (i > 0 && size_t(i) <= g_.loops.size()) apply_preset(g_.loops[size_t(i - 1)].data, true, args.time);
+                if (i > 0 && size_t(i) <= g_.loops.size()) apply_preset(g_.loops[size_t(i - 1)].data, args.time);
             } else if (name == kLoadParam) {
                 load_preset_file(args.time);
             } else if (name == kSaveParam) {
@@ -601,7 +574,7 @@ public:
             int k = 0;
             static_cast<OFX::ChoiceParam *>(q)->getValueAtTime(t, k);
             if (k < 0 || size_t(k) >= p.options.size()) k = std::max(0, choice_index(p, p.def));
-            return p.options[size_t(k)].first;
+            return p.options[size_t(k)].value;
         }
         case PType::Color: {
             std::vector<double> c(size_t(p.color_n), 1.0);
@@ -614,10 +587,9 @@ public:
     }
 
     void look_at_time(double t, std::string &look, std::string &fb) const {
-        json lj, fj;
-        build_look(g_.schema, [&](size_t i) { return value_at(i, t); }, lj, fj);
-        look = lj.dump();
-        fb = fj.is_null() ? std::string() : fj.dump();
+        const Built b = build_look(g_.schema, [&](size_t i) { return value_at(i, t); });
+        look = b.look.dump();
+        fb = b.feedback.is_null() ? std::string() : b.feedback.dump();
     }
 
     // ---- look history for the core's look_at ------------------------------
@@ -697,30 +669,14 @@ public:
         auto it = by_name_.find(name);
         if (it == by_name_.end()) return NTSCRT_CACHE_ALL;  // the seed, anything unknown
         const ParamDef &p = g_.schema.params[it->second];
-        if (p.feedback) return NTSCRT_CACHE_SCREENLOOP;
-        // Screen Loop recomputes earlier frames through every stage: always.
-        uint32_t m = NTSCRT_CACHE_SCREENLOOP;
-        const size_t slash = p.path.find('/', 1);
-        const std::string top = p.path.substr(1, slash == std::string::npos ? std::string::npos : slash - 1);
-        if (top == "crop" || top == "alpha" || top == "downscale") {
-            m |= NTSCRT_CACHE_DIGITAL | NTSCRT_CACHE_CRT;  // Digital encodes the cropped source; CRT history
-        } else if (top == "digital") {
-            m |= NTSCRT_CACHE_DIGITAL;
-        } else if (top == "shader") {
-            m |= NTSCRT_CACHE_CRT;
-        } else if (top == "glitch") {
-            // The receiver re-checks its history, which catches edits that hold
-            // for every frame; a keyframed value can change between its probes.
-            bool keyed = true;
+        bool keyed = true;  // only a Glitch param's keys matter (unknown: keyed)
+        if (!p.feedback && p.path.rfind("/glitch/", 0) == 0) {
             try {
                 keyed = static_cast<OFX::ValueParam *>(params_[it->second])->getNumKeys() > 0;
             } catch (...) {
             }
-            if (keyed) m |= NTSCRT_CACHE_GLITCH;
-        } else if (top != "ntsc") {  // ntsc-rs keeps no history
-            m = NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE;
         }
-        return m;
+        return ntscrt::host::cache_mask(p, keyed);
     }
 
 private:
@@ -773,59 +729,39 @@ private:
         }
     }
 
-    // Look presets replace the look: every param the preset sets loses its old
-    // keyframes. An animated preset (upstream timeline keys) then gets host
-    // keyframes: the timeline's duration in seconds from the effect's first frame
-    // at the source's frame rate, repeated until the effect ends (at most
+    // Applies a preset (bundled or a loaded file) as the shared model plans it
+    // (ntscrt::host::plan_preset): a look preset replaces the look, so every param
+    // presets set loses its keyframes; an animated preset (upstream timeline keys)
+    // then gets host keyframes: the timeline's duration in seconds from the effect's
+    // first frame at the source's frame rate, repeated until the effect ends (at most
     // kMaxKeyedFrames; the last value holds after that). See docs/params.md.
-    void apply_look_preset(const json &preset, double t) {
-        const Schema &s = g_.schema;
+    void apply_preset(const json &preset, double t) {
         const OfxRangeD range = source_frame_range();
         const bool known = range.max - range.min < 1e8;  // source_frame_range's "unknown" fallback
         const int64_t available = known ? int64_t(std::llround(range.max - range.min)) + 1 : 0;
-        const PresetKeys pk = preset_keys(s, preset, source_frame_rate(), available);
-        size_t keyed = 0;
-        for (size_t i = 0; i < s.params.size(); ++i) {
-            const ParamDef &p = s.params[i];
-            if (p.feedback || !p.in_presets) continue;
-            try {
-                static_cast<OFX::ValueParam *>(params_[i])->deleteAllKeys();
-            } catch (...) {
-            }
-            if (pk.animated()) {
-                auto it = pk.keys.find(i);
-                if (it == pk.keys.end() || it->second.empty()) continue;
-                if (it->second.size() == 1) {
-                    set_value(i, it->second.front().second, t);  // holds still: no keyframe
-                } else {
-                    for (const auto &[n, v] : it->second) set_key(i, v, range.min + double(n));
-                    keyed += it->second.size();
-                }
-            } else if (auto v = preset_value(p, preset, false)) {
-                set_value(i, *v, t);
-            }
-        }
-        if (pk.animated()) {
-            std::ostringstream o;
-            o << "instance #" << id_ << " animated preset: " << pk.pass << " frames per pass, " << pk.frames
-              << " frames keyed from t=" << range.min << ", " << keyed << " keyframes";
-            dlog::write(o.str());
-        }
-    }
-
-    void apply_preset(const json &preset, bool feedback, double t) {
+        const PresetPlan plan = plan_preset(g_.schema, preset, source_frame_rate(), available);
         applying_ = true;
-        beginEditBlock(feedback ? "NTSCRT Screen Loop preset" : "NTSCRT preset");
+        beginEditBlock(plan.replaces_look ? "NTSCRT preset" : "NTSCRT Screen Loop preset");
         try {
-            if (feedback) {
-                for (size_t i = 0; i < g_.schema.params.size(); ++i)
-                    if (auto v = preset_value(g_.schema.params[i], preset, true)) set_value(i, *v, t);
-            } else {
-                apply_look_preset(preset, t);
-                // Our preset files carry the Screen Loop settings too (save_preset_file).
-                if (preset.is_object() && preset.contains("screen_loop") && is_feedback_preset(preset["screen_loop"]))
-                    for (size_t i = 0; i < g_.schema.params.size(); ++i)
-                        if (auto v = preset_value(g_.schema.params[i], preset["screen_loop"], true)) set_value(i, *v, t);
+            size_t keyed = 0;
+            for (const auto &[i, entries] : plan.look.keys) {
+                try {
+                    static_cast<OFX::ValueParam *>(params_[i])->deleteAllKeys();
+                } catch (...) {
+                }
+                if (entries.size() == 1) {
+                    set_value(i, entries.front().second, t);  // holds still: no keyframe
+                } else {
+                    for (const auto &[n, v] : entries) set_key(i, v, range.min + double(n));
+                    keyed += entries.size();
+                }
+            }
+            for (const auto &[i, v] : plan.feedback) set_value(i, v, t);
+            if (plan.look.animated()) {
+                std::ostringstream o;
+                o << "instance #" << id_ << " animated preset: " << plan.look.pass << " frames per pass, "
+                  << plan.look.frames << " frames keyed from t=" << range.min << ", " << keyed << " keyframes";
+                dlog::write(o.str());
             }
         } catch (...) {
             endEditBlock();
@@ -858,14 +794,7 @@ private:
     void apply_choice_effects(const std::string &name, double t) {
         auto it = by_name_.find(name);
         if (it == by_name_.end()) return;
-        const Schema &s = g_.schema;
-        const size_t i = it->second;
-        if (s.params[i].type == PType::Choice) apply_values(option_applies(s, i, value_at(i, t)), t, "NTSCRT preset");
-        const json edited = value_at(i, t);
-        for (size_t c = 0; c < s.params.size(); ++c) {
-            if (c == i || s.params[c].type != PType::Choice || s.params[c].option_applies.empty()) continue;
-            if (auto d = demoted_choice(s, c, value_at(c, t), i, edited)) apply_values({{c, *d}}, t, "NTSCRT preset");
-        }
+        apply_values(edit_effects(g_.schema, it->second, [&](size_t i) { return value_at(i, t); }), t, "NTSCRT preset");
     }
 
     void update_dependents(double t) {
@@ -873,8 +802,8 @@ private:
         auto val = [&](size_t i) { return value_at(i, t); };
         for (size_t i = 0; i < s.params.size(); ++i) {
             const ParamDef &p = s.params[i];
-            if (p.enabled_if) params_[i]->setEnabled(cond_true(s, *p.enabled_if, val));
-            if (p.visible_if) params_[i]->setIsSecret(!cond_true(s, *p.visible_if, val));
+            if (p.enabled_if) params_[i]->setEnabled(is_enabled(s, p, val));
+            if (p.visible_if) params_[i]->setIsSecret(!is_visible(s, p, val));
         }
     }
 
@@ -891,7 +820,7 @@ private:
             sendMessage(OFX::Message::eMessageError, "", "Could not read an NTSCRT preset from " + path);
             return;
         }
-        apply_preset(j, is_feedback_preset(j), t);
+        apply_preset(j, t);
         update_dependents(t);
     }
 
@@ -902,25 +831,20 @@ private:
             sendMessage(OFX::Message::eMessageError, "", "Enter a file path to save the preset to.");
             return;
         }
-        std::string look, fb;
-        look_at_time(t, look, fb);
-        // Upstream's look format; the Screen Loop settings ride along under
-        // "screen_loop" (upstream ignores the key; Load applies it) and, while the
-        // loop is on, also as an upstream Screen Loop file beside it.
-        json lj = json::parse(look);
-        json fj = fb.empty() ? json() : json::parse(fb);
-        if (fj.is_object()) lj["screen_loop"] = fj;
+        const Built b = build_look(g_.schema, [&](size_t i) { return value_at(i, t); });
+        // Upstream's look format with the Screen Loop settings under "screen_loop" and,
+        // while the loop is on, an upstream Screen Loop file beside it (docs/params.md).
         std::ofstream f(std::filesystem::u8path(path), std::ios::binary | std::ios::trunc);
-        if (f) f << lj.dump(2) << "\n";
+        if (f) f << saved_preset(b.look, b.feedback).dump(2) << "\n";
         if (!f) {
             sendMessage(OFX::Message::eMessageError, "", "Could not write " + path);
             return;
         }
-        if (fj.is_object() && fj.value("enabled", true)) {
+        if (auto loop = saved_screen_loop(b.feedback)) {
             std::filesystem::path side = std::filesystem::u8path(path);
             side.replace_filename(side.stem().u8string() + u8" (Screen Loop)" + side.extension().u8string());
             std::ofstream sf(side, std::ios::binary | std::ios::trunc);
-            if (sf) sf << fj.dump(2) << "\n";
+            if (sf) sf << loop->dump(2) << "\n";
         }
     }
 
@@ -1099,7 +1023,7 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     ra.look_json = look.c_str();
     ra.feedback_json = fb.empty() ? nullptr : fb.c_str();
     ra.render_scale = args.renderScale.x > 0 ? args.renderScale.x : 1.0;
-    ra.seed = uint64_t(uint32_t(seed));
+    ra.seed = render_seed(seed);
     ra.fetch_source = &RenderCtx::fetch;
     ra.release_source = &RenderCtx::release;
     ra.look_at = &RenderCtx::look_at;
@@ -1296,7 +1220,7 @@ void define_value_param(OFX::ImageEffectDescriptor &desc, const ParamDef &p, OFX
     }
     case PType::Choice: {
         auto *d = desc.defineChoiceParam(p.name);
-        for (const auto &o : p.options) d->appendOption(o.second);
+        for (const auto &o : p.options) d->appendOption(o.label);
         d->setDefault(std::max(0, choice_index(p, p.def)));
         vd = d;
         break;
@@ -1419,8 +1343,8 @@ void NtscrtFactory::describeInContext(OFX::ImageEffectDescriptor &desc, OFX::Con
         d->setLabel("Seed");
         d->setHint("Added to every random stream so two instances can differ. 0 = upstream behaviour.");
         d->setDefault(0);
-        d->setRange(0, INT_MAX);
-        d->setDisplayRange(0, 1000);
+        d->setRange(kSeedMin, kSeedMax);
+        d->setDisplayRange(kSeedMin, kSeedDisplayMax);
         d->setAnimates(false);
         d->setParent(*hg);
     }

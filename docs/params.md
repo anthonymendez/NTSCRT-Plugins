@@ -124,7 +124,7 @@ upstream 0.20 lists them in the Preset menu (a "Digital video" section). Choosin
 cleared, the Downscale on with the format's width. The rest of the look stays as it is.
 
 Bundled presets in the hosts' Preset menus: released presets keep their index (saved projects store it):
-the order a release shipped, then newer presets alphabetically (`ofx/ofx_params.cpp`
+the order a release shipped, then newer presets alphabetically (`hostparams/src/params.cpp`
 `released_preset_order`; add the new names there when releasing). The Digital video formats are menu entries
 `Digital video/<name>` (in `released_preset_order` since 0.5.0, after that release's new looks).
 
@@ -165,4 +165,41 @@ timeline's own `fps` is ignored: it is upstream's rate for stills). Applying the
 param's keyframes and writes host keyframes for the params that move: one per frame for numbers (exact at
 every frame whatever interpolation the host uses between keys), two per change for bools and choices (the old value on the frame before, the new one on the frame it changes, so hosts that interpolate them still switch on the right frame); params
 that hold still get a plain value. At most 3600 frames are keyed (the last values hold after that); with an
-unknown effect length, one pass. The FxPlug model offers the same (`Model::preset_keys`).
+unknown effect length, one pass. Both plug-ins get these keys from the shared model (`plan_preset`).
+
+## One model for both plug-ins (`hostparams/`)
+Everything above is implemented once, in the host-independent library `hostparams/` (`ntscrt::host`,
+`ntscrt_host/params.h`, no OpenFX or Apple headers, tested on every platform in `tests/hostparams`): schema
+parsing, value coercion, colours, JSON pointers, building the look and feedback, `enabled_if` / `visible_if`,
+`applies` and Digital video formats, preset application (`plan_preset`: values, timeline keyframes, the
+`screen_loop` key of our files, migration), the menu order, Save preset's files, the seed range, which core
+caches an edit can affect and the rotating log file (`ntscrt_host/file_log.h`). The OpenFX plug-in calls it on
+look-typed values; the FxPlug plug-in through `fxplug/model/param_model.h`, which adds only FxPlug's own parts
+(stable numeric ids, control layout, menu-index / RGB values, the plug-in state). `test_hostparams_cross` checks
+that every bundled preset builds the same look and feedback through both; `test_hostparams` checks the OpenFX
+plug-in builds exactly what it built before the merge (`tests/hostparams/ofx_reference.json`).
+
+The two plug-ins used to have separate models. Where they differed, the shared one keeps the OpenFX behaviour
+(the released one, and upstream's where upstream has one), except where noted:
+
+| Behaviour | OpenFX (0.4.0 / 0.5.0-dev) | FxPlug (never released) | Shared model |
+|---|---|---|---|
+| Look built from | an empty object | a hidden saved copy of the last preset, params written over it (kept non-schema keys and other CRT presets' stale shader params) | an empty object (upstream `AppState.lookDictionary` writes only its state). FxPlug's hidden *Base Look* / *Base Screen Loop* params stay (ids are never removed) but are no longer read |
+| Screen Loop on / off | the `screenloop.enabled` param; feedback always passed | the Screen Loop menu: Off = no feedback, any other entry = feedback with the checkbox's value | the `screenloop.enabled` param; feedback always passed (`"enabled": false` when off, which the core treats as off). FxPlug's menu Off / (Custom) now set that param |
+| Feedback `kind` / `version` | written first, then the schema constants | `kind` only if the base lacked it, then the constants | OpenFX's |
+| Screen Loop file without `"enabled"` | turns Screen Loop on (the core's "missing means on") | schema default (off), worked around in the `.mm` | on; the workaround is gone |
+| `enabled_if` / `visible_if` spelling | pointer string or `{path, equals}` for both | `enabled_if` only as a string, `visible_if` only as an object | both spellings for both |
+| Condition evaluation | on the owning param's value; numbers equal to 1e-9; a path no param owns = true | on the built look; strict JSON equality; a missing value = hidden | OpenFX's (on param values, so a hidden owner still decides) |
+| Choice values in presets | the option's value (numbers to 1e-9) or its label | the exact value only | OpenFX's |
+| Numbers in presets | rounded (ints), not clamped (the host clamps to the control's range) | clamped to the schema range | clamped to the schema's `min` / `max` when it has them (what OpenFX hosts did anyway); no bundled preset is out of range |
+| Unknown / out-of-range menu index | the default option | the last option | the default option |
+| Colours | `#rrggbb`, `rrggbb`, 8 digits, 3 or 4 numbers, alpha kept | `#rrggbb` or 3 numbers | OpenFX's |
+| `animatable` missing in the schema | true | true only for numbers and colours | true (the schema always says) |
+| Feedback presets detected by | the bundled list's `kind` or the file's `kind` | the bundled list's `kind` | either |
+| Preset menu order | released presets first (`released_preset_order`), then new ones alphabetically | the core's alphabetical list | OpenFX's (saved projects store the index) |
+| Seed | 0…2147483647 | 0…1,000,000 | 0…2147483647 (`kSeedMax`), so no OpenFX project's seed is clamped |
+| Save preset: `screen_loop` key, side file | key always, side file while the loop is on | both only while the menu isn't Off | OpenFX's |
+| Temporal stages on (FxPlug schedules earlier frames) | — | any feedback object counted | Digital, Glitch, or Screen Loop **on** |
+| Log rotation | `ntscrt-ofx.old.log` beside the log, whatever the log's name | `<stem>.old<ext>` | `<stem>.old<ext>` (the same for the default names) |
+| Bundled presets read | through a core instance (a GPU device made and dropped at describe time, ~140 ms) | the same, with a Metal device | straight from `Resources/presets` (`bundled_presets_json`), no device |
+

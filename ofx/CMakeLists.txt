@@ -41,10 +41,8 @@ else()
 endif()
 
 add_library(ntscrt_ofx MODULE
-  ntscrt_ofx.cpp
-  ofx_params.cpp
-  ofx_params.h)
-target_link_libraries(ntscrt_ofx PRIVATE ntscrt_ofx_support ntscrt_core nlohmann_json::nlohmann_json)
+  ntscrt_ofx.cpp)
+target_link_libraries(ntscrt_ofx PRIVATE ntscrt_ofx_support ntscrt_core ntscrt_hostparams nlohmann_json::nlohmann_json)
 if(WIN32)
   target_link_libraries(ntscrt_ofx PRIVATE shell32 ole32)  # "Open logs folder" (ShellExecuteW)
 endif()

@@ -7,7 +7,7 @@ docs/images/presets/<slug>.gif.
 
 The preset list comes from the code, so new presets show up by themselves:
   - Looks and Digital video formats: the plug-in's Preset menu (bundled presets/*.json in the order of
-    released_preset_order() in ofx/ofx_params.cpp, then newer ones alphabetically, then the schema's
+    released_preset_order() in hostparams/src/params.cpp, then newer ones alphabetically, then the schema's
     digital_formats as "Digital video/<name>"). A look with timeline keys is animated: choosing it
     writes keyframes, one timeline pass from the effect's first frame, repeated.
   - Screen Loop presets (presets/Screen Loop/*.json, kind ntscrt-video-feedback): the Screen Loop preset menu.
@@ -83,8 +83,8 @@ def load_schema():
 
 
 def menu_orders(schema):
-    """(looks menu, Screen Loop menu) as the plug-in builds them: ofx/ofx_params.cpp parse_presets."""
-    src = (ROOT / "ofx/ofx_params.cpp").read_text(encoding="utf-8")
+    """(looks menu, Screen Loop menu) as the plug-in builds them: hostparams/src/params.cpp parse_presets."""
+    src = (ROOT / "hostparams/src/params.cpp").read_text(encoding="utf-8")
     block = src[src.index("released_preset_order() {"):]
     released = re.findall(r'"([^"]+)"', block[:block.index("};")])
     looks, loops = [], []
