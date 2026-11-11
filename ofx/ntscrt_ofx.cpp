@@ -10,6 +10,7 @@
 #include "ofxsImageEffect.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <ctime>
 #include <thread>
@@ -354,6 +355,7 @@ public:
         preset_file_ = fetchStringParam(kPresetFileParam);
         seed_ = fetchIntParam(kSeedParam);
         debug_ = fetchBooleanParam(kDebugParam);
+        for (size_t i = 0; i < s.params.size(); ++i) by_name_[s.params[i].name] = i;
 
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, g_.res_dir.c_str()};
         if (ntscrt_create(&ci, &inst_) != NTSCRT_OK) inst_ = nullptr;
@@ -418,12 +420,17 @@ public:
             last_look_hash_ = 0;  // log the full look on the next frame
             return;
         }
-        // Temporal caches in the core only sample keyframe history, so any param
-        // change (user edit, keyframe add/remove, preset apply/load = plugin edit)
-        // must drop them. Pure time changes don't.
+        // Any param change (user edit, keyframe add/remove, preset apply/load =
+        // plugin edit) can change the looks of other frames: the look history
+        // and the key counts are re-read, and the core drops the caches the
+        // param can affect (cache_mask). Pure time changes don't.
         if (args.reason != OFX::eChangeTime) {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (inst_) ntscrt_flush_caches(inst_);
+            ++look_gen_;
+            keys_dirty_ = true;
+            if (uint32_t m = cache_mask(name)) {
+                std::lock_guard<std::mutex> lk(mu_);
+                if (inst_) ntscrt_flush_caches_mask(inst_, m);
+            }
         }
         if (applying_) return;
         if (args.reason == OFX::eChangeUserEdit) {
@@ -440,9 +447,12 @@ public:
             } else if (name == kSaveParam) {
                 save_preset_file(args.time);
             }
-            // preset apply/load changed many params: flush once more afterwards
-            std::lock_guard<std::mutex> lk(mu_);
-            if (inst_) ntscrt_flush_caches(inst_);
+            // preset apply/load changed many params (keyframes too): flush once
+            // more afterwards. Source frames are keyed by what shapes them.
+            if (name == kPresetParam || name == kLoopPresetParam || name == kLoadParam) {
+                std::lock_guard<std::mutex> lk(mu_);
+                if (inst_) ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
+            }
         }
         update_dependents(args.time);
     }
@@ -509,6 +519,101 @@ public:
         build_look(g_.schema, [&](size_t i) { return value_at(i, t); }, lj, fj);
         look = lj.dump();
         fb = fj.is_null() ? std::string() : fj.dump();
+    }
+
+    // ---- look history for the core's look_at ------------------------------
+    // Re-counts keyframes when a param changed since the last count: with none
+    // anywhere every frame has the current look, and look_at answers NULL.
+    bool animated() {
+        if (keys_dirty_.exchange(false)) {
+            bool any = false;
+            for (OFX::Param *q : params_) {
+                try {
+                    if (static_cast<OFX::ValueParam *>(q)->getNumKeys() > 0) {
+                        any = true;
+                        break;
+                    }
+                } catch (...) {
+                    any = true;  // can't tell: assume animated
+                    break;
+                }
+            }
+            animated_ = any;
+        }
+        return animated_;
+    }
+    // The look at time t, built once per param state (look_gen_). The string
+    // stays valid until the next call. Called under mu_.
+    const std::string &cached_look(double t) {
+        const uint64_t gen = look_gen_;
+        if (gen != look_cache_gen_ || look_cache_.size() >= 2048) {
+            look_cache_.clear();
+            look_cache_gen_ = gen;
+        }
+        auto it = look_cache_.find(t);
+        if (it != look_cache_.end()) return it->second;
+        std::string look, fb;
+        look_at_time(t, look, fb);
+        ++look_builds_;
+        return look_cache_.emplace(t, std::move(look)).first->second;
+    }
+    // Under mu_, with the current frame's freshly built look: remembered for
+    // the next frames' history lookups. A cached look for the same time that
+    // differs means params changed without a changedParam (a host that doesn't
+    // report some keyframe edit): the history is dropped.
+    void note_current_look(double t, const std::string &look) {
+        if (look_cache_gen_ == look_gen_) {
+            auto it = look_cache_.find(t);
+            if (it != look_cache_.end()) {
+                if (it->second == look) return;
+                ++look_gen_;
+                keys_dirty_ = true;
+                dlog::write("instance #" + std::to_string(id_) + " look at t=" + std::to_string(t) +
+                            " changed without a param change notification: caches dropped");
+                if (inst_) ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
+            }
+        }
+        if (look_cache_gen_ != look_gen_ || look_cache_.size() >= 2048) {
+            look_cache_.clear();
+            look_cache_gen_ = look_gen_;
+        }
+        look_cache_[t] = look;
+    }
+
+    // Core caches a change of host param `name` can invalidate (0 = none).
+    uint32_t cache_mask(const std::string &name) {
+        // Host-only params: never part of the look (presets / files apply their
+        // values as edits of the params below, which report themselves).
+        for (const char *h : {kVersionParam, kPresetParam, kLoopPresetParam, kPresetFileParam, kLoadParam, kSaveParam,
+                              kDebugParam, kOpenLogsParam})
+            if (name == h) return 0;
+        auto it = by_name_.find(name);
+        if (it == by_name_.end()) return NTSCRT_CACHE_ALL;  // the seed, anything unknown
+        const ParamDef &p = g_.schema.params[it->second];
+        if (p.feedback) return NTSCRT_CACHE_SCREENLOOP;
+        // Screen Loop recomputes earlier frames through every stage: always.
+        uint32_t m = NTSCRT_CACHE_SCREENLOOP;
+        const size_t slash = p.path.find('/', 1);
+        const std::string top = p.path.substr(1, slash == std::string::npos ? std::string::npos : slash - 1);
+        if (top == "crop" || top == "alpha" || top == "downscale") {
+            m |= NTSCRT_CACHE_DIGITAL | NTSCRT_CACHE_CRT;  // Digital encodes the cropped source; CRT history
+        } else if (top == "digital") {
+            m |= NTSCRT_CACHE_DIGITAL;
+        } else if (top == "shader") {
+            m |= NTSCRT_CACHE_CRT;
+        } else if (top == "glitch") {
+            // The receiver re-checks its history, which catches edits that hold
+            // for every frame; a keyframed value can change between its probes.
+            bool keyed = true;
+            try {
+                keyed = static_cast<OFX::ValueParam *>(params_[it->second])->getNumKeys() > 0;
+            } catch (...) {
+            }
+            if (keyed) m |= NTSCRT_CACHE_GLITCH;
+        } else if (top != "ntsc") {  // ntsc-rs keeps no history
+            m = NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE;
+        }
+        return m;
     }
 
 private:
@@ -578,10 +683,6 @@ private:
             return;
         }
         apply_preset(j, is_feedback_preset(j), t);
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (inst_) ntscrt_flush_caches(inst_);
-        }
         update_dependents(t);
     }
 
@@ -601,13 +702,13 @@ private:
 
     // Errors during render: persistent message (no modal dialog per frame) when
     // the host has message suite V2, else a plain message.
-    void report_error(const std::string &msg) {
+    void report_error(const std::string &msg, OFX::Message::MessageTypeEnum type = OFX::Message::eMessageError) {
         had_error_ = true;
         try {
             if (OFX::getImageEffectHostDescription()->supportsMessageSuiteV2)
-                setPersistentMessage(OFX::Message::eMessageError, "", msg);
+                setPersistentMessage(type, "", msg);
             else
-                sendMessage(OFX::Message::eMessageError, "", msg);
+                sendMessage(type, "", msg);
         } catch (...) {
         }
     }
@@ -620,6 +721,14 @@ private:
     OFX::IntParam *seed_ = nullptr;
     OFX::BooleanParam *debug_ = nullptr;
     size_t last_look_hash_ = 0;  // debug logging: full look only when it changes
+    std::map<std::string, size_t> by_name_;  // host param name -> schema index
+    std::atomic<uint64_t> look_gen_{0};      // bumped by every param change
+    std::atomic<bool> keys_dirty_{true};     // re-count keyframes before the next render
+    bool animated_ = true;
+    std::map<double, std::string> look_cache_;  // render thread, under mu_
+    uint64_t look_cache_gen_ = ~uint64_t(0);
+    size_t look_builds_ = 0;
+    std::string last_warning_;  // degraded-frame message shown / logged
     ntscrt_instance *inst_ = nullptr;
     std::mutex mu_;
     bool applying_ = false;
@@ -642,7 +751,7 @@ struct RenderCtx {
         std::vector<uint8_t> padded;
     };
     std::map<const ntscrt_image *, Live> live;
-    std::string look_buf, fb_buf;
+    bool animated = true;  // some param has keyframes: other frames can differ
     int fetches = 0;  // other frames the core pulled (debug log)
 
     static const ntscrt_image *fetch(void *u, int64_t frame) {
@@ -665,9 +774,9 @@ struct RenderCtx {
     static void release(void *u, const ntscrt_image *im) { static_cast<RenderCtx *>(u)->live.erase(im); }
     static const char *look_at(void *u, int64_t frame) {
         auto *c = static_cast<RenderCtx *>(u);
+        if (!c->animated) return nullptr;  // "same as the current frame": nothing to build
         try {
-            c->fx->look_at_time(c->start + double(frame), c->look_buf, c->fb_buf);
-            return c->look_buf.c_str();
+            return c->fx->cached_look(c->start + double(frame)).c_str();
         } catch (...) {
             return nullptr;
         }
@@ -726,7 +835,7 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     const auto t_looked = std::chrono::steady_clock::now();
 
     OfxRangeD range = source_frame_range();
-    RenderCtx ctx{this, range.min, range.max, win, {}, {}, {}};
+    RenderCtx ctx{this, range.min, range.max, win, {}};
 
     ntscrt_render_args ra{};
     ra.frame_index = int64_t(std::llround(args.time - range.min));
@@ -746,18 +855,26 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         report_error("NTSCRT: core failed to initialise");
         OFX::throwSuiteStatusException(kOfxStatFailed);
     }
+    ctx.animated = animated();
+    if (ctx.animated) note_current_look(args.time, look);
+    const size_t builds_before = look_builds_;
     const auto t_core = std::chrono::steady_clock::now();
     ntscrt_status st = ntscrt_render_cpu(inst_, &ra, &s, &d);
+    const bool degraded =
+        st == NTSCRT_ERR_GPU || st == NTSCRT_ERR_MISSING_RESOURCE || st == NTSCRT_ERR_SOURCE_UNAVAILABLE;
+    const std::string err = st != NTSCRT_OK ? ntscrt_last_error(inst_) : std::string();
+    const bool new_warning = degraded && err != last_warning_;
     ++renders_;
     const auto t_done = std::chrono::steady_clock::now();
-    if (renders_ <= 20 || renders_ % 500 == 0 || dlog::verbose() || debug || st != NTSCRT_OK) {
+    if (renders_ <= 20 || renders_ % 500 == 0 || dlog::verbose() || debug || (st != NTSCRT_OK && !degraded) ||
+        new_warning) {
         auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
         std::ostringstream o;
         o << "instance #" << id_ << (debug ? " debug" : "") << " render #" << renders_ << " t=" << args.time
           << " frame=" << ra.frame_index << " fps=" << ra.fps << " scale=" << ra.render_scale << " dst=" << dlog::rect(win)
           << " src=" << dlog::rect(src->getBounds()) << " depth=" << dlog::depth_name(src->getPixelDepth())
           << " premult=" << ra.source_premultiplied << " status=" << int(st)
-          << (st != NTSCRT_OK ? std::string(" error=") + ntscrt_last_error(inst_) : std::string()) << " ms="
+          << (st != NTSCRT_OK ? std::string(degraded ? " degraded=" : " error=") + err : std::string()) << " ms="
           << std::chrono::duration_cast<std::chrono::milliseconds>(t_done - t0).count();
         if (debug) {
             // Per-phase timings (fetch = host images, look = reading every param, core = all stages)
@@ -765,7 +882,8 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
             o.setf(std::ios::fixed);
             o.precision(2);
             o << " fetch_ms=" << ms(t_start, t_fetched) << " look_ms=" << ms(t_fetched, t_looked)
-              << " core_ms=" << ms(t_core, t_done) << " seed=" << seed << " temporal_fetches=" << ctx.fetches;
+              << " core_ms=" << ms(t_core, t_done) << " seed=" << seed << " temporal_fetches=" << ctx.fetches
+              << " animated=" << ctx.animated << " look_builds=" << (look_builds_ - builds_before);
             const size_t h = std::hash<std::string>{}(look) ^ (std::hash<std::string>{}(fb) << 1);
             o << " look#" << std::hex << h << std::dec;
             if (h != last_look_hash_) {
@@ -778,10 +896,18 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         }
         dlog::write(o.str());
     }
-    if (st != NTSCRT_OK && st != NTSCRT_ERR_SOURCE_UNAVAILABLE) {
-        report_error(std::string("NTSCRT: ") + ntscrt_last_error(inst_));
+    if (st != NTSCRT_OK && !degraded) {
+        report_error(std::string("NTSCRT: ") + err);
         OFX::throwSuiteStatusException(kOfxStatFailed);
     }
+    if (degraded) {
+        // The frame is complete, just without what's missing: say so once (a
+        // persistent warning, no dialog per frame) and keep rendering.
+        if (new_warning) report_error(std::string("NTSCRT: ") + err, OFX::Message::eMessageWarning);
+        last_warning_ = err;
+        return;
+    }
+    last_warning_.clear();
     if (had_error_ && OFX::getImageEffectHostDescription()->supportsMessageSuiteV2) clearPersistentMessage();
     had_error_ = false;
 }

@@ -39,6 +39,10 @@ struct Param {
     std::vector<double> v;  // numeric components
     std::string str;        // string params
     int sets = 0;           // paramSetValue calls (plugin edits)
+    // Keyframes: time -> components. Non-empty: getValueAtTime interpolates
+    // linearly (held before the first / after the last), getNumKeys counts them.
+    std::map<double, std::vector<double>> keys;
+    long reads_at_time = 0;  // paramGetValueAtTime calls
 };
 
 struct ParamSet {
@@ -58,6 +62,9 @@ struct Clip {
     // frames the host can deliver: time -> RGBA32F bottom-up buffer
     int width = 0, height = 0;
     std::map<int, std::vector<float>> frames;
+    // Frame for any time 0..any_frame_last not in `frames` (long clips without the memory).
+    std::vector<float> any_frame;
+    int any_frame_last = -1;
     std::vector<int> fetched;  // times requested by the plugin
 };
 

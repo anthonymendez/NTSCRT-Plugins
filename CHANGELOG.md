@@ -15,6 +15,11 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 ## [Unreleased]
 
 ### Fixed
+- Faster seeks and edits in Resolve with Glitch on (the default): when no parameter is keyframed the plug-in no
+  longer rebuilds the look from all ~300 parameters for every earlier frame the Glitch receiver replays (up to
+  18 per frame while playing, every frame from 0 after an edit); keyframed looks are built once per frame and
+  reused until a parameter changes. An edit now only drops the caches that parameter can affect (a CRT tweak no
+  longer replays Glitch from frame 0; debug logging, presets menus and preset files drop nothing).
 - A CRT shader that can't load (missing or broken preset, librashader missing) no longer fails every frame and
   retries the load each time: the frame renders without the shader and the reason is shown once (Resolve: a
   persistent warning on the effect, plus the log). `ntscrt-cli` writes such frames and prints a warning.
