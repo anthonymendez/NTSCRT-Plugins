@@ -98,6 +98,9 @@ public:
     int fallback_status() const;
     const std::string &fallback_reason() const;
     size_t chain_load_attempts() const;  // tests: how often a chain was (re)built
+    // A preset that keeps state between frames (feedback / history) ran since
+    // construction or flush(): its pictures depend on the frames before them.
+    bool ran_temporal_preset() const;
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };

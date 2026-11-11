@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <map>
 #include <string_view>
 #include <tuple>
@@ -141,6 +142,7 @@ struct ntscrt_instance {
     std::shared_ptr<gpu::Device> dev;
     DigitalStage digital;
     NtscStage ntsc;
+    NtscStage howl_ntsc[2];  // Screen Loop history passes, two at a time on worker threads (render_once)
     std::unique_ptr<Downscaler> downscale;
     std::unique_ptr<GlitchStage> glitch;
     std::unique_ptr<CrtStage> crt;
@@ -491,19 +493,62 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             c.look = pin.get();
             return c;
         };
-        HowlHooks h;
-        h.chain_input = [&](const std::shared_ptr<gpu::Texture> &cam, const HowlPass &p) {
-            ImageBGRA8 im = download(*cam);
-            const auto pin = look_ptr(p.frame);
+        // The pass after NTSC: upload, Downscale, Glitch (on this thread, in frame order).
+        auto gpu_half = [&](const ImageBGRA8 &im, const std::shared_ptr<const json> &pin, const HowlPass &p) {
             FrameContext c = at(p.frame, pin);
-            FrameContext cn = at(p.ntsc_frame - 1, pin);  // ntsc_frame(cn) == p.ntsc_frame
-            if (inst->ntsc.active(*c.look)) inst->ntsc.process(im, cn);
             auto ch = inst->downscale->run(upload(im), c);
             FrameContext cg = c;
             cg.frame = int64_t(std::llround(p.glitch_time * ctx.fps));  // glitch_time(cg)
             if (inst->glitch->active(*c.look)) ch = inst->glitch->run(ch, cg);
             return ch;
         };
+        HowlHooks h;
+        h.chain_input = [&](const std::shared_ptr<gpu::Texture> &cam, const HowlPass &p) {
+            ImageBGRA8 im = download(*cam);
+            const auto pin = look_ptr(p.frame);
+            FrameContext cn = at(p.ntsc_frame - 1, pin);  // ntsc_frame(cn) == p.ntsc_frame
+            if (inst->ntsc.active(*pin)) inst->ntsc.process(im, cn);
+            return gpu_half(im, pin, p);
+        };
+        // The loop's history passes, pipelined: NTSC of a pass runs on a
+        // worker (each of the two in flight on its own NtscStage) while the
+        // loop exposes the next cameras; ntsc-rs's result depends only on its
+        // settings, frame and seed, and the GPU half runs here in frame order,
+        // so the pictures are chain_input's.
+        struct LoopJob {
+            ImageBGRA8 im;
+            std::shared_ptr<const json> pin;
+            std::future<void> cpu;  // last member: destroyed (waited for) first
+        };
+        constexpr int kJobs = 2;  // NTSC passes running at once (Howlaround allows 2 in flight)
+        std::shared_ptr<LoopJob> jobs[kJobs];
+        int64_t job_count = 0;
+        h.chain_input_begin = [&](const std::shared_ptr<gpu::Texture> &cam,
+                                  const HowlPass &p) -> std::function<std::shared_ptr<gpu::Texture>()> {
+            auto job = std::make_shared<LoopJob>();
+            job->im = download(*cam);
+            job->pin = look_ptr(p.frame);
+            auto &slot = jobs[job_count % kJobs];
+            if (slot && slot->cpu.valid()) slot->cpu.wait();
+            if (inst->ntsc.active(*job->pin)) {
+                FrameContext cn;  // what NtscStage reads, nothing that points into this call
+                cn.frame = p.ntsc_frame - 1;
+                cn.fps = ctx.fps;
+                cn.render_scale = ctx.render_scale;
+                cn.seed = ctx.seed;
+                cn.look = job->pin.get();
+                LoopJob *j = job.get();  // owns the future, so outlives the task
+                NtscStage *ntsc = &inst->howl_ntsc[job_count % kJobs];
+                j->cpu = std::async(std::launch::async, [j, ntsc, cn] { ntsc->process(j->im, cn); });
+            }
+            slot = job;
+            ++job_count;
+            return [&gpu_half, job, p] {
+                if (job->cpu.valid()) job->cpu.get();  // rethrows the worker's failure
+                return gpu_half(job->im, job->pin, p);
+            };
+        };
+        h.tv_keeps_state = [inst] { return inst->howl_crt->ran_temporal_preset(); };
         h.render_tv = [&](const gpu::Texture &ch, gpu::Texture &tv, const HowlPass &p) {
             const auto pin = look_ptr(p.frame);
             inst->howl_crt->render(ch, tv, at(p.shader_frame - 1, pin));  // shader_frame == p.shader_frame

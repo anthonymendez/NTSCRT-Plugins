@@ -116,8 +116,7 @@ struct GpuOps {
             mb.textures = {out.get(), scene_tex.get()};
             mb.out_textures = {sums.get()};
             dev.dispatch(kernel("howl_mean/tiles"), mb, tw, th);
-            dev.finish();
-            std::vector<float> px(size_t(tw) * th * 2);
+            std::vector<float> px(size_t(tw) * th * 2);  // download waits for the dispatch
             dev.download(*sums, px.data(), ptrdiff_t(tw) * 8);
             double cs = 0, ss = 0;
             for (size_t i = 0; i < px.size(); i += 2) { cs += px[i]; ss += px[i + 1]; }
@@ -150,8 +149,38 @@ struct GpuOps {
             TexPtr chain = hooks->chain_input(cam, p);
             if (chain) return render_tv(*chain, p);
         }
+        return direct_tv(cam);
+    }
+    // No chain: the TV shows the camera's picture resized.
+    TexPtr direct_tv(const Pic &cam) {
         howl::Size fb = howl::feedback_size(cam->desc().width, cam->desc().height);
         return resample(*cam, fb.width, fb.height);
+    }
+
+    // Pipelined TV passes (howl_engine.h): the chain's CPU half of one pass
+    // runs while the next camera is exposed.
+    struct Pending {
+        std::function<TexPtr()> finish;
+        HowlPass pass;
+        TexPtr cam;
+    };
+    int max_inflight() const { return has_hooks() && hooks->chain_input_begin ? 2 : 0; }
+    Pending tv_begin(const Pic &cam, const HowlPass &p) { return {hooks->chain_input_begin(cam, p), p, cam}; }
+    Pic tv_end(Pending &&q) {
+        TexPtr chain = q.finish ? q.finish() : nullptr;
+        return chain ? render_tv(*chain, q.pass) : direct_tv(q.cam);
+    }
+
+    static size_t bytes(const TexPtr &t) {
+        const auto &d = t->desc();
+        size_t px = 4;
+        switch (d.format) {
+            case gpu::Format::RGBA16F:
+            case gpu::Format::RG32F: px = 8; break;
+            case gpu::Format::RGBA32F: px = 16; break;
+            default: break;
+        }
+        return size_t(d.width) * size_t(d.height) * px;
     }
 };
 
@@ -169,6 +198,11 @@ struct Howlaround::Impl {
     int64_t last_frame = -1;
 
     explicit Impl(gpu::Device &d) : dev(d), ops(d) {}
+
+    // Checkpoints only while the TV pass keeps no state of its own.
+    void sync_checkpoints() {
+        if (engine) engine->set_checkpoints(!(hooks.tv_keeps_state && hooks.tv_keeps_state()));
+    }
 };
 
 Howlaround::Howlaround(gpu::Device &dev) : impl_(std::make_unique<Impl>(dev)) {}
@@ -240,7 +274,9 @@ std::shared_ptr<gpu::Texture> Howlaround::camera(const std::shared_ptr<gpu::Text
         m.engine = std::make_unique<howl::Engine<GpuOps>>(cfg);
         m.key = key;
     }
+    m.sync_checkpoints();
     TexPtr cam = m.engine->camera(m.ops, ctx.frame, scene);
+    m.sync_checkpoints();  // a temporal preset may first have run just now
     m.ops.ctx = nullptr;
     m.last_camera = cam;
     m.last_frame = ctx.frame;
@@ -264,7 +300,9 @@ void Howlaround::after_frame(const gpu::Texture &chain_input, const json &, cons
             m.engine.reset();
             return;
         }
-        m.engine->store_tv(ctx.frame, m.ops.render_tv(chain_input, m.engine->normal_pass(ctx.frame)));
+        TexPtr tv = m.ops.render_tv(chain_input, m.engine->normal_pass(ctx.frame));
+        m.sync_checkpoints();
+        m.engine->store_tv(ctx.frame, tv);
     } else {
         // No chain hooks: the TV shows the camera's picture directly, the same
         // as every recomputed history frame (so results don't depend on order).
