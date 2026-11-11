@@ -14,6 +14,25 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Added
+- Releases include `SHA256SUMS` and a signed build-provenance attestation for every file
+  (`gh attestation verify <file> -R anthonymendez/NTSCRT-Plugins`).
+- Release candidates: `vX.Y.Z-rc.N` tags are published as GitHub prereleases, which the installers'
+  default (`latest`) skips; testers install one with `-Version` / `--version vX.Y.Z-rc.N`.
+
+### Changed
+- The install scripts and installers check the downloaded zip against the release's `SHA256SUMS` and
+  refuse to install if it is missing or doesn't match (`-From` / `--from` with your own zip skips the check).
+  `-Version` / `--version` / `NTSCRT_VERSION` accept only `latest` or `vX.Y.Z[-rc.N]`.
+- macOS: `install.sh` only removes the quarantine flag and ad-hoc signs the plug-in when it has no real
+  signature. The .pkg installer logs to `/Library/Logs/NTSCRT/install.log` (and `/var/log/install.log`)
+  instead of a fixed file in /tmp.
+- The release zips carry `LICENSE` and `THIRD_PARTY_NOTICES.md` at their root.
+
+### Fixed
+- macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't
+  installed; it now removes both plug-ins and forgets the .pkg installer's receipt.
+
 ## [0.4.0] - 2026-11-10
 
 Debug logging and a one-click logs folder for bug reports, and README previews rendered by the plug-in in

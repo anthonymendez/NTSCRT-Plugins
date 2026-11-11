@@ -14,8 +14,7 @@ include(FetchContent)
 # SDK's own CMake project (conan-based) is not added; we build Support ourselves.
 FetchContent_Declare(openfx
   GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/openfx.git
-  GIT_TAG OFX_Release_1.5.1
-  GIT_SHALLOW TRUE
+  GIT_TAG ab779510b2655b4d11a7e01e5c521f9aa8c88976  # OFX_Release_1.5.1 (pinned by commit)
   SOURCE_SUBDIR _no_cmake_)
 FetchContent_MakeAvailable(openfx)
 
@@ -49,7 +48,7 @@ if(WIN32)
   target_link_libraries(ntscrt_ofx PRIVATE shell32 ole32)  # "Open logs folder" (ShellExecuteW)
 endif()
 target_compile_definitions(ntscrt_ofx PRIVATE
-  NTSCRT_VERSION_STRING="${PROJECT_VERSION}"
+  NTSCRT_VERSION_STRING="${NTSCRT_VERSION}"  # X.Y.Z or X.Y.Z-rc.N (PROJECT_VERSION drops -rc.N)
   NTSCRT_OFX_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
   NTSCRT_OFX_VERSION_MINOR=${PROJECT_VERSION_MINOR}
   NTSCRT_OFX_VERSION_PATCH=${PROJECT_VERSION_PATCH})

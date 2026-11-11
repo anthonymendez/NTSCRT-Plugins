@@ -6,10 +6,11 @@
 # The URL may point at the SDK exactly as Apple ships it (.dmg containing an
 # installer .pkg), at the .pkg itself, or at a .zip of either (or a .zip of an
 # already-installed /Library/Developer tree containing Frameworks/FxPlug.framework).
-# Optional FXPLUG_SDK_SHA256 pins the download. Never echoes the URL.
+# FXPLUG_SDK_SHA256 (required) pins the download. Never echoes the URL.
 set -euo pipefail
 
 : "${FXPLUG_SDK_URL:?FXPLUG_SDK_URL is not set}"
+: "${FXPLUG_SDK_SHA256:?FXPLUG_SDK_SHA256 is not set: add the SDK download's SHA-256 as a repository secret}"
 work="${RUNNER_TEMP:-/tmp}/fxplug-sdk"
 rm -rf "$work"; mkdir -p "$work"
 dl="$work/download"
@@ -17,9 +18,7 @@ dl="$work/download"
 echo "Downloading FxPlug SDK (URL hidden)..."
 curl --fail --location --silent --show-error --retry 3 -o "$dl" "$FXPLUG_SDK_URL"
 echo "downloaded $(wc -c < "$dl" | tr -d ' ') bytes"
-if [[ -n "${FXPLUG_SDK_SHA256:-}" ]]; then
-  echo "${FXPLUG_SDK_SHA256}  $dl" | shasum -a 256 -c -
-fi
+echo "${FXPLUG_SDK_SHA256}  $dl" | shasum -a 256 -c -
 
 kind="$(file -b "$dl")"
 echo "payload type: $kind"
