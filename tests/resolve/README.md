@@ -51,6 +51,7 @@ timeline's resolution from a script crashed Resolve 21.1.2, so other sizes are m
 | cli | default look on 8 frames, then every CRT preset | plug-in vs `ntscrt-cli` mean diff ≤ 2 (of 255) |
 | animated | *Glitch pop* chosen from the Preset menu, 40 frames; Horizontal resolution *Arcade*; the *Digital video/MiniDV* entry | the keyed values move over time; plug-in vs `ntscrt-cli --timeline` mean diff ≤ 2, and some frame differs from the frozen look by > 4; Width becomes 384; MiniDV turns Digital video on with Width 720 |
 | depth | 8-bit int, 16-bit int, 16-bit float sources | each within mean 1.5 of the 32-bit float result |
+| precision | a black-to-white ramp through Glow (Gauss) at 320 px wide, delivered as a 16-bit PNG from float32, float16 and int8 projects | int8: every value an 8-bit level (k*257); float32 / float16: at least half the values between 8-bit levels and 3x the distinct levels |
 | sizes | 1279×719, 1080×1920, 321×241 sources inside Fusion | renders, not black, lines up with the bypassed source |
 | speed | 1920×1080, every CRT preset | informational: ms per frame NTSCRT adds |
 | debug | *Debug logging* on for a few frames, then off; *Open logs folder* pressed (`SetInput`) | one detailed log line (timings, look) per frame, none after turning it off, the picture unchanged; the button press is logged and, headless, opens no window; Resolve still answers |

@@ -131,6 +131,47 @@ def read_png(path):
     return Image(w, h, rgba)
 
 
+def read_png_channel16(path, c):
+    """Channel `c` of a 16-bit RGB / RGBA PNG at full precision (0..65535)."""
+    data = Path(path).read_bytes()
+    pos, idat, ihdr = 8, [], None
+    while pos < len(data):
+        (ln,) = struct.unpack(">I", data[pos:pos + 4])
+        typ, body = data[pos + 4:pos + 8], data[pos + 8:pos + 8 + ln]
+        pos += 12 + ln
+        if typ == b"IHDR":
+            ihdr = struct.unpack(">IIBBBBB", body)
+        elif typ == b"IDAT":
+            idat.append(body)
+    w, h, bd, ct, _, _, interlace = ihdr
+    if bd != 16 or ct not in (2, 6) or interlace:
+        raise ValueError(f"{path}: not a 16-bit RGB(A) PNG (type {ct}, depth {bd})")
+    bpp = (3 if ct == 2 else 4) * 2
+    stride = w * bpp
+    raw = zlib.decompress(b"".join(idat))
+    prev, out, i = bytearray(stride), [], 0
+    for _ in range(h):
+        f, line = raw[i], bytearray(raw[i + 1:i + 1 + stride])
+        i += 1 + stride
+        for x in range(stride):
+            a = line[x - bpp] if x >= bpp else 0
+            b = prev[x]
+            cc = prev[x - bpp] if x >= bpp else 0
+            if f == 1:
+                line[x] = (line[x] + a) & 255
+            elif f == 2:
+                line[x] = (line[x] + b) & 255
+            elif f == 3:
+                line[x] = (line[x] + ((a + b) >> 1)) & 255
+            elif f == 4:
+                p = a + b - cc
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - cc)
+                line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else cc)) & 255
+        out.extend((line[k] << 8) | line[k + 1] for k in range(c * 2, stride, bpp))
+        prev = line
+    return out
+
+
 def write_png(path, img):
     rows = b"".join(b"\x00" + bytes(img.px[y * img.w * 4:(y + 1) * img.w * 4]) for y in range(img.h))
 
@@ -404,7 +445,7 @@ class Suite:
         comp = retry(lambda: item.GetFusionCompByIndex(1), "get the Fusion composition")
         return Fu(self, comp, tl), item
 
-    def render_timeline(self, tl, frames, tag):
+    def render_timeline(self, tl, frames, tag, codec="RGB8"):
         """Render frames of `tl` (offsets from its start) to PNG through the render queue.
         frames: list (one job per frame, in that order) or inclusive (a, b) tuple (one job).
         Returns {frame: path}, files renamed to <tag>-<frame:04d>.png."""
@@ -414,7 +455,7 @@ class Suite:
         out = {}
         for a, b in ranges:
             custom = f"{tag}-r{a}-"
-            retry(lambda: self.p.SetCurrentRenderFormatAndCodec("png", "RGB8"), "set the render format")
+            retry(lambda: self.p.SetCurrentRenderFormatAndCodec("png", codec), "set the render format")
             retry(lambda: self.p.SetRenderSettings({
                 "SelectAllFrames": False, "MarkIn": start + a, "MarkOut": start + b, "TargetDir": str(self.out),
                 "CustomName": custom, "FormatWidth": W, "FormatHeight": H}), "set render settings")
@@ -795,34 +836,37 @@ class Suite:
         self.record("depth", "fail" if problems else "pass", m, "; ".join(problems))
 
     def t_precision(self):
-        """Float projects keep the CRT shader's output finer than 8 bits: a dark ramp through Glow (Gauss),
-        then a x16 gain (a strong grade). An 8-bit result graded that way only holds multiples of 16 (bands);
-        at half-float precision most pixels fall in between. The int8 project is the 8-bit reference."""
+        """Float projects keep the CRT shader's output finer than 8 bits. A ramp through Glow (Gauss) at
+        180 lines (so the scanline profile varies smoothly) is delivered as a 16-bit PNG: from an int8
+        project every value is k*257 (an 8-bit level), from float32 / float16 projects most aren't."""
+        codecs = self.p.GetRenderCodecs("png") or {}
+        codec = next((c for c in codecs.values() if "16" in str(c)), None)
+        if not codec:
+            return self.record("precision", "skip", {"png_codecs": codecs}, "no 16-bit PNG render codec")
         fu, _ = self.new_comp("precision")
         ramp = fu.add("Background", UseFrameFormatSettings=0, Width=W, Height=H, Type="Horizontal",
                       TopLeftRed=0.0, TopLeftGreen=0.0, TopLeftBlue=0.0,
-                      TopRightRed=1 / 16, TopRightGreen=1 / 16, TopRightBlue=1 / 16)
-        fx = self.ntscrt(fu, ramp, ntsc_enabled=0, glitch_enabled=0,
+                      TopRightRed=1.0, TopRightGreen=1.0, TopRightBlue=1.0)
+        fx = self.ntscrt(fu, ramp, ntsc_enabled=0, glitch_enabled=0, downscale_width=320,
                          crt_preset=self.crt_presets().index("glow_gauss"))
-        grade = fu.add("BrightnessContrast", Input=fx, Gain=16.0)
-        m, problems = {}, []
+        fu.media_out.Input = fx.Output
+        m, problems = {"codec": codec}, []
         for depth, label in ((4, "float32"), (3, "float16"), (1, "int8")):
-            for t in (ramp, grade):
-                t.SetInput("Depth", depth)
-            img = read_png(fu.render({"grade": grade}, [2], f"precision-{label}")["grade"][2])
-            g = img.channel(1)
-            lit = [v for v in g if 8 <= v <= 247]  # away from black and clipped white
-            between = sum(1 for v in lit if min(v % 16, 16 - v % 16) > 1)
-            m[label] = {"lit": len(lit), "between_multiples_of_16": round(between / max(1, len(lit)), 3),
+            ramp.SetInput("Depth", depth)
+            path = self.render_timeline(fu.tl, [2], f"precision-{label}", codec=codec)[2]
+            g = read_png_channel16(path, 1)
+            lit = [v for v in g if 2 * 257 <= v <= 253 * 257]  # away from black and white
+            off = sum(1 for v in lit if v % 257 != 0)
+            m[label] = {"lit": len(lit), "off_8bit_levels": round(off / max(1, len(lit)), 3),
                         "levels": len(set(lit))}
-        if m["int8"]["lit"] < W * H // 8:
-            problems.append("test setup: the graded ramp is mostly black or white")
-        if m["int8"]["between_multiples_of_16"] > 0.15:
-            problems.append(f"test setup: the int8 reference isn't banded ({m['int8']})")
+        if m["int8"]["lit"] < W * H // 4:
+            problems.append(f"test setup: the ramp is mostly black or white ({m['int8']})")
+        if m["int8"]["off_8bit_levels"] > 0.02:
+            problems.append(f"test setup: the int8 reference isn't on 8-bit levels ({m['int8']})")
         for label in ("float32", "float16"):
-            if m[label]["between_multiples_of_16"] < 0.5:
-                problems.append(f"{label}: graded output is still 8-bit banded ({m[label]})")
-            if m[label]["levels"] < 2 * m["int8"]["levels"]:
+            if m[label]["off_8bit_levels"] < 0.5:
+                problems.append(f"{label}: output is still on 8-bit levels ({m[label]})")
+            if m[label]["levels"] < 3 * m["int8"]["levels"]:
                 problems.append(f"{label}: {m[label]['levels']} levels vs {m['int8']['levels']} in int8")
         self.record("precision", "fail" if problems else "pass", m, "; ".join(problems))
 
