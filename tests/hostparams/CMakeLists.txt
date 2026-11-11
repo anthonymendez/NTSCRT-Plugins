@@ -6,3 +6,6 @@ ntscrt_add_test(test_hostparams
   test_params_timeline.cpp
   test_ofx_reference.cpp)
 target_link_libraries(test_hostparams PRIVATE ntscrt_hostparams)
+
+ntscrt_add_test(test_hostparams_cross test_cross_host.cpp)
+target_link_libraries(test_hostparams_cross PRIVATE ntscrt_fx_model)

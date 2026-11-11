@@ -1,6 +1,7 @@
 # FxPlug 4 plug-in for Final Cut Pro / Motion (owner: agent F).
 #
-# - ntscrt_fx_model: portable parameter model, built + tested on every platform.
+# - ntscrt_fx_model: FxPlug ids / layout / plugin state over the shared host param
+#   model (hostparams/), built + tested on every platform.
 # - On macOS with the FxPlug SDK installed: "NTSCRT.app" wrapper application
 #   containing the "NTSCRT Renderer.pluginkit" XPC service (FxTileableEffect),
 #   the FxPlug/PluginManager frameworks, bundled presets/shaders and the Motion
@@ -8,7 +9,7 @@
 
 add_library(ntscrt_fx_model STATIC model/param_model.cpp)
 target_include_directories(ntscrt_fx_model PUBLIC model)
-target_link_libraries(ntscrt_fx_model PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(ntscrt_fx_model PUBLIC ntscrt_hostparams nlohmann_json::nlohmann_json)
 
 if(NTSCRT_BUILD_TESTS AND COMMAND ntscrt_add_test)
   ntscrt_add_test(test_fxplug_model tests/test_param_model.cpp)

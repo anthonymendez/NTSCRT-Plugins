@@ -69,6 +69,14 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   (`fxplug/tests/stubs`), so it is compiled even without the FxPlug SDK secret.
 
 ### Changed
+- One parameter model for both plug-ins: the new host-independent library `hostparams/` builds the look, applies
+  presets (keyframes, Digital video formats, choice applies, migration), evaluates the grey-out / hide rules,
+  orders the Preset menus and writes the log for the Resolve and the Final Cut plug-in alike, replacing
+  `ofx/ofx_params.*` and most of `fxplug/model/param_model.*`. Resolve renders exactly as before (a test compares
+  every bundled preset's look with what the old code built). Where the two differed, Final Cut now does what
+  Resolve does (table in docs/params.md): looks are built from the controls alone (no hidden saved preset copy),
+  the Screen Loop menu's Off / (Custom) switch the Screen Loop checkbox, conditions and choice labels are read
+  the same way, the Preset menu keeps the released order, Seed goes up to 2147483647.
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac
   serial numbers / hardware UUIDs), and trims crash reports to the crash itself. Non-text files are left out.
 - README: no longer says "in development"; says clearly that the Final Cut plug-in isn't released; adds system
@@ -120,6 +128,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   in the converter benchmark; a 1080p Glow (Gauss) frame ~20 ms instead of ~60 ms.
 
 ### Fixed
+- Final Cut: choosing or loading a Screen Loop preset file without an `"enabled"` key turns Screen Loop on in the
+  shared model itself (the core's "missing means on" rule), replacing a workaround in the plug-in.
 - The golden workflow builds upstream's `crt-smoke` again (a build-time workaround for a Swift type-checker
   limit in upstream's `DigitalVideoRenderer.swift`, applied on the runner only).
 - `ntscrt_doctor.py` collects the macOS installer log from `/Library/Logs/NTSCRT/` (where the .pkg writes it).

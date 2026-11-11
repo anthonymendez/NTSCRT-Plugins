@@ -25,7 +25,9 @@ NTSCRT.app                                   wrapper app (required by FxPlug 4)
     (schema groups → FxPlug subgroups, bool → checkbox, int/float → sliders,
     choice → popup, color → color well), plus *Preset* (bundled looks),
     *Load Preset…* / *Save Preset…* buttons, *Screen Loop* (Off / Custom / bundled
-    loops), *Seed*, *History Frames*, *Debug Logging* and *Open Logs Folder*;
+    loops: Off and Custom switch the schema's Screen Loop checkbox, a loop sets its
+    parameters and turns it on), *Seed* (0 to 2147483647, as in Resolve), *History
+    Frames*, *Debug Logging* and *Open Logs Folder*;
   - `pluginState:` evaluates every parameter at the render time and builds the
     look JSON (and Screen Loop JSON); with a temporal stage on (Digital, Glitch,
     Screen Loop) and some parameter keyframed (`FxKeyframeAPI_v3`) it also evaluates
@@ -47,9 +49,12 @@ NTSCRT.app                                   wrapper app (required by FxPlug 4)
     drops every temporal cache;
   - `NTSCRT_ERR_GPU` / `NTSCRT_ERR_MISSING_RESOURCE` / `NTSCRT_ERR_SOURCE_UNAVAILABLE`
     still wrote a complete frame: the render succeeds and the reason is logged once.
-- `model/` — host-independent parameter model (stable IDs, value conversion,
-  look assembly, plug-in state). Built and unit-tested on every platform
-  (`test_fxplug_model`).
+- `model/` — the FxPlug side of the host param model: stable IDs, control layout,
+  menu-index / RGB values and the plug-in state. Values, looks, presets, conditions
+  and menus come from the library the OpenFX plug-in uses too (`hostparams/`,
+  docs/params.md "One model for both plug-ins"), so a preset gives the same look in
+  Final Cut as in Resolve (`test_hostparams_cross`). Built and unit-tested on every
+  platform (`test_fxplug_model`).
 - `param_ids.json` — **append-only** map from schema ids to FxPlug parameter
   IDs. FCP/Motion projects store values by these numbers: never edit or reuse
   one. After the schema changes run `python3 fxplug/tools/update_param_ids.py`
