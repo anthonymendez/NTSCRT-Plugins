@@ -129,10 +129,10 @@ function Write-Look([string]$name, [string]$json) {
     $p = Join-Path $WorkDir "$name.json"; [IO.File]::WriteAllText($p, $json); $p
 }
 
-function Invoke-RenderSeq([string]$pattern, [string]$outPattern, [string]$look, [int]$first, [int]$frames) {
-    $a = @('--seq', $pattern, '--out', $outPattern, '--resources', $Resources, '--fps', '30', '--frame', "$first", '--frames', "$frames")
+function Invoke-RenderSeq([string]$exe, [string]$resDir, [string]$pattern, [string]$outPattern, [string]$look, [int]$first, [int]$frames) {
+    $a = @('--seq', $pattern, '--out', $outPattern, '--resources', $resDir, '--fps', '30', '--frame', "$first", '--frames', "$frames")
     if ($look) { $a += @('--look', $look) }
-    & $Cli @a
+    & $exe @a
     if ($LASTEXITCODE -ne 0) { throw "ntscrt-cli failed for $outPattern" }
 }
 
@@ -192,10 +192,10 @@ function New-Grid([object[]]$tiles, [string]$path) {
 
 # Animated WebP rather than GIF: full colour instead of a 128-colour dithered palette, and about 40%
 # smaller at quality 85 (the images live in git history, so every refresh adds their size).
-function New-Webp([string]$pattern, [int]$width, [string]$path) {
-    $vf = "fps=$GifFps,scale=${width}:-1:flags=lanczos"
+function New-Webp([string]$pattern, [int]$width, [string]$path, [int]$fps, [int]$quality) {
+    $vf = "fps=$fps,scale=${width}:-1:flags=lanczos"
     & $ffmpeg -hide_banner -loglevel error -y -framerate 30 -i $pattern -vf $vf `
-        -c:v libwebp_anim -lossless 0 -q:v $WebpQuality -compression_level 6 -preset picture -loop 0 $path
+        -c:v libwebp_anim -lossless 0 -q:v $quality -compression_level 6 -preset picture -loop 0 $path
     if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed for $path" }
 }
 
@@ -226,7 +226,7 @@ if ($Renders) {
     $rdir = $Renders
 } else {
     $rdir = Join-Path $WorkDir 'renders'; New-Item -ItemType Directory -Force $rdir | Out-Null
-    foreach ($l in $looks) { Invoke-RenderSeq $inPattern (Join-Path $rdir "$($l.Name)-%04d.png") $l.Look $l.Start $GifFrames }
+    foreach ($l in $looks) { Invoke-RenderSeq $Cli $Resources $inPattern (Join-Path $rdir "$($l.Name)-%04d.png") $l.Look $l.Start $GifFrames }
 }
 function Frame($l, [int]$k) { Join-Path $rdir ('{0}-{1:D4}.png' -f $l.Name, ($l.Start + $k)) }
 
@@ -237,6 +237,6 @@ for ($k = 0; $k -lt $GifFrames; $k++) {
     $tiles = foreach ($l in $looks[1..4]) { @{ Label = $l.Label; Crop = $l.Crop; Path = (Frame $l $k) } }
     New-Grid $tiles (Join-Path $comp ('grid_{0:D4}.png' -f $k))
 }
-New-Webp (Join-Path $comp 'hero_%04d.png') $GifWidth (Join-Path $OutDir 'hero-before-after.webp')
-New-Webp (Join-Path $comp 'grid_%04d.png') $GridWidth (Join-Path $OutDir 'looks-grid.webp')
+New-Webp (Join-Path $comp 'hero_%04d.png') $GifWidth (Join-Path $OutDir 'hero-before-after.webp') $GifFps $WebpQuality
+New-Webp (Join-Path $comp 'grid_%04d.png') $GridWidth (Join-Path $OutDir 'looks-grid.webp') $GifFps $WebpQuality
 Get-ChildItem $OutDir | Select-Object Name, Length | Format-Table -AutoSize

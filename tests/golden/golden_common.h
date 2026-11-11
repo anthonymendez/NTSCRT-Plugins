@@ -51,9 +51,15 @@ struct DiffStats {
     double frac_over_16 = 0; // fraction of pixels with any channel off by > 16
 };
 
-// Compares RGB only: crt-smoke writes premultiplied-first BGRA with shader
-// alpha, ntscrt passes source alpha through, so alpha is not comparable.
-inline DiffStats compare_rgb(const Image &a, const Image &b, Image *diff = nullptr) {
+// Mean / max absolute difference over the first `channels` channels (3 = RGB,
+// 4 = RGBA). Upstream references are compared on RGB only: crt-smoke writes
+// premultiplied-first BGRA with shader alpha, ntscrt passes source alpha
+// through, so alpha is not comparable there. Self-references compare RGBA;
+// with `premultiply`, straight colour is weighted by its alpha first (what
+// shows once composited: a one-level change of a nearly transparent pixel's
+// brightness would otherwise look like a large colour change).
+inline DiffStats compare(const Image &a, const Image &b, Image *diff = nullptr, int channels = 3,
+                         bool premultiply = false) {
     DiffStats s;
     if (a.w != b.w || a.h != b.h || a.w == 0 || a.h == 0) return s;
     s.same_size = true;
@@ -62,19 +68,30 @@ inline DiffStats compare_rgb(const Image &a, const Image &b, Image *diff = nullp
     if (diff) { diff->w = a.w; diff->h = a.h; diff->px.assign(n * 4, 255); }
     for (size_t i = 0; i < n; ++i) {
         int pm = 0;
-        for (int c = 0; c < 3; ++c) {
-            int d = std::abs(int(a.px[i * 4 + c]) - int(b.px[i * 4 + c]));
+        for (int c = 0; c < channels; ++c) {
+            int va = a.px[i * 4 + c], vb = b.px[i * 4 + c];
+            if (premultiply && c < 3) {
+                va = (va * a.px[i * 4 + 3] + 127) / 255;
+                vb = (vb * b.px[i * 4 + 3] + 127) / 255;
+            }
+            int d = std::abs(va - vb);
             sum += uint64_t(d);
             pm = std::max(pm, d);
-            if (diff) diff->px[i * 4 + c] = uint8_t(std::min(255, d * 8));  // amplified
+            if (diff && c < 3) diff->px[i * 4 + c] = uint8_t(std::min(255, d * 8));  // amplified
         }
+        if (diff && channels == 4)  // an alpha difference shows as magenta
+            for (int c : {0, 2})
+                diff->px[i * 4 + c] = std::max(diff->px[i * 4 + c],
+                    uint8_t(std::min(255, 8 * std::abs(int(a.px[i * 4 + 3]) - int(b.px[i * 4 + 3])))));
         s.max_abs = std::max(s.max_abs, pm);
         if (pm > 16) ++over;
     }
-    s.mean_abs = double(sum) / double(n * 3);
+    s.mean_abs = double(sum) / double(n * channels);
     s.frac_over_16 = double(over) / double(n);
     return s;
 }
+
+inline DiffStats compare_rgb(const Image &a, const Image &b, Image *diff = nullptr) { return compare(a, b, diff, 3); }
 
 // Upstream AppState.downscaleHeight: max(16, 2 * round(width / aspect / 2)).
 inline int downscale_height(int width, int src_w, int src_h) {

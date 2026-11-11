@@ -1,0 +1,565 @@
+{
+ "version": 1,
+ "note": "Self-references: ntscrt_core regression baselines (tests/golden/test_golden_self.cpp). Refs: self/ref/<id>-f<frame>.png, per-OS overrides in self/ref-windows|ref-macos/. Regenerate after an intended look change: cmake --build <build> --config Release --target golden-update. 'input_downscale' (integer box factor) shrinks the input to keep refs small. Tolerances (a number or {\"windows\": a, \"macos\": b, \"default\": c}): 'threshold' = max mean abs difference over RGBA (colour premultiplied by alpha), 0..255 units; 'max_over16' = max share of pixels with a channel off by more than 16. The defaults allow GPU-to-GPU float differences (NVIDIA vs WARP: mean <= 0.43, no pixel off by > 16) and catch a changed look.",
+ "default_threshold": 1.0,
+ "entries": [
+  {
+   "id": "digital-dct",
+   "input": "game-frame.png",
+   "motion": [
+    3,
+    1
+   ],
+   "sequence": true,
+   "frames": [
+    0,
+    4
+   ],
+   "look": {
+    "downscale": {
+     "enabled": false
+    },
+    "ntsc": {
+     "enabled": false
+    },
+    "glitch": {
+     "enabled": false
+    },
+    "shader": {
+     "enabled": false
+    },
+    "crop": {
+     "enabled": false
+    },
+    "digital": {
+     "enabled": true,
+     "values": {
+      "codec": 0,
+      "quality": 0.35,
+      "chroma": 2,
+      "keyframe_interval": 3,
+      "sensor_noise": 0.3,
+      "sharpening": 0.4,
+      "data_loss": 0.2
+     }
+    }
+   },
+   "note": "Digital, DCT codec: a keyframe and a predicted frame of a moving picture",
+   "input_downscale": 2
+  },
+  {
+   "id": "digital-video1",
+   "input": "game-frame.png",
+   "motion": [
+    3,
+    1
+   ],
+   "sequence": true,
+   "frames": [
+    0,
+    4
+   ],
+   "look": {
+    "downscale": {
+     "enabled": false
+    },
+    "ntsc": {
+     "enabled": false
+    },
+    "glitch": {
+     "enabled": false
+    },
+    "shader": {
+     "enabled": false
+    },
+    "crop": {
+     "enabled": false
+    },
+    "digital": {
+     "enabled": true,
+     "values": {
+      "codec": 1,
+      "quality": 0.5,
+      "keyframe_interval": 3,
+      "sensor_noise": 0.3
+     }
+    }
+   },
+   "note": "Digital, Microsoft Video 1 (block colours)",
+   "input_downscale": 2
+  },
+  {
+   "id": "glitch-vhold",
+   "input": "game-frame.png",
+   "preset": "V Hold glitch",
+   "frames": [
+    30,
+    40,
+    50
+   ],
+   "note": "Glitch receiver at a few frames of a timed preset (seek, no playback)",
+   "input_downscale": 2
+  },
+  {
+   "id": "glitch-freakout",
+   "input": "game-frame.png",
+   "preset": "Vertical Freak Out",
+   "frames": [
+    15,
+    45
+   ],
+   "note": "Glitch, vertical",
+   "input_downscale": 2
+  },
+  {
+   "id": "screenloop-12-copies-luma-key",
+   "input": "game-frame.png",
+   "screen_loop": "12 copies luma key",
+   "motion": [
+    2,
+    0
+   ],
+   "sequence": true,
+   "frames": [
+    6
+   ],
+   "note": "Screen Loop preset, after 6 frames of playback",
+   "input_downscale": 2
+  },
+  {
+   "id": "screenloop-15-copies-color-drift",
+   "input": "game-frame.png",
+   "screen_loop": "15 copies color drift",
+   "motion": [
+    2,
+    0
+   ],
+   "sequence": true,
+   "frames": [
+    6
+   ],
+   "note": "Screen Loop preset, after 6 frames of playback",
+   "input_downscale": 2
+  },
+  {
+   "id": "screenloop-22-copies-bottom-left",
+   "input": "game-frame.png",
+   "screen_loop": "22 copies bottom left",
+   "motion": [
+    2,
+    0
+   ],
+   "sequence": true,
+   "frames": [
+    6
+   ],
+   "note": "Screen Loop preset, after 6 frames of playback",
+   "input_downscale": 2
+  },
+  {
+   "id": "screenloop-7-copies-slow-luma",
+   "input": "game-frame.png",
+   "screen_loop": "7 copies slow luma",
+   "motion": [
+    2,
+    0
+   ],
+   "sequence": true,
+   "frames": [
+    6
+   ],
+   "note": "Screen Loop preset, after 6 frames of playback",
+   "input_downscale": 2
+  },
+  {
+   "id": "screenloop-bottom-to-top",
+   "input": "game-frame.png",
+   "screen_loop": "Bottom to top",
+   "motion": [
+    2,
+    0
+   ],
+   "sequence": true,
+   "frames": [
+    6
+   ],
+   "note": "Screen Loop preset, after 6 frames of playback",
+   "input_downscale": 2
+  },
+  {
+   "id": "alpha-clip",
+   "input": "game-frame.png",
+   "alpha": "disc",
+   "frames": [
+    3
+   ],
+   "look": {
+    "alpha": {
+     "mode": "clip"
+    }
+   },
+   "note": "default look, straight-alpha disc, Clip",
+   "input_downscale": 2
+  },
+  {
+   "id": "alpha-spill",
+   "input": "game-frame.png",
+   "alpha": "disc",
+   "frames": [
+    3
+   ],
+   "look": {
+    "alpha": {
+     "mode": "spill"
+    }
+   },
+   "note": "default look, straight-alpha disc, Spill",
+   "input_downscale": 2
+  },
+  {
+   "id": "alpha-spill-premult",
+   "input": "game-frame.png",
+   "alpha": "disc",
+   "premultiplied": true,
+   "frames": [
+    3
+   ],
+   "look": {
+    "alpha": {
+     "mode": "spill"
+    }
+   },
+   "note": "Spill with premultiplied source and output",
+   "input_downscale": 2
+  },
+  {
+   "id": "crop-1x1",
+   "input": "game-frame.png",
+   "frames": [
+    2
+   ],
+   "look": {
+    "crop": {
+     "enabled": true,
+     "ratio": "1:1",
+     "x": 0.3,
+     "y": 0.5,
+     "scale": 1.5
+    }
+   },
+   "note": "crop 1:1 off-centre, zoomed: letterboxed into the full frame",
+   "input_downscale": 2
+  },
+  {
+   "id": "crop-alpha-spill",
+   "input": "game-frame.png",
+   "alpha": "disc",
+   "frames": [
+    2
+   ],
+   "look": {
+    "crop": {
+     "enabled": true,
+     "ratio": "9:16"
+    },
+    "alpha": {
+     "mode": "spill"
+    }
+   },
+   "note": "crop + transparent source (Spill uses brightness only)",
+   "input_downscale": 2
+  },
+  {
+   "id": "sequence-mediumvhs",
+   "input": "game-frame.png",
+   "preset": "Medium VHS",
+   "motion": [
+    4,
+    0
+   ],
+   "sequence": true,
+   "frames": [
+    0,
+    3,
+    6
+   ],
+   "note": "temporal: a scrolling clip played through frames 0..6",
+   "input_downscale": 2
+  },
+  {
+   "id": "scale-half",
+   "input": "game-frame.png",
+   "render_scale": 0.5,
+   "frames": [
+    2
+   ],
+   "note": "default look at render_scale 0.5 (proxy): half-size source, pixel params scaled",
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-15-second-glitches",
+   "input": "game-frame.png",
+   "preset": "15 second glitches",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-5-second-blips",
+   "input": "game-frame.png",
+   "preset": "5 second blips",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-5-second-glitch",
+   "input": "game-frame.png",
+   "preset": "5 second glitch",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-5-seconds-mild-glitch",
+   "input": "game-frame.png",
+   "preset": "5 seconds mild glitch",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-cd-rom-low-quality",
+   "input": "game-frame.png",
+   "preset": "CD-ROM (low quality)",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2,
+   "threshold": 4.0,
+   "max_over16": 0.12,
+   "note": "Video 1 after a nearest-neighbour GPU downscale: a sub-pixel GPU difference flips block colours at edges (WARP vs NVIDIA: mean 2.8, 8% of pixels)"
+  },
+  {
+   "id": "preset-chunky-webcam",
+   "input": "game-frame.png",
+   "preset": "Chunky webcam",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-clean-crt",
+   "input": "game-frame.png",
+   "preset": "Clean CRT",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-clean-vhs",
+   "input": "game-frame.png",
+   "preset": "Clean VHS",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-gentle-waves-loop",
+   "input": "game-frame.png",
+   "preset": "Gentle waves loop",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-glitch-1",
+   "input": "game-frame.png",
+   "preset": "Glitch 1",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-glitch-2",
+   "input": "game-frame.png",
+   "preset": "Glitch 2",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-glitch-loop-1",
+   "input": "game-frame.png",
+   "preset": "Glitch loop 1",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-glitch-pop",
+   "input": "game-frame.png",
+   "preset": "Glitch pop",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-gltch-3",
+   "input": "game-frame.png",
+   "preset": "Gltch 3",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-high-chroma-static",
+   "input": "game-frame.png",
+   "preset": "High Chroma static",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-low-res",
+   "input": "game-frame.png",
+   "preset": "Low Res",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-medium-vhs",
+   "input": "game-frame.png",
+   "preset": "Medium VHS",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-mild-vhs",
+   "input": "game-frame.png",
+   "preset": "Mild VHS",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-obliterated",
+   "input": "game-frame.png",
+   "preset": "Obliterated",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-readable-text",
+   "input": "game-frame.png",
+   "preset": "Readable Text",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-static-loop-1",
+   "input": "game-frame.png",
+   "preset": "Static loop 1",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-tracking-noise-up",
+   "input": "game-frame.png",
+   "preset": "Tracking Noise up",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-two-blips-loop",
+   "input": "game-frame.png",
+   "preset": "Two blips loop",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-v-hold-glitch",
+   "input": "game-frame.png",
+   "preset": "V Hold glitch",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-vertical-freak-out",
+   "input": "game-frame.png",
+   "preset": "Vertical Freak Out",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-vertical-spike-loop",
+   "input": "game-frame.png",
+   "preset": "Vertical spike loop",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-very-wavy",
+   "input": "game-frame.png",
+   "preset": "Very wavy",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-wavy-loop",
+   "input": "game-frame.png",
+   "preset": "Wavy loop",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
+   "id": "preset-webcam-low-quality",
+   "input": "game-frame.png",
+   "preset": "Webcam (low quality)",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  }
+ ],
+ "default_max_over16": 0.005
+}

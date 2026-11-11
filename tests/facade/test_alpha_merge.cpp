@@ -5,18 +5,15 @@
 #include <cmath>
 #include <vector>
 
+#include "../gpu/gpu_test_util.h"
 #include "gpu/gpu.h"
 #include "pixel_convert.h"
 
 using namespace ntscrt::gpu;
 
 TEST_CASE("alpha_merge matches merge_alpha for every mode") {
-#ifdef _WIN32
-    auto dev = Device::create(Backend::D3D11, nullptr, nullptr);
-#else
-    auto dev = Device::create(Backend::Metal, nullptr, nullptr);
-#endif
-    if (!dev) { MESSAGE("no GPU: ", Device::last_create_error()); return; }
+    auto dev = gputest::device();  // fails instead of skipping under NTSCRT_REQUIRE_GPU=1
+    if (!dev) return;
     const int w = 5, h = 3;
     std::vector<uint8_t> rgb(w * h * 4);
     std::vector<float> src(w * h * 4);
