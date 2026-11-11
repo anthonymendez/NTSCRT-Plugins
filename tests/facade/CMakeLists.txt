@@ -1,1 +1,1 @@
-ntscrt_add_test(test_facade test_alpha_merge.cpp test_pixel_alpha.cpp test_render_cache.cpp)
+ntscrt_add_test(test_facade test_alpha_merge.cpp test_pixel_alpha.cpp test_render_cache.cpp test_pixel_formats.cpp)

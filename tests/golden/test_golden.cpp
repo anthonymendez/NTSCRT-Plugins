@@ -123,7 +123,10 @@ TEST_CASE("golden: ntscrt_core matches upstream crt-smoke references") {
         ntscrt_image di{out.w, out.h, ptrdiff_t(out.w) * 4, NTSCRT_RGBA8, out.px.data()};
         const std::string look_s = look->dump();
         ntscrt_render_args ra{};
-        ra.frame_index = e.value("frame", 1);
+        // crt-smoke --frame N feeds ntsc-rs frame N and the shader FrameCount N; ntscrt_core
+        // numbers clip frames from 0 and passes frame + 1 to both (internal.h ntsc_frame /
+        // shader_frame, upstream's export convention), so N - 1 is the same frame.
+        ra.frame_index = e.value("frame", 1) - 1;
         ra.fps = 30.0;
         ra.look_json = look_s.c_str();
         ra.render_scale = 1.0;

@@ -1,28 +1,119 @@
 {
   "version": 1,
-  "note": "Golden references: each entry is rendered by UPSTREAM NTSCRT's crt-smoke (golden workflow, macOS) into ref/<id>.png + ref/<id>.json, and by ntscrt_core in test_golden. Inputs live in upstream/NTSCRT/TestAssets. Output size = input size. Editing this file re-runs the golden workflow; commit the artifact's files under tests/golden/ref/.",
+  "note": "Golden references: each entry is rendered by UPSTREAM NTSCRT's crt-smoke (golden workflow, macOS) into ref/<id>.png + ref/<id>.json, and by ntscrt_core in test_golden. Inputs live in upstream/NTSCRT/TestAssets. Output size = input size. Editing this file re-runs the golden workflow; commit the artifact's files under tests/golden/ref/. Only setups where crt-smoke renders what the app renders are comparable: the chain input's height must divide the output height (else the app supersamples, ScanlineGrid, and crt-smoke doesn't), and ntsc must be a full preset (\"default\" = pure ntsc-rs defaults in crt-smoke but the app's house defaults in ntscrt_core). crt-smoke --frame N = ntscrt frame_index N - 1. See docs/TESTING.md.",
   "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
   "librashader_commit": "76462c03",
   "default_threshold": 2.0,
   "entries": [
-    { "id": "testpattern-crtglow_gauss", "input": "testpattern.png", "shader": "crt/crtglow_gauss.slangp", "frame": 1 },
-    { "id": "testpattern-crt-royale-down320area", "input": "testpattern.png", "shader": "crt/crt-royale.slangp",
-      "downscale": { "width": 320, "method": "area" }, "frame": 1 },
-    { "id": "gameframe-crt-easymode", "input": "game-frame.png", "shader": "crt/crt-easymode.slangp", "frame": 1 },
-    { "id": "gameframe-crt-hyllian-down256nearest", "input": "game-frame.png", "shader": "crt/crt-hyllian.slangp",
-      "downscale": { "width": 256, "method": "nearest" }, "frame": 1 },
-    { "id": "testpattern-crt-aperture-down320lanczos", "input": "testpattern.png", "shader": "crt/crt-aperture.slangp",
-      "downscale": { "width": 320, "method": "lanczos" }, "frame": 1 },
-    { "id": "testpattern-crtsim", "input": "testpattern.png", "shader": "crt/crtsim.slangp", "frame": 1 },
-    { "id": "gameframe-crtglow_lanczos-down256area", "input": "game-frame.png", "shader": "crt/crtglow_lanczos.slangp",
-      "downscale": { "width": 256, "method": "area" }, "frame": 1 },
-    { "id": "testpattern-ntscdefault-crtglow_gauss-down320area", "input": "testpattern.png", "shader": "crt/crtglow_gauss.slangp",
-      "downscale": { "width": 320, "method": "area" }, "ntsc": "default", "frame": 1, "threshold": 3.0 },
-    { "id": "gameframe-mildvhs-crtglow_gauss-down256nearest-f5", "input": "game-frame.png", "shader": "crt/crtglow_gauss.slangp",
-      "downscale": { "width": 256, "method": "nearest" }, "ntsc": { "preset": "Mild VHS" }, "frame": 5, "threshold": 3.0 },
-    { "id": "flatgray-mediumvhs-crt-royale-down320area-f30", "input": "flat-gray.png", "shader": "crt/crt-royale.slangp",
-      "downscale": { "width": 320, "method": "area" }, "ntsc": { "preset": "Medium VHS" }, "frame": 30, "threshold": 3.0 },
-    { "id": "testpattern-crtglow_gauss-setparams", "input": "testpattern.png", "shader": "crt/crtglow_gauss.slangp",
-      "shader_params": { "CURVATURE": 1.0, "BOOST": 1.3 }, "frame": 1 }
+    {
+      "id": "testpattern-crtglow_gauss",
+      "input": "testpattern.png",
+      "shader": "crt/crtglow_gauss.slangp",
+      "frame": 1
+    },
+    {
+      "id": "testpattern-crt-royale-down320area",
+      "input": "testpattern.png",
+      "shader": "crt/crt-royale.slangp",
+      "downscale": {
+        "width": 320,
+        "method": "area"
+      },
+      "frame": 1
+    },
+    {
+      "id": "gameframe-crt-easymode",
+      "input": "game-frame.png",
+      "shader": "crt/crt-easymode.slangp",
+      "frame": 1
+    },
+    {
+      "id": "gameframe-crt-hyllian-down160nearest",
+      "input": "game-frame.png",
+      "shader": "crt/crt-hyllian.slangp",
+      "downscale": {
+        "width": 160,
+        "method": "nearest"
+      },
+      "frame": 1
+    },
+    {
+      "id": "testpattern-crt-aperture-down320lanczos",
+      "input": "testpattern.png",
+      "shader": "crt/crt-aperture.slangp",
+      "downscale": {
+        "width": 320,
+        "method": "lanczos"
+      },
+      "frame": 1
+    },
+    {
+      "id": "testpattern-crtsim",
+      "input": "testpattern.png",
+      "shader": "crt/crtsim.slangp",
+      "frame": 1
+    },
+    {
+      "id": "gameframe-crtglow_lanczos-down160area",
+      "input": "game-frame.png",
+      "shader": "crt/crtglow_lanczos.slangp",
+      "downscale": {
+        "width": 160,
+        "method": "area"
+      },
+      "frame": 1
+    },
+    {
+      "id": "testpattern-cleanvhs-crtglow_gauss-down320area",
+      "input": "testpattern.png",
+      "shader": "crt/crtglow_gauss.slangp",
+      "downscale": {
+        "width": 320,
+        "method": "area"
+      },
+      "ntsc": {
+        "preset": "Clean VHS"
+      },
+      "frame": 1,
+      "threshold": 3.0
+    },
+    {
+      "id": "gameframe-mildvhs-crtglow_gauss-down160nearest-f5",
+      "input": "game-frame.png",
+      "shader": "crt/crtglow_gauss.slangp",
+      "downscale": {
+        "width": 160,
+        "method": "nearest"
+      },
+      "ntsc": {
+        "preset": "Mild VHS"
+      },
+      "frame": 5,
+      "threshold": 3.0
+    },
+    {
+      "id": "flatgray-mediumvhs-crt-royale-down320area-f30",
+      "input": "flat-gray.png",
+      "shader": "crt/crt-royale.slangp",
+      "downscale": {
+        "width": 320,
+        "method": "area"
+      },
+      "ntsc": {
+        "preset": "Medium VHS"
+      },
+      "frame": 30,
+      "threshold": 3.0
+    },
+    {
+      "id": "testpattern-crtglow_gauss-setparams",
+      "input": "testpattern.png",
+      "shader": "crt/crtglow_gauss.slangp",
+      "shader_params": {
+        "CURVATURE": 1.0,
+        "BOOST": 1.3
+      },
+      "frame": 1
+    }
   ]
 }
