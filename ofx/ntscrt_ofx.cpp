@@ -522,24 +522,32 @@ public:
     }
 
     // ---- look history for the core's look_at ------------------------------
-    // Re-counts keyframes when a param changed since the last count: with none
+    // Counts keyframes every render (cheap next to one look build): with none
     // anywhere every frame has the current look, and look_at answers NULL.
+    // Resolve doesn't always report keyframe edits through changedParam (a
+    // scripted spline, for one), so a key layout that changed without a
+    // reported edit drops the history like an edit would. Under mu_.
     bool animated() {
-        if (keys_dirty_.exchange(false)) {
-            bool any = false;
-            for (OFX::Param *q : params_) {
-                try {
-                    if (static_cast<OFX::ValueParam *>(q)->getNumKeys() > 0) {
-                        any = true;
-                        break;
-                    }
-                } catch (...) {
-                    any = true;  // can't tell: assume animated
-                    break;
-                }
+        const bool reported = keys_dirty_.exchange(false);
+        uint64_t sig = 0;
+        bool unknown = false;
+        for (size_t i = 0; i < params_.size(); ++i) {
+            try {
+                if (int n = static_cast<OFX::ValueParam *>(params_[i])->getNumKeys())
+                    sig = (sig ^ (uint64_t(i) << 32 | uint32_t(n))) * 0x100000001B3ull + 1;
+            } catch (...) {
+                unknown = true;  // can't tell: assume animated
             }
-            animated_ = any;
         }
+        if (sig != keys_sig_ && !reported && keys_counted_) {
+            ++look_gen_;
+            dlog::write("instance #" + std::to_string(id_) + " keyframes changed without a param change notification: "
+                        "caches dropped");
+            if (inst_) ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
+        }
+        keys_sig_ = sig;
+        keys_counted_ = true;
+        animated_ = sig != 0 || unknown;
         return animated_;
     }
     // The look at time t, built once per param state (look_gen_). The string
@@ -725,6 +733,8 @@ private:
     std::atomic<uint64_t> look_gen_{0};      // bumped by every param change
     std::atomic<bool> keys_dirty_{true};     // re-count keyframes before the next render
     bool animated_ = true;
+    uint64_t keys_sig_ = 0;      // key counts per param, hashed (0 = no keys anywhere)
+    bool keys_counted_ = false;
     std::map<double, std::string> look_cache_;  // render thread, under mu_
     uint64_t look_cache_gen_ = ~uint64_t(0);
     size_t look_builds_ = 0;

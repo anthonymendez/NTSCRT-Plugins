@@ -493,6 +493,15 @@ TEST_CASE("edits and seeks: look history, cache flushing, timings") {
     REQUIRE(f.changed("crt_glow_gauss_BOOST", 240) == kOfxStatOK);
     Shot anim_crt = render(245);
     CHECK(anim_crt.px == purged(245));
+    // Keys added without any changedParam (Resolve does that for scripted splines): caught.
+    sig->keys.clear();
+    sig->v[0] = 1.0;
+    REQUIRE(f.changed("glitch_signal_strength", 240) == kOfxStatOK);
+    render(245);
+    sig->keys = {{0.0, {0.1}}, {300.0, {1.0}}};  // no f.changed()
+    Shot unreported = render(245);
+    REQUIRE(f.changed("glitch_signal_strength", 240) == kOfxStatOK);  // the same state, reported
+    CHECK(unreported.px == purged(245));
     report << "\nkeyframed Glitch: seek to 240 " << anim_seek.ms << " ms (" << anim_seek.reads / long(nparams)
            << " looks built); playback " << anim_play_ms << " ms/frame (" << anim_play_reads / double(nparams)
            << " looks/frame); CRT edit + render 245: " << anim_crt.ms << " ms (" << anim_crt.reads / long(nparams)
