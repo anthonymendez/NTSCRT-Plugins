@@ -108,5 +108,6 @@ TEST_CASE("bundled preset menu keeps released presets at their index") {
     CHECK(p[5].name == "Chunky webcam");
     CHECK(p[6].name == "Zzz new");
     // v0.4.0 shipped 32 presets (looks and Screen Loops); none may move.
-    CHECK(released_preset_order().size() == 32);
+    REQUIRE(released_preset_order().size() >= 32);
+    CHECK(released_preset_order()[31] == "Webcam (low quality)");
 }
