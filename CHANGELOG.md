@@ -35,6 +35,11 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   Glitch edit and with keyframed Glitch values.
 - Core: `ntscrt_source_frames_needed` tells a host which earlier source frames a render can fetch (Digital video
   back to its keyframe, Screen Loop's window; none for Glitch or the CRT).
+- OpenFX hosts besides Resolve: the plug-in declares the source frames it reads (getFramesNeeded), passes the
+  source through untouched when every stage is off (isIdentity), says it is best rendered in frame order
+  (sequential render 2), stops fetching earlier frames when the host aborts a render, takes interlaced sources as
+  whole frames and renders both fields of a frame as that frame (a field at t + 0.5 used the next frame), asks the
+  host for RGBA when the source is RGB, and warns when the source has non-square pixels (processed as square).
 
 ### Changed
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac

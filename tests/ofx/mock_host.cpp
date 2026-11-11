@@ -18,6 +18,25 @@
 #  include <dlfcn.h>
 #endif
 
+#ifdef _WIN32
+// A crash in a test run says where it happened (module + offset) instead of a bare SEGFAULT.
+static LONG WINAPI report_crash(EXCEPTION_POINTERS *e) {
+    void *addr = e && e->ExceptionRecord ? e->ExceptionRecord->ExceptionAddress : nullptr;
+    HMODULE m = nullptr;
+    char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(addr), &m))
+        GetModuleFileNameA(m, name, MAX_PATH);
+    std::fprintf(stderr, "[mock host] crash 0x%08lx at %p (%s+0x%llx, thread %lu)\n",
+                 e && e->ExceptionRecord ? e->ExceptionRecord->ExceptionCode : 0ul, addr, name,
+                 m ? (unsigned long long)(static_cast<char *>(addr) - reinterpret_cast<char *>(m)) : 0ull,
+                 GetCurrentThreadId());
+    std::fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static const bool g_crash_handler = (SetUnhandledExceptionFilter(report_crash), true);
+#endif
+
 namespace mock {
 namespace {
 Host *g_host = nullptr;
@@ -362,7 +381,11 @@ OfxStatus clipGetRegionOfDefinition(OfxImageClipHandle ch, OfxTime, OfxRectD *r)
     *r = {0, 0, double(C(ch)->width), double(C(ch)->height)};
     return kOfxStatOK;
 }
-int effectAbort(OfxImageEffectHandle) { return 0; }
+int effectAbort(OfxImageEffectHandle) {
+    if (!current()) return 0;
+    ++current()->abort_calls;
+    return current()->on_abort ? current()->on_abort() : 0;
+}
 OfxStatus imageMemoryAlloc(OfxImageEffectHandle, size_t n, OfxImageMemoryHandle *h) {
     *h = reinterpret_cast<OfxImageMemoryHandle>(std::malloc(n ? n : 1));
     return *h ? kOfxStatOK : kOfxStatErrMemory;
