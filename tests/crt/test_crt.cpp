@@ -217,7 +217,7 @@ TEST_CASE("each bundled CRT preset renders the test frame") {
                 if (const char *gha = std::getenv("GITHUB_ACTIONS")) gha_macos = std::string(gha) == "true";
 #endif
                 if (gha_macos && std::string(e.what()).find("Hang") != std::string::npos) {
-                    MESSAGE("WARNING: " << id << " " << ow << "x" << oh << " hung the CI runner's virtual GPU: " << e.what());
+                    MESSAGE("WARNING: " << std::string(id) << " " << ow << "x" << oh << " hung the CI runner's virtual GPU: " << std::string(e.what()));
                     break;  // the command queue may be unusable for this preset now
                 }
                 FAIL(id << " " << ow << "x" << oh << ": " << e.what());
@@ -265,7 +265,10 @@ TEST_CASE("missing or broken presets fall back to the bypass") {
     if (!d) return;
     auto src = bgra(*d, 64, 48, gray_image(64, 48, [](int x, int y) { return (x / 4 + y / 4) % 2 ? 180 : 60; }));
     CrtStage crt(*d, NTSCRT_RESOURCES_DIR);
+    std::string step = "start";
+    CAPTURE(step);
     auto render = [&](const json &shader) {
+        step = shader.dump();
         json look = {{"shader", shader}};
         FrameContext ctx;
         ctx.look = &look;

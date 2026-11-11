@@ -431,6 +431,11 @@ TEST_CASE("edits and seeks: look history, cache flushing, timings") {
         auto t0 = std::chrono::steady_clock::now();
         OfxStatus st = f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in);
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (st != kOfxStatOK) {
+            const std::string log = read_log();
+            const size_t at = log.rfind(" FAILED");
+            MESSAGE("render t=" << t << " failed; plug-in log: " << log.substr(at == std::string::npos ? 0 : log.rfind('\n', at) + 1));
+        }
         REQUIRE(st == kOfxStatOK);
         return Shot{ms, reads() - r0, out};
     };
