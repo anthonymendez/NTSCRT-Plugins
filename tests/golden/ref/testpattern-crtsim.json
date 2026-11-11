@@ -1,0 +1,21 @@
+{
+  "downscale_height": null,
+  "height": 480,
+  "id": "testpattern-crtsim",
+  "librashader_commit": "76462c03",
+  "shader_params": {
+    "Tuning_Sharp": 0.5
+  },
+  "smoke_args": [
+    "TestAssets/testpattern.png",
+    "Vendor/slang-shaders/crt/crtsim.slangp",
+    "golden-refs/testpattern-crtsim.png",
+    "Vendor/librashader/librashader.dylib",
+    "640",
+    "480",
+    "--frame",
+    "1"
+  ],
+  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "width": 640
+}

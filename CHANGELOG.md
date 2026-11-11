@@ -33,6 +33,14 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   default (`latest`) skips; testers install one with `-Version` / `--version vX.Y.Z-rc.N`.
 - Resolve test suite: the `speed` test also reports the plug-in's time for a frame after a seek, a CRT edit, a
   Glitch edit and with keyframed Glitch values.
+- Golden image tests now compare something: 11 references rendered by upstream NTSCRT's own `crt-smoke`
+  (golden workflow, macOS; the CRT shaders, downscale methods and ntsc-rs presets) and 52 self-reference
+  baselines from the plug-ins' core (Digital with both codecs, Glitch over time, every Screen Loop preset,
+  alpha Clip / Spill, crop, a moving sequence, proxy render scale, every bundled look), checked strictly on
+  Windows and macOS in CI. `cmake --build <build> --target golden-update` regenerates the baselines after an
+  intended look change (tests/golden/README.md).
+- Tests for 16-bit and half-float frames (every alpha value round-trips; NaN, infinities, subnormals and
+  out-of-range values come out in range), proxy render scale and crop with a transparent source.
 
 ### Changed
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac
@@ -72,6 +80,9 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   unchanged.
 
 ### Fixed
+- The golden workflow builds upstream's `crt-smoke` again (a build-time workaround for a Swift type-checker
+  limit in upstream's `DigitalVideoRenderer.swift`, applied on the runner only).
+- `ntscrt_doctor.py` collects the macOS installer log from `/Library/Logs/NTSCRT/` (where the .pkg writes it).
 - macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't
   installed; it now removes both plug-ins and forgets the .pkg installer's receipt.
 - Faster seeks and edits in Resolve with Glitch on (the default): when no parameter is keyframed the plug-in no

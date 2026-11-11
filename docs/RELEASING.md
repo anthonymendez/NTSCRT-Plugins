@@ -98,16 +98,10 @@ has no real signature (unsigned / ad-hoc, which is every release so far); a Deve
 is installed as is. `install.sh --uninstall` with no `--resolve` / `--fcp` removes both plug-ins, and
 forgets the pkg's receipt (`pkgutil --forget com.ntscrt.plugins.installer`) once nothing is left.
 
-## Golden references (to do once the render output settles)
-`tests/golden/ref/` is still empty, so `test_golden` compares nothing (it skips each entry). The
-references aren't committed yet on purpose: the Digital stage is being changed (upstream sync), which
-changes render output. Once that has landed:
-1. Actions -> **golden** -> Run workflow (on `main`). It builds upstream's `crt-smoke` on a macOS runner
-   and uploads the `golden-refs` artifact (PNG + JSON per `tests/golden/manifest.json` entry).
-2. `gh run download <run-id> -n golden-refs -D tests/golden/ref` and look at the images (none blank,
-   they match upstream's app).
-3. Commit them (`git add tests/golden/ref`, CHANGELOG line), then turn on strict mode in CI: add
-   `NTSCRT_GOLDEN_STRICT: "1"` to the `Test` step's `env:` in `.github/workflows/ci.yml` (both jobs), so
-   a missing reference fails instead of skipping.
-4. Push; both CI jobs should report `[golden] compared N, skipped 0`. Mismatches upload
-   `golden-mismatch-<os>` artifacts.
+## Golden images
+CI's **Golden images** step (both OSes, strict) compares renders against `tests/golden/ref/` (upstream
+NTSCRT `crt-smoke` references) and `tests/golden/self/ref/` (our own baselines); see
+[tests/golden/README.md](../tests/golden/README.md). A release whose look changed on purpose
+regenerates the self-references first: `cmake --build <build> --config Release --target golden-update`,
+review the image diff, commit. After an upstream sync, re-run the **golden** workflow and commit its
+`golden-refs` artifact into `tests/golden/ref/`.
