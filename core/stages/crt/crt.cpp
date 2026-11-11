@@ -152,8 +152,11 @@ struct CrtStage::Impl {
         gpu::Texture *dst = &target;
         bool integrate = false;
         int k = crt::supersample_factor(ih, th);
-        if (k > 1 && iw * k > tw && ih * k > th) {  // SupersampledPass.make
-            dst = tex(big_tex, iw * k, ih * k, gpu::Format::BGRA8).get();
+        // SupersampledPass.make: whole multiples of the lines; the width
+        // follows the target's (the picture's) shape, not the lines' (one field).
+        const int kw = int(std::lround(double(tw) * double(ih * k) / double(th)));
+        if (k > 1 && kw > tw && ih * k > th) {
+            dst = tex(big_tex, kw, ih * k, gpu::Format::BGRA8).get();
             integrate = true;
         } else if (!target.desc().render_target) {
             dst = tex(rt_tex, tw, th, target.desc().format).get();
@@ -207,7 +210,8 @@ void CrtStage::render(const gpu::Texture &in, gpu::Texture &out, const FrameCont
     const bool enabled = !sh.contains("enabled") || !sh["enabled"].is_boolean() || sh["enabled"].get<bool>();
 
     const int ow = out.desc().width, oh = out.desc().height;
-    crt::Rect r = crt::fit_rect(in.desc().width, in.desc().height, ow, oh);
+    // The picture's shape: with one field each chain line is ctx.line_height rows.
+    crt::Rect r = crt::fit_rect(in.desc().width, in.desc().height * std::max(1, ctx.line_height), ow, oh);
     const bool full = r == crt::Rect{0, 0, ow, oh};
     gpu::Texture &target = full ? out : *impl_->tex(impl_->rect_tex, r.w, r.h, out.desc().format);
 

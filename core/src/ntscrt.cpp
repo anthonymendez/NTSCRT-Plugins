@@ -10,6 +10,7 @@
 #include <functional>
 #include <map>
 
+#include "../stages/digital/fields.h"
 #include "../stages/stages.h"
 #include "embedded_schema.h"
 #include "pixel_convert.h"
@@ -239,6 +240,7 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
             inst->howl->after_frame(*chain, feedback, ctx);  // feeds the loop the chain input
         } else {
             if (inst->digital.active(look)) inst->digital.process(img, ctx);
+            ctx.line_height = inst->digital.active(look) ? digital::chain_line_height(look) : 1;  // One field
             if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
             chain = inst->downscale->run(upload(img), ctx);
             if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);

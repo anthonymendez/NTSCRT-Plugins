@@ -1,4 +1,5 @@
-// Port of upstream Tests/CrtCoreTests/DigitalVideoTests.swift (2b3013d), plus
+// Port of upstream Tests/CrtCoreTests/DigitalVideoTests.swift and Video1Tests.swift
+// (v0.20.0, c6ab639), plus
 // the same "jumped to = played" checks through DigitalStage and a fake
 // FrameContext, thread-count determinism, missing history and seeds.
 #include <doctest/doctest.h>
@@ -9,10 +10,14 @@
 #include <cstdio>
 #include <map>
 #include <optional>
+#include <set>
 #include <vector>
 
+#include "stages/digital/fields.h"
+#include "stages/digital/migrate.h"
 #include "stages/digital/parallel.h"
 #include "stages/digital/renderer.h"
+#include "stages/digital/video1.h"
 #include "stages/stages.h"
 
 using namespace ntscrt;
@@ -207,7 +212,7 @@ TEST_CASE("DCT round trip is identity") {
 
 TEST_CASE("lower quality loses more of the picture") {
     Settings clean = values({{"frame_rate", 30}, {"sensor_noise", 0}, {"noise_reduction", 0}, {"chroma", 0},
-                             {"keyframe_interval", 0}});
+                             {"keyframe_interval", 0}, {"fields", 0}});
     std::vector<double> errors;
     for (double q : {0.95, 0.6, 0.3, 0.05}) {
         Settings s = clean;
@@ -218,6 +223,39 @@ TEST_CASE("lower quality loses more of the picture") {
     CHECK(std::is_sorted(errors.begin(), errors.end()));
     CHECK(errors[0] < 6);
     CHECK(errors[3] > 3 * errors[0]);
+}
+
+TEST_CASE("quality damage is evenly spaced along the slider") {
+    // No cliff at the bottom, no dead zone at the top.
+    Settings clean = values({{"frame_rate", 30}, {"sensor_noise", 0}, {"noise_reduction", 0}, {"chroma", 0},
+                             {"keyframe_interval", 0}});
+    std::vector<double> errors;
+    for (double q : {0.0, 0.1, 0.25, 0.5, 0.75, 1.0}) {
+        Settings s = clean;
+        s[kQuality] = q;
+        Renderer r;
+        errors.push_back(meanDifference(render(r, 0, s), frame(0)));
+    }
+    INFO(errors[0] << " " << errors[1] << " " << errors[2] << " " << errors[3] << " " << errors[4] << " " << errors[5]);
+    const double range = errors.front() - errors.back();
+    for (size_t i = 1; i < errors.size(); ++i) CHECK(errors[i - 1] > errors[i]);
+    CHECK(errors[0] - errors[1] < 0.2 * range);
+    CHECK(errors[3] - errors[5] > 0.25 * range);
+}
+
+TEST_CASE("old quality values keep their quantizer") {
+    for (int i = 0; i <= 20; ++i) {
+        double old = 0.05 * i;
+        double q = 2 + 93 * old;
+        float oldScale = float(q < 50 ? 5000 / q : 200 - 2 * q) / 100;
+        double now = codec::qualityFromJPEGScale(old);
+        INFO(old);
+        CHECK(std::fabs(codec::tableScale(now) - oldScale) <= oldScale * 1e-4f);
+        CHECK(std::fabs(migrate::quality_from_jpeg_scale(old) - now) < 1e-12);
+    }
+    json v1 = migrate::migrated(json{{"quality", 0.22}}, 1);
+    CHECK(std::fabs(v1["quality"].get<double>() - 0.749) < 0.001);
+    CHECK(migrate::migrated(json{{"quality", 0.22}}, 2)["quality"] == 0.22);  // today's looks are left alone
 }
 
 // ---- timing -----------------------------------------------------------------------------------
@@ -428,7 +466,7 @@ TEST_CASE("quarter-wide color smears sideways") {
 
 TEST_CASE("formats are distinct and defaults are upstream's") {
     auto &all = formats();
-    CHECK(all.size() == 5);
+    CHECK(all.size() == 6);
     for (size_t i = 0; i < all.size(); ++i)
         for (size_t j = i + 1; j < all.size(); ++j)
             CHECK_FALSE((all[i].settings() == all[j].settings() && all[i].width == all[j].width));
@@ -437,8 +475,13 @@ TEST_CASE("formats are distinct and defaults are upstream's") {
     CHECK(d[kSensorNoise] == 0.4);
     CHECK(d[kNoiseReduction] == 0.5);
     CHECK(d[kChroma] == 2);
-    CHECK(d[kQuality] == 0.22);
+    CHECK(d[kQuality] == 0.749);
+    CHECK(d[kFields] == 1);  // One field by default (0.20)
+    CHECK(d[kCodec] == 0);
+    CHECK(d[kCCDResponse] == 0);
     CHECK(d.chroma() == Chroma::HalfBoth);
+    CHECK_FALSE(d.set("exposure", 1));  // gone (migrated to CCD response)
+    CHECK_FALSE(d.set("lens_blur", 1));
     int structure = 0;
     for (auto &p : kParams) structure += p.structure ? 1 : 0;
     CHECK(structure == 6);
@@ -454,43 +497,71 @@ static PicturePtr camera(const Pixels &px, int w, int h, std::vector<std::pair<c
 
 TEST_CASE("picture controls are neutral by default") {
     Pixels px = frame(0);
-    Pixels a0 = Renderer::scale(px.data(), kW, kH, kW * 4, kCapture, Settings());
-    Pixels b0 = Renderer::scale(px.data(), kW, kH, kW * 4, kCapture,
-                                values({{"aliasing", 0}, {"lens_blur", 0}, {"fields", 0}}));
+    // (Fields default to One field, the stage's look, not neutral: Progressive here.)
+    Pixels a0 = Renderer::scale(px.data(), kW, kH, kW * 4, kCapture, values({{"fields", 0}}));
+    Pixels b0 = Renderer::scale(px.data(), kW, kH, kW * 4, kCapture, values({{"aliasing", 0}, {"fields", 0}}));
     CHECK(a0 == b0);
     auto a = camera(a0, kCapture.width, kCapture.height, {});
     auto b = camera(a0, kCapture.width, kCapture.height,
-                    {{"exposure", 0}, {"white_balance", 0}, {"tint", 0}, {"saturation", 1}, {"black_level", 0},
-                     {"sharpening", 0}});
+                    {{"ccd_response", 0}, {"white_balance", 0}, {"tint", 0}, {"saturation", 1}, {"sharpening", 0}});
     CHECK(a->y.data[500] == b->y.data[500]);
     CHECK(a->cr.data[777] == b->cr.data[777]);
+    // And neutral really is the picture as it came in.
+    const int i = 500;
+    float b_ = float(a0[size_t(i) * 4]), g_ = float(a0[size_t(i) * 4 + 1]), r_ = float(a0[size_t(i) * 4 + 2]);
+    CHECK(std::fabs(a->y.data[size_t(i / kCapture.width) * a->y.width + i % kCapture.width] -
+                    (0.299f * r_ + 0.587f * g_ + 0.114f * b_)) < 0.01f);
 }
 
-TEST_CASE("overexposure clips each color on its own") {
-    Pixels px(16 * 16 * 4);
-    const uint8_t skin[4] = {140, 160, 210, 255};
-    for (size_t i = 0; i < px.size(); ++i) px[i] = skin[i % 4];
-    auto pic = camera(px, 16, 16, {{"exposure", 2}});
-    float y = pic->y.data[0], cb = pic->cb.data[0], cr = pic->cr.data[0];
-    float r = y + 1.402f * (cr - 128), g = y - 0.344136f * (cb - 128) - 0.714136f * (cr - 128);
-    float b = y + 1.772f * (cb - 128);
-    CHECK(std::fabs(r - 255) < 0.5f);
-    CHECK(std::fabs(g - 255) < 0.5f);
-    CHECK(std::fabs(b - 255) < 0.5f);
-    auto one = camera(px, 16, 16, {{"exposure", 0.5}});
-    float r1 = one->y.data[0] + 1.402f * (one->cr.data[0] - 128);
-    CHECK(std::fabs(r1 - 255) < 0.5f);
-    CHECK(one->y.data[0] - 0.344136f * (one->cb.data[0] - 128) - 0.714136f * (one->cr.data[0] - 128) < 254);
+// RGB back from a picture's pixel k (full color resolution).
+static std::array<float, 3> rgbOf(const Picture &p, size_t k = 0) {
+    float y = p.y.data[k], cb = p.cb.data[k] - 128, cr = p.cr.data[k] - 128;
+    return {y + 1.402f * cr, y - 0.344136f * cb - 0.714136f * cr, y + 1.772f * cb};
 }
 
-TEST_CASE("black level lifts black and sharpening overshoots") {
+static Pixels patch(uint8_t r, uint8_t g, uint8_t b, int n = 32) {
+    Pixels px;
+    for (int i = 0; i < n * n; ++i) px.insert(px.end(), {b, g, r, uint8_t(255)});
+    return px;
+}
+
+TEST_CASE("CCD response clips warm highlights red first") {
+    // A warm wall in sun, in the corner of a darker frame the camera exposes for.
+    Pixels px = patch(70, 70, 70);
+    for (int y = 0; y < 6; ++y)
+        for (int x = 0; x < 6; ++x) {
+            size_t i = (size_t(y) * 32 + x) * 4;
+            px[i] = 120;
+            px[i + 1] = 170;
+            px[i + 2] = 215;
+        }
+    auto out = rgbOf(*camera(px, 32, 32, {{"ccd_response", 1}}));
+    INFO(out[0] << " " << out[1] << " " << out[2]);
+    CHECK(std::fabs(out[0] - 255) < 1.5f);  // red clipped
+    CHECK(out[2] < 225);                    // blue under the clip
+    CHECK(out[1] > 200);
+}
+
+TEST_CASE("CCD response lifts blacks and exposes dark scenes up") {
+    Pixels px = patch(0, 0, 0, 32);
+    for (size_t i = 0; i < px.size() / 2; i += 4) px[i] = px[i + 1] = px[i + 2] = 60;
+    auto dark = camera(px, 32, 32, {{"ccd_response", 1}});
+    float blackY = dark->y.data[size_t(31) * dark->y.width + 5];
+    CHECK(blackY > 15);  // black lifted
+    CHECK(blackY < 45);  // but not washed out
+    CHECK(dark->y.data[size_t(2) * dark->y.width + 5] > 90);  // 60 gray exposed up
+    auto half = camera(px, 32, 32, {{"ccd_response", 0.5}});
+    CHECK(half->y.data[size_t(31) * half->y.width + 5] < blackY);  // strength scales it
+    auto white = rgbOf(*camera(patch(250, 250, 250), 32, 32, {{"ccd_response", 1}}));
+    CHECK(std::max({white[0], white[1], white[2]}) <= 255.6f);
+}
+
+TEST_CASE("sharpening overshoots") {
     const int w = 32, h = 16;
     Pixels px(size_t(w) * h * 4, 255);
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x)
             for (int c = 0; c < 3; ++c) px[(size_t(y) * w + x) * 4 + c] = x < 16 ? 40 : 200;
-    auto lifted = camera(px, w, h, {{"black_level", 0.1}});
-    CHECK(std::fabs(lifted->y.data[0] - (25.5f + 40 * 0.9f)) < 0.6f);
     auto sharp = camera(px, w, h, {{"sharpening", 1}});
     auto row = [&](int x) { return sharp->y.data[size_t(8) * sharp->y.width + x]; };
     CHECK(row(15) < 35);
@@ -498,24 +569,51 @@ TEST_CASE("black level lifts black and sharpening overshoots") {
     CHECK(std::fabs(row(2) - 40) < 0.6f);
 }
 
-TEST_CASE("aliasing turns fine stripes into false color") {
-    const int w = 640, h = 64;
+// Fine gray stripes, finer than a 160-wide camera can hold.
+static Pixels stripes(double period = 7.0 / 3, int w = 640, int h = 64) {
     Pixels px(size_t(w) * h * 4, 255);
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x) {
-            uint8_t v = (x * 7 / 3) % 2 == 0 ? 230 : 25;
+            uint8_t v = uint8_t(128 + 100 * std::cos(2 * 3.14159265358979323846 * double(x) / period));
             for (int c = 0; c < 3; ++c) px[(size_t(y) * w + x) * 4 + c] = v;
         }
+    return px;
+}
+
+static Pixels sampled(const Pixels &px, double aliasing, int w = 640, int h = 64) {
+    return Renderer::scale(px.data(), w, h, w * 4, {160, 16}, values({{"aliasing", aliasing}}));
+}
+
+TEST_CASE("aliasing turns fine stripes into false color") {
+    const Pixels px = stripes();
     auto chroma = [&](double aliasing) {
-        Pixels small = Renderer::scale(px.data(), w, h, w * 4, {160, 16}, values({{"aliasing", aliasing}}));
-        auto pic = camera(small, 160, 16, {});
+        auto pic = camera(sampled(px, aliasing), 160, 16, {});
         float s = 0;
         for (int i = 0; i < 160 * 16; ++i)
             s += std::fabs(pic->cb.data[size_t(i)] - 128) + std::fabs(pic->cr.data[size_t(i)] - 128);
         return s / float(160 * 16);
     };
-    CHECK(chroma(0) < 2);
-    CHECK(chroma(1) > 20);
+    CHECK(chroma(0) < 2);                   // filtered properly: gray stays gray
+    CHECK(chroma(0.5) > 20);                // aliased: false color
+    CHECK(chroma(1) > chroma(0.5) * 1.2f);  // above 50% the boost makes it stronger
+}
+
+TEST_CASE("aliasing rainbows survive quarter-width color") {
+    // Stripes just off the sensor's own pitch beat slowly: the false color
+    // has to turn through every hue and survive DV's 4:1:1 averaging.
+    Pixels small = sampled(stripes(4.0 * 1.04), 1);
+    auto pic = Renderer::capture(small, Geometry{160, 16, Chroma::QuarterWide},
+                                 values({{"sensor_noise", 0}, {"noise_reduction", 0}}), 0);
+    std::set<int> quadrants;
+    float strength = 0;
+    for (int x = 0; x < pic->cb.width - 2; ++x) {
+        float cb = pic->cb.data[size_t(4) * pic->cb.width + x] - 128;
+        float cr = pic->cr.data[size_t(4) * pic->cr.width + x] - 128;
+        strength += std::fabs(cb) + std::fabs(cr);
+        if (std::fabs(cb) + std::fabs(cr) > 8) quadrants.insert((cb >= 0 ? 1 : 0) + (cr >= 0 ? 2 : 0));
+    }
+    CHECK(quadrants.size() == 4);  // hue goes all the way round
+    CHECK(strength / float(pic->cb.width - 2) > 15);
 }
 
 TEST_CASE("one field doubles every other line") {
@@ -551,7 +649,7 @@ TEST_CASE("Lanczos scaler: flat stays flat, area-averages fine detail, identity 
 TEST_CASE("results don't depend on the thread count") {
     Settings s = values({{"frame_rate", 30}, {"keyframe_interval", 0.5}, {"quality", 0.4}, {"data_loss", 0.6},
                          {"datamosh", 0.6}, {"sensor_noise", 0.5}, {"noise_reduction", 0.3}, {"deblocking", 0.5},
-                         {"fixed_bitrate", 0.5}, {"lens_blur", 0.4}, {"aliasing", 0.3}, {"sharpening", 0.5}});
+                         {"fixed_bitrate", 0.5}, {"ccd_response", 0.6}, {"aliasing", 0.7}, {"sharpening", 0.5}});
     std::vector<std::vector<Pixels>> runs;
     for (int t : {1, 3, 8}) {
         set_thread_count(t);
@@ -608,6 +706,207 @@ TEST_CASE("seed varies errors and noise; seed 0 is upstream's pattern") {
     CHECK(run(12345) == run(12345));
     CHECK(codec::lostBlocks(0.5, 3, Geometry{128, 96, Chroma::HalfBoth}, 0) ==
           codec::lostBlocks(0.5, 3, Geometry{128, 96, Chroma::HalfBoth}, seed_mix(0)));
+}
+
+// ---- Microsoft Video 1 (port of upstream Video1Tests.swift) ------------------------------------------
+
+namespace {
+using Block = std::array<video1::RGB, 16>;
+template <class F>
+Block block(F f) {
+    Block b{};
+    for (int i = 0; i < 16; ++i) b[size_t(i)] = f(i);
+    return b;
+}
+}  // namespace
+
+TEST_CASE("Video 1: flat blocks are one color and two-tone blocks are exact") {
+    using video1::RGB;
+    Block flat = block([](int) { return RGB{100, 150, 200}; });
+    CHECK(video1::codeBlock(flat, nullptr, 48).mode == video1::Mode::Fill);
+    // Half black, half white: two colors reproduce it exactly.
+    Block edge = block([](int i) { return i % 4 < 2 ? RGB{0, 0, 0} : RGB{255, 255, 255}; });
+    auto coded = video1::codeBlock(edge, nullptr, 48);
+    CHECK(coded.mode == video1::Mode::Two);
+    CHECK(coded.pixels == edge);
+    // Four different quarters need eight colors.
+    Block quads = block([](int i) {
+        int q = (i / 8) * 2 + (i % 4) / 2;
+        const RGB base[4] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 0}};
+        RGB c = base[q];
+        return (i % 2 == 0) ? c : RGB{c.x * 0.3f, c.y * 0.3f, c.z * 0.3f};
+    });
+    CHECK(video1::codeBlock(quads, nullptr, 48).mode == video1::Mode::Eight);
+}
+
+TEST_CASE("Video 1: colors are fifteen-bit") {
+    using video1::RGB;
+    Block px = block([](int i) { return RGB{float(i * 13 % 256), float(i * 29 % 256), float(i * 7 % 256)}; });
+    for (const RGB &c : video1::codeBlock(px, nullptr, 1).pixels)
+        for (float v : {c.x, c.y, c.z}) CHECK(std::fabs(std::round(v * 31 / 255) * 255 / 31 - v) < 1e-3f);
+}
+
+TEST_CASE("Video 1: unchanged blocks are skipped") {
+    using video1::RGB;
+    Block px = block([](int i) { return RGB{float(i * 9), 80, 160}; });
+    CHECK(video1::codeBlock(px, &px, 4).mode == video1::Mode::Skip);
+    Block moved = block([](int i) { return RGB{float((15 - i) * 9), 80, 160}; });
+    CHECK(video1::codeBlock(moved, &px, 4).mode != video1::Mode::Skip);
+}
+
+TEST_CASE("Video 1: the hidden controls do nothing") {
+    Settings s = values({{"codec", 1}, {"datamosh", 1}, {"deblocking", 1}, {"chroma", 3}});
+    CHECK(s.chroma() == Chroma::Full);  // Video 1 keeps full color
+    CHECK(s.effective(kDatamosh) == 0);
+    CHECK(s.effective(kDeblocking) == 0);
+    s[kCodec] = 0;
+    CHECK(s.effective(kDatamosh) == 1);
+    CHECK(s.chroma() == Chroma::QuarterWide);
+    CHECK_FALSE(param_applies(kDatamosh, CodecKind::BlockColors));
+    CHECK(param_applies(kQuality, CodecKind::BlockColors));
+}
+
+TEST_CASE("Video 1: more quality never hurts") {
+    const int w = 96, h = 72;
+    Pixels px(size_t(w) * h * 4, 255);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            size_t i = (size_t(y) * w + x) * 4;
+            auto wave = [&](double fx, double fy, double p) { return std::sin(double(x) * fx + double(y) * fy + p); };
+            double v = 0.5 * wave(0.05, 0.03, 0) + 0.3 * wave(0.21, -0.17, 1) + 0.2 * wave(0.9, 0.7, 2);
+            px[i] = uint8_t(128 + 100 * v);
+            px[i + 1] = uint8_t(128 + 100 * (0.6 * wave(0.04, 0.08, 3) + 0.4 * wave(0.5, 0.3, 4)));
+            px[i + 2] = uint8_t(128 + 100 * (0.7 * wave(0.07, -0.02, 5) + 0.3 * wave(1.1, 0.4, 6)));
+        }
+    Geometry g{w, h, Chroma::Full};
+    auto src = Renderer::capture(px, g, values({{"sensor_noise", 0}, {"noise_reduction", 0}, {"codec", 1}}), 0);
+    std::vector<float> errors;
+    for (double q : {0.0, 0.1, 0.5, 1.0}) {
+        CodecState st(g);
+        auto out = video1::step(st, src, FrameKind::Key, 0, {q, 0, 0}, 0);
+        float e = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                e += std::fabs(out->y.data[size_t(y) * out->y.width + x] - src->y.data[size_t(y) * src->y.width + x]);
+        errors.push_back(e / float(w * h));
+    }
+    INFO(errors[0] << " " << errors[1] << " " << errors[2] << " " << errors[3]);
+    for (size_t i = 1; i < errors.size(); ++i) CHECK(errors[i - 1] >= errors[i]);
+    CHECK(errors[0] > 2 * errors[3]);
+}
+
+TEST_CASE("Video 1: lost blocks stay stale until they are coded again") {
+    // Through the renderer: a moving scene, keyframes every 10 frames, heavy
+    // loss. Damage appears, and every keyframe (which arrives whole) clears it.
+    Settings clean = format_by_id("cd_rom")->settings();
+    clean[kFrameRate] = 30;
+    clean[kKeyframeInterval] = 1.0 / 3;
+    Settings lossy = clean;
+    lossy[kDataLoss] = 0.8;
+    auto a = played(clean, 21), b = played(lossy, 21);
+    CHECK(a[0] == b[0]);  // keyframes arrive whole
+    CHECK(a[10] == b[10]);
+    CHECK(a[20] == b[20]);
+    bool damaged = false;
+    for (int n = 1; n < 10; ++n) damaged = damaged || a[size_t(n)] != b[size_t(n)];
+    CHECK(damaged);  // loss shows between keyframes
+}
+
+TEST_CASE("Video 1 looks the same jumped to as played, with loss") {
+    Settings s = format_by_id("cd_rom")->settings();
+    s[kFrameRate] = 30;
+    s[kKeyframeInterval] = 0.5;
+    s[kDataLoss] = 0.4;
+    checkJumpsMatchPlaying(s, "video 1 + loss", 40, 16);
+}
+
+// ---- One field down the chain (port of upstream FieldLinesTests.swift) ------------------------------
+
+TEST_CASE("one field: the chain gets half the lines, the camera the whole frame") {
+    json look = {{"digital", {{"enabled", true}, {"values", {{"fields", 1}}}}},
+                 {"downscale", {{"enabled", true}, {"width", 480}}}};
+    CHECK(chain_line_height(look) == 2);
+    CHECK(field_lines(600, 2) == 300);
+    CHECK(field_lines(12, 2) == 8);  // upstream max(8, h / 2)
+    CHECK(field_lines(600, 1) == 600);
+    // Fields default to One field; Progressive, the stage off or no Downscale: square lines.
+    json dflt = {{"digital", {{"enabled", true}}}};
+    CHECK(chain_line_height(dflt) == 2);
+    look["digital"]["values"]["fields"] = 0;
+    CHECK(chain_line_height(look) == 1);
+    look["digital"]["values"]["fields"] = 1;
+    look["downscale"]["enabled"] = false;
+    CHECK(chain_line_height(look) == 1);
+    look["downscale"]["enabled"] = true;
+    look["digital"]["enabled"] = false;
+    CHECK(chain_line_height(look) == 1);
+}
+
+// ---- looks saved before 0.19 (migrate.h) -------------------------------------------------------------
+
+TEST_CASE("migration: version 1 looks map onto today's controls") {
+    json v1 = {{"version", 1},
+               {"digital", {{"enabled", true}, {"values", {{"quality", 0.22}, {"exposure", 0.3}, {"black_level", 0.04},
+                                                           {"lens_blur", 0.3}, {"fields", 1}}}}},
+               {"timeline", {{"keys", json::array({json{{"t", 0}, {"digital", {{"quality", 0.22}}}}})}}}};
+    json v = migrate::values_for(v1);
+    CHECK(std::fabs(v["quality"].get<double>() - 0.749) < 0.001);
+    CHECK(std::fabs(v["ccd_response"].get<double>() - 0.5) < 1e-9);  // max(0.3 / 0.6, 0.04 / 0.08)
+    CHECK_FALSE(v.contains("exposure"));
+    CHECK_FALSE(v.contains("lens_blur"));
+    json up = migrate::upgraded(v1);
+    CHECK(up["version"] == 2);
+    CHECK(std::fabs(up["timeline"]["keys"][0]["digital"]["quality"].get<double>() - 0.749) < 0.001);
+    // A 0.4.0 plug-in look (no "version", the old controls present) is version 1 too.
+    json plugin040 = {{"digital", {{"enabled", true}, {"values", {{"quality", 0.22}, {"exposure", 0}, {"black_level", 0},
+                                                                  {"lens_blur", 0}}}}}};
+    CHECK(migrate::look_version(plugin040) == 1);
+    CHECK(std::fabs(migrate::values_for(plugin040)["quality"].get<double>() - 0.749) < 0.001);
+    CHECK(migrate::values_for(plugin040)["ccd_response"] == 0);
+    // Today's looks (and the plug-ins' looks without "version") are left alone.
+    json now = {{"digital", {{"enabled", true}, {"values", {{"quality", 0.3}, {"ccd_response", 0}}}}}};
+    CHECK(migrate::look_version(now) == 2);
+    CHECK(migrate::values_for(now)["quality"] == 0.3);
+}
+
+TEST_CASE("migration: the 0.4.0 controls kept as legacy params") {
+    // A 0.4.0 instance loaded today: Quality (new curve) at its default, the
+    // old Quality and Exposure under /digital/legacy.
+    json look = {{"digital", {{"enabled", true},
+                              {"values", {{"quality", migrate::kQualityDefault}, {"ccd_response", 0}}},
+                              {"legacy", {{"quality", 0.4}, {"exposure", 0.6}}}}}};
+    json v = migrate::values_for(look);
+    CHECK(std::fabs(v["quality"].get<double>() - migrate::quality_from_jpeg_scale(0.4)) < 1e-12);
+    CHECK(v["ccd_response"] == 1.0);
+    // Moving today's controls wins over the legacy ones.
+    look["digital"]["values"]["quality"] = 0.5;
+    look["digital"]["values"]["ccd_response"] = 0.2;
+    v = migrate::values_for(look);
+    CHECK(v["quality"] == 0.5);
+    CHECK(v["ccd_response"] == 0.2);
+    // And the stage renders a migrated look like the same look written today.
+    json old = lookFor(Settings());
+    old["digital"]["values"].erase("ccd_response");
+    old["digital"]["values"]["quality"] = 0.22;
+    old["digital"]["values"]["exposure"] = 0.3;
+    old["version"] = 1;
+    json today = lookFor(Settings());
+    today["digital"]["values"] = migrate::values_for(old);
+    auto run = [](const json &l) {
+        ImageBGRA8 img;
+        img.width = kW;
+        img.height = kH;
+        img.px = frame(2);
+        FrameContext ctx;
+        ctx.frame = 2;
+        ctx.look = &l;
+        ctx.look_at = [&l](int64_t) -> const json & { return l; };
+        DigitalStage st;
+        st.process(img, ctx);
+        return img.px;
+    };
+    CHECK(run(old) == run(today));
+    CHECK(run(old) != run(lookFor(Settings())));
 }
 
 // ---- cost -------------------------------------------------------------------------------------------
