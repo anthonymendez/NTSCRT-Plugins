@@ -78,6 +78,10 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 - 16-bit and 32-bit float projects get the CRT shader's result at half-float precision instead of 8 bits: a
   smooth gradient through Glow (Gauss) comes out with ~2350 levels instead of ~250, so it no longer bands when it's
   graded afterwards. 8-bit projects, and looks with the CRT shader off, render exactly as before.
+- Faster frames, mostly on large pictures: converting the host picture to and from the internal format runs on
+  all CPU cores and no longer calls a slow rounding function per channel (the result is bit-identical), and the
+  read-back buffer is kept between frames. A UHD frame with the CRT shader off now takes ~15 ms instead of ~250-330 ms
+  in the converter benchmark; a 1080p Glow (Gauss) frame ~20 ms instead of ~60 ms.
 
 ### Fixed
 - macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't

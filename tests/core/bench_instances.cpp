@@ -4,10 +4,13 @@
 //
 //   bench_instances [--n 8] [--w 1920] [--h 1080] [--format rgba8|rgba16f|rgba32f]
 //                   [--preset glow_gauss] [--look JSON] [--frames 5] [--threads]
+//                   [--pool-threads N]   (worker pool size; 1 = no pool)
 //
 // --threads renders the instances' frames concurrently (one thread each);
 // otherwise one after the other.
 #include <ntscrt/ntscrt.h>
+
+#include "stages/digital/parallel.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -64,6 +67,7 @@ int main(int argc, char **argv) {
         else if (a == "--format") fmt = next();
         else if (a == "--threads") threads = true;
         else if (a == "--look") look_arg = next();
+        else if (a == "--pool-threads") ntscrt::digital::set_thread_count(std::atoi(next().c_str()));
     }
     ntscrt_pixel_format pf = NTSCRT_RGBA8;
     size_t bpp = 4;

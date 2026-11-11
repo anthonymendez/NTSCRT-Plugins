@@ -147,7 +147,10 @@ struct ntscrt_instance {
     std::unique_ptr<CrtStage> howl_crt;  // Screen Loop's own CRT chain (upstream HowlaroundFeedback)
     std::unique_ptr<Howlaround> howl;
     std::vector<std::shared_ptr<gpu::Texture>> tex_pool;  // upload / output textures, reused across frames
-    std::vector<uint16_t> result16;  // RGBA16F CRT output read back for 16-bit / float hosts (kept between frames)
+    // GPU results read back for the host, kept between frames (no 8-33 MB
+    // allocation and clear per frame): BGRA8, or RGBA16F for 16-bit / float hosts.
+    ImageBGRA8 result8;
+    std::vector<uint16_t> result16;
     std::string last_error;
     std::string gpu_gone;  // set when the GPU was lost and couldn't be replaced: CPU stages from then on
     int device_resets = 0;  // devices recreated since the last good GPU frame
@@ -595,7 +598,7 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
                 from_rgba16f(px.data(), dst->width, dst->height, same ? alpha : nullptr, *dst, mode, premult);
                 return;
             }
-            ImageBGRA8 result;
+            ImageBGRA8 &result = inst->result8;
             result.width = dst->width;
             result.height = dst->height;
             result.px.resize(size_t(dst->width) * dst->height * 4);  // fully overwritten by the download
