@@ -24,7 +24,9 @@
            Scope="perMachine"
            Compressed="yes">
     <SummaryInformation Description="Downloads and installs the latest NTSCRT OpenFX plug-in for DaVinci Resolve" />
-    <MajorUpgrade DowngradeErrorMessage="A newer NTSCRT installer is already installed." />
+    <!-- MSI versions are numeric, so X.Y.Z-rc.N and X.Y.Z share one version (build-msi.ps1 drops
+         the -rc.N): AllowSameVersionUpgrades lets the final release replace its release candidate. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer NTSCRT installer is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Property Id="NTSCRT_VERSION" Value="latest" Secure="yes" />

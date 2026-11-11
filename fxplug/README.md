@@ -91,7 +91,7 @@ the secret the job succeeds with a notice "FxPlug skipped".
    (or a zip of an installed `/Library/Developer` tree).
 3. In GitHub → *anthonymendez/NTSCRT-Plugins* → Settings → Secrets and variables
    → Actions → **New repository secret**: name `FXPLUG_SDK_URL`, value = that URL.
-   Optional: secret `FXPLUG_SDK_SHA256` = `shasum -a 256` of the file to pin it.
+   Also required: secret `FXPLUG_SDK_SHA256` = `shasum -a 256` of the file (the job fails without it).
 4. Re-run the `ci` workflow. The job installs the SDK (`scripts/ci/install_fxplug_sdk.sh`),
    builds `ntscrt_fxplug`, verifies plists / universal binary / signature and
    uploads `NTSCRT-FxPlug-macos-universal` (ad-hoc signed).

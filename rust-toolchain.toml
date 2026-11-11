@@ -1,0 +1,8 @@
+# Rust toolchain for the cargo builds CMake runs (vendor/librashader, rust/ntscrs-capi).
+# Pinned so CI builds (and their cached target dirs) don't change under us when a new
+# stable ships; rustup installs it on first use. Bump it on purpose, in its own commit.
+# Targets are added per platform (CI: .github/workflows/ci.yml; macOS universal builds need
+# `rustup target add aarch64-apple-darwin x86_64-apple-darwin`).
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"

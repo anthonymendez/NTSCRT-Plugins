@@ -27,6 +27,10 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 - Ported upstream tests: Video1Tests, FieldLinesTests and the DigitalVideoTests changes; the Resolve `cli`
   test also compares the bundled Digital video looks against `ntscrt-cli`.
 - docs/dev/UPSTREAM-SYNC.md: how to sync with a later upstream release.
+- Releases include `SHA256SUMS` and a signed build-provenance attestation for every file
+  (`gh attestation verify <file> -R anthonymendez/NTSCRT-Plugins`).
+- Release candidates: `vX.Y.Z-rc.N` tags are published as GitHub prereleases, which the installers'
+  default (`latest`) skips; testers install one with `-Version` / `--version vX.Y.Z-rc.N`.
 
 ### Changed
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac
@@ -51,7 +55,17 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   and Aliasing looks different (upstream's new sampling).
 - Bundled presets keep their place in the Preset menu (saved projects store the index); new ones are added
   after the released ones.
+- The install scripts and installers check the downloaded zip against the release's `SHA256SUMS` and
+  refuse to install if it is missing or doesn't match (`-From` / `--from` with your own zip skips the check).
+  `-Version` / `--version` / `NTSCRT_VERSION` accept only `latest` or `vX.Y.Z[-rc.N]`.
+- macOS: `install.sh` only removes the quarantine flag and ad-hoc signs the plug-in when it has no real
+  signature. The .pkg installer logs to `/Library/Logs/NTSCRT/install.log` (and `/var/log/install.log`)
+  instead of a fixed file in /tmp.
+- The release zips carry `LICENSE` and `THIRD_PARTY_NOTICES.md` at their root.
 
+### Fixed
+- macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't
+  installed; it now removes both plug-ins and forgets the .pkg installer's receipt.
 
 ## [0.4.0] - 2026-11-10
 

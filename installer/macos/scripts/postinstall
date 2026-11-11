@@ -1,19 +1,39 @@
 #!/bin/sh
 # NTSCRT .pkg postinstall (runs as root after the payload-free package "installs").
 # Runs the install.sh that build-pkg.sh copied next to this script: it downloads the
-# LATEST GitHub release and installs the DaVinci Resolve and/or Final Cut Pro plug-in.
+# LATEST GitHub release, verifies it against the release's SHA256SUMS and installs the
+# DaVinci Resolve and/or Final Cut Pro plug-in.
 # Optional environment (CI / offline): NTSCRT_FROM=<zip or folder>, NTSCRT_VERSION=<tag>.
+# Output goes to stdout (Installer copies it to /var/log/install.log) and is appended to
+# /Library/Logs/NTSCRT/install.log (root-owned; nothing is written to fixed paths in /tmp).
 # A non-zero exit makes Installer report the installation as failed.
 here="$(cd "$(dirname "$0")" && pwd)"
-LOG=/tmp/ntscrt-install.log
+LOGDIR=/Library/Logs/NTSCRT
+LOG="$LOGDIR/install.log"
+
+# Never follow a planted symlink as root.
+[ -L "$LOGDIR" ] && rm -f "$LOGDIR"
+mkdir -p "$LOGDIR" && chown root:wheel "$LOGDIR" && chmod 755 "$LOGDIR" || LOG=/dev/null
+[ -L "$LOG" ] && rm -f "$LOG"
+log() { printf '%s\n' "$*"; printf '%s\n' "$*" >>"$LOG"; }
+
 set --
 [ -n "${NTSCRT_FROM:-}" ] && set -- --from "$NTSCRT_FROM"
-[ -n "${NTSCRT_VERSION:-}" ] && set -- "$@" --version "$NTSCRT_VERSION"
-echo "NTSCRT installer $(date): install.sh $*" >>"$LOG"
-/bin/sh "$here/install.sh" "$@" >>"$LOG.run" 2>&1
+if [ -n "${NTSCRT_VERSION:-}" ]; then
+  case "$NTSCRT_VERSION" in
+    *[!0-9a-z.-]*) bad=1 ;;
+    latest) bad="" ;;
+    *) if printf '%s\n' "$NTSCRT_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then bad=""; else bad=1; fi ;;
+  esac
+  if [ -n "$bad" ]; then
+    log "NTSCRT installer $(date): NTSCRT_VERSION must be 'latest' or vX.Y.Z[-rc.N], got '$NTSCRT_VERSION'"
+    exit 1
+  fi
+  set -- "$@" --version "$NTSCRT_VERSION"
+fi
+log "NTSCRT installer $(date): install.sh $*"
+out="$(/bin/sh "$here/install.sh" "$@" 2>&1)"
 rc=$?
-cat "$LOG.run"            # stdout goes to /var/log/install.log
-cat "$LOG.run" >>"$LOG"
-rm -f "$LOG.run"
-echo "exit $rc" >>"$LOG"
+log "$out"
+log "exit $rc"
 exit "$rc"

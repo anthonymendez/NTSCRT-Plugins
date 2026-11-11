@@ -1,17 +1,19 @@
 cmake_minimum_required(VERSION 3.24)
-# The version lives in VERSION (one line, X.Y.Z): see CHANGELOG.md for how it moves.
+# The version lives in VERSION (one line, X.Y.Z or X.Y.Z-rc.N): see CHANGELOG.md for how it moves.
+# project() only takes the numeric X.Y.Z part (PROJECT_VERSION); NTSCRT_VERSION keeps the -rc.N.
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" NTSCRT_VERSION LIMIT_COUNT 1)
 string(STRIP "${NTSCRT_VERSION}" NTSCRT_VERSION)
-if(NOT NTSCRT_VERSION MATCHES "^[0-9]+[.][0-9]+[.][0-9]+$")
-  message(FATAL_ERROR "VERSION must be X.Y.Z, got '${NTSCRT_VERSION}'")
+if(NOT NTSCRT_VERSION MATCHES "^([0-9]+[.][0-9]+[.][0-9]+)(-rc[.][0-9]+)?$")
+  message(FATAL_ERROR "VERSION must be X.Y.Z or X.Y.Z-rc.N, got '${NTSCRT_VERSION}'")
 endif()
+set(NTSCRT_VERSION_CORE "${CMAKE_MATCH_1}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
 # Must be set before project(): project() creates the cache entry (empty) otherwise, and the cargo
 # builds pass it on as MACOSX_DEPLOYMENT_TARGET (rustc rejects an empty value).
 if(CMAKE_HOST_APPLE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
 endif()
-project(NTSCRTPlugins VERSION ${NTSCRT_VERSION} LANGUAGES C CXX)
+project(NTSCRTPlugins VERSION ${NTSCRT_VERSION_CORE} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
