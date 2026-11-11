@@ -701,7 +701,49 @@ class Suite:
             t0 = time.time()
             fu.render({"fx": fx}, (n * (i + 1), n * (i + 2) - 1), f"speed-{preset}")
             m[preset] = round(((time.time() - t0) / n - base) * 1000)
-        self.record("speed", "pass", m, "ms per 1920x1080 frame added by NTSCRT (informational)")
+        m.update(self.seek_edit_cost(fu, src))
+        self.record("speed", "pass", m, "ms per 1920x1080 frame added by NTSCRT; seek/edit: the plug-in's own "
+                    "time for one frame (informational)")
+
+    def seek_edit_cost(self, fu, src, frame=140):
+        """Glitch on (the default): an instance at frame 0 jumping to `frame` (it simulates every
+        frame before it), then the same frame after a CRT edit and after a Glitch edit, then with a
+        keyframed Glitch value. Timed from the plug-in's log (debug logging): its own ms for that
+        frame, without Resolve's render-job overhead or the other frames Resolve renders meanwhile."""
+        log = self.plugin_log()
+        fx = self.ntscrt(fu, src)
+        if fx.GetInput("host_debug_logging") is None:
+            return {}
+        fx.SetInput("host_debug_logging", 1)
+        fu.render({"fx": fx}, [0], "speed-seek-warmup")  # device, shaders
+
+        def timed(tag):
+            start = self.log_size(log)
+            fu.render({"fx": fx}, [frame], tag)
+            time.sleep(0.3)
+            lines = [l for l in self.log_since(log, start).splitlines()
+                     if " debug render #" in l and f" t={frame} " in l and " ms=" in l]
+            ms = [float(l.split(" ms=")[1].split()[0]) for l in lines]
+            looks = [int(l.split(" look_builds=")[1].split()[0]) for l in lines if " look_builds=" in l]
+            return {"ms": round(ms[0]) if ms else None, "renders": len(lines),
+                    "looks_built": looks[0] if looks else None}
+
+        out = {f"seek_0_to_{frame}": timed("speed-seek")}
+        fx.SetInput("crt_glow_gauss_BOOST", 1.3)
+        out["crt_edit"] = timed("speed-crt-edit")
+        fx.SetInput("glitch_signal_strength", 0.7)
+        out["glitch_edit"] = timed("speed-glitch-edit")
+        try:  # keyframed: every frame's look differs, so the history is read from the host
+            setattr(fx, "glitch_signal_strength", fu.comp.BezierSpline({}))
+            fx.SetInput("glitch_signal_strength", 1.0, 0)
+            fx.SetInput("glitch_signal_strength", 0.4, 150)
+            out["keyed_glitch"] = timed("speed-keyed")
+            fx.SetInput("crt_glow_gauss_BOOST", 1.1)
+            out["keyed_then_crt_edit"] = timed("speed-keyed-crt-edit")
+        except Exception as e:  # scripting can't keyframe here: informational only
+            out["keyed_glitch"] = f"skipped: {e}"
+        fx.SetInput("host_debug_logging", 0)
+        return out
 
     def plugin_log(self):
         """The log the plug-in in this Resolve writes (start_headless points it into --out)."""
