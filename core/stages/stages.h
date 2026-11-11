@@ -24,6 +24,8 @@ namespace ntscrt {
 // The CRT stage later fits it into the output frame (letterbox, black bars).
 struct Crop {
     static void apply(const json &look, const ImageBGRA8 &in, ImageBGRA8 &out);
+    // Same, but moves `in` into `out` when the crop cuts nothing (no copy).
+    static void apply(const json &look, ImageBGRA8 &&in, ImageBGRA8 &out);
 };
 
 // ---- Digital video codec (agent C) — CPU, temporal ----------------------------
@@ -89,6 +91,13 @@ public:
     // look["shader"]["enabled"]==false -> ShaderBypass path.
     void render(const gpu::Texture &chain_input, gpu::Texture &out, const FrameContext &ctx);
     void flush();
+    // When the shader can't run (preset missing or broken, librashader
+    // unavailable, chain failed) render() draws the ShaderBypass picture
+    // instead and these say why: an ntscrt_status code (0 = the shader ran or
+    // was off) and a message. A failing preset isn't retried until flush().
+    int fallback_status() const;
+    const std::string &fallback_reason() const;
+    size_t chain_load_attempts() const;  // tests: how often a chain was (re)built
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };

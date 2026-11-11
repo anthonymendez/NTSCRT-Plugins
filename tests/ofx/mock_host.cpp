@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <mutex>
 
 #ifdef _WIN32
@@ -226,10 +227,27 @@ OfxStatus paramGetValue(OfxParamHandle h, ...) {
     return s;
 }
 OfxStatus paramGetValueAtTime(OfxParamHandle h, OfxTime t, ...) {
+    Param *p = PA(h);
+    ++p->reads_at_time;
+    std::vector<double> saved;
+    if (!p->keys.empty()) {  // evaluate the curve at t into v for get_value
+        saved = p->v;
+        auto hi = p->keys.lower_bound(t);
+        if (hi == p->keys.begin()) p->v = hi->second;
+        else if (hi == p->keys.end()) p->v = std::prev(hi)->second;
+        else {
+            auto lo = std::prev(hi);
+            double a = (t - lo->first) / (hi->first - lo->first);
+            p->v = lo->second;
+            for (size_t i = 0; i < p->v.size() && i < hi->second.size(); ++i)
+                p->v[i] = lo->second[i] + (hi->second[i] - lo->second[i]) * a;
+        }
+    }
     va_list ap;
     va_start(ap, t);
-    OfxStatus s = get_value(PA(h), ap);
+    OfxStatus s = get_value(p, ap);
     va_end(ap);
+    if (!p->keys.empty()) p->v = saved;
     return s;
 }
 OfxStatus paramGetDerivative(OfxParamHandle, OfxTime, ...) { return kOfxStatErrUnsupported; }
@@ -248,7 +266,10 @@ OfxStatus paramSetValueAtTime(OfxParamHandle h, OfxTime t, ...) {
     va_end(ap);
     return s;
 }
-OfxStatus paramGetNumKeys(OfxParamHandle, unsigned int *n) { *n = 0; return kOfxStatOK; }
+OfxStatus paramGetNumKeys(OfxParamHandle h, unsigned int *n) {
+    *n = unsigned(PA(h)->keys.size());
+    return kOfxStatOK;
+}
 OfxStatus paramGetKeyTime(OfxParamHandle, unsigned int, OfxTime *) { return kOfxStatErrBadIndex; }
 OfxStatus paramGetKeyIndex(OfxParamHandle, OfxTime, int, int *) { return kOfxStatFailed; }
 OfxStatus paramDeleteKey(OfxParamHandle, OfxTime) { return kOfxStatErrBadIndex; }
@@ -305,10 +326,12 @@ OfxStatus clipGetImage(OfxImageClipHandle ch, OfxTime t, const OfxRectD *, OfxPr
     int ti = int(t);
     c->fetched.push_back(ti);
     auto it = c->frames.find(ti);
-    if (it == c->frames.end()) return kOfxStatFailed;
+    const std::vector<float> *frame = it != c->frames.end() ? &it->second : nullptr;
+    if (!frame && ti >= 0 && ti <= c->any_frame_last && !c->any_frame.empty()) frame = &c->any_frame;
+    if (!frame) return kOfxStatFailed;
     auto *im = new Image;
-    im->px = it->second;  // output clip frames are scratch buffers the plugin writes into
-    if (c->name == kOfxImageEffectOutputClipName) im->px.assign(it->second.size(), -1.f);
+    im->px = *frame;  // output clip frames are scratch buffers the plugin writes into
+    if (c->name == kOfxImageEffectOutputClipName) im->px.assign(frame->size(), -1.f);
     PropSet &p = im->props;
     p.set(kOfxPropType, {std::string(kOfxTypeImage)});
     p.set(kOfxImageEffectPropPixelDepth, {c->props.s(kOfxImageEffectPropPixelDepth)});

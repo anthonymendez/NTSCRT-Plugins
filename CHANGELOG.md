@@ -31,6 +31,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   (`gh attestation verify <file> -R anthonymendez/NTSCRT-Plugins`).
 - Release candidates: `vX.Y.Z-rc.N` tags are published as GitHub prereleases, which the installers'
   default (`latest`) skips; testers install one with `-Version` / `--version vX.Y.Z-rc.N`.
+- Resolve test suite: the `speed` test also reports the plug-in's time for a frame after a seek, a CRT edit, a
+  Glitch edit and with keyframed Glitch values.
 
 ### Changed
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac
@@ -62,10 +64,32 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   signature. The .pkg installer logs to `/Library/Logs/NTSCRT/install.log` (and `/var/log/install.log`)
   instead of a fixed file in /tmp.
 - The release zips carry `LICENSE` and `THIRD_PARTY_NOTICES.md` at their root.
+- Core: identical look JSON is parsed once (the host sends the same string for every frame of an unanimated
+  look), the history of other frames' looks is bounded, upload / output / Glitch textures are reused across
+  frames, and `ntscrt_flush_caches_mask` lets a host drop only the caches an edit can affect.
+- Less work per frame: opaque sources (most video) no longer get a per-pixel alpha buffer, the pixel-format
+  conversion loops are specialised per format, and an uncropped picture is moved instead of copied. Output is
+  unchanged.
 
 ### Fixed
 - macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't
   installed; it now removes both plug-ins and forgets the .pkg installer's receipt.
+- Faster seeks and edits in Resolve with Glitch on (the default): when no parameter is keyframed the plug-in no
+  longer rebuilds the look from all ~300 parameters for every earlier frame the Glitch receiver replays (up to
+  18 per frame while playing, every frame from 0 after an edit); keyframed looks are built once per frame and
+  reused until a parameter changes. An edit now only drops the caches that parameter can affect (a CRT tweak no
+  longer replays Glitch from frame 0; debug logging, presets menus and preset files drop nothing).
+- A CRT shader that can't load (missing or broken preset, librashader missing) no longer fails every frame and
+  retries the load each time: the frame renders without the shader and the reason is shown once (Resolve: a
+  persistent warning on the effect, plus the log). `ntscrt-cli` writes such frames and prints a warning.
+- Source-frame cache memory: it kept up to 65 full-size frames per effect with no limit (about 2 GB at UHD with
+  Screen Loop); it now stays within 512 MB per effect (`NTSCRT_SOURCE_CACHE_MB` changes it), dropping the least
+  recently used frames. Frames are also keyed by render scale, size, alpha mode and crop, so switching to proxy
+  or editing the crop never reuses a wrong-size or stale picture.
+- After the GPU device is lost (driver reset, GPU removed) the effect makes a new device and renders the frame
+  again, instead of failing every frame from then on; if that fails it keeps rendering with the CPU stages and
+  says so. Without a GPU, a cropped picture now fills the whole frame (letterboxed) instead of leaving part of it
+  unwritten.
 
 ## [0.4.0] - 2026-11-10
 

@@ -11,6 +11,8 @@
 // Parameter values each frame: shader initial, then upstream's house
 // defaults (AppState.appShaderDefaults), then look params — all re-applied
 // so a value from an earlier frame never leaks into this one.
+#include <ntscrt/ntscrt.h>
+
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -47,13 +49,18 @@ const PresetInfo kPresets[] = {
     {"sim", "crt/crtsim.slangp"},
 };
 
+// Something the shader needs isn't there (librashader, the preset file).
+struct MissingResource : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 std::string preset_path_for(const std::string &id_or_path) {
     for (const auto &p : kPresets)
         if (id_or_path == p.id) return p.path;
     if (id_or_path.size() > 7 && id_or_path.substr(id_or_path.size() - 7) == ".slangp") return id_or_path;
     for (const auto &p : kPresets)  // "crtglow_gauss" style stems
         if (fs::path(p.path).stem().string() == id_or_path) return p.path;
-    throw std::runtime_error("unknown CRT shader preset '" + id_or_path + "'");
+    throw MissingResource("unknown CRT shader preset '" + id_or_path + "'");
 }
 
 // upstream AppState.appShaderDefaults
@@ -98,6 +105,16 @@ struct CrtStage::Impl {
     std::map<std::string, CachedChain> chains;  // by preset path
     std::shared_ptr<gpu::Texture> rect_tex, big_tex, rt_tex, scratch, bypass_big;
     bool clear_history = false;
+    // Presets that failed to load / run, by the look's preset string: not
+    // retried every frame (flush() forgets them).
+    struct Failure {
+        int status;
+        std::string msg;
+    };
+    std::map<std::string, Failure> failed;
+    int fb_status = 0;
+    std::string fb_reason;
+    size_t attempts = 0;
 
     std::shared_ptr<gpu::Texture> &tex(std::shared_ptr<gpu::Texture> &slot, int w, int h, gpu::Format f) {
         if (!slot || slot->desc().width != w || slot->desc().height != h || slot->desc().format != f)
@@ -108,12 +125,13 @@ struct CrtStage::Impl {
     CachedChain &chain_for(const std::string &rel) {
         auto it = chains.find(rel);
         if (it != chains.end()) return it->second;
+        ++attempts;
         std::string err;
         crt::Library *lib = crt::Library::load(resource_dir, err);
-        if (!lib) throw std::runtime_error("CRT shader unavailable: " + err);
+        if (!lib) throw MissingResource(err);
         fs::path p = fs::u8path(resource_dir) / "shaders" / fs::u8path(rel);
         std::error_code ec;
-        if (!fs::exists(p, ec)) throw std::runtime_error("CRT shader preset missing: " + u8str(p));
+        if (!fs::exists(p, ec)) throw MissingResource("shader preset missing: " + u8str(p));
         CachedChain c;
         c.chain = lib->create_chain(*dev, u8str(p));
         c.history = uses_history(p);
@@ -138,11 +156,36 @@ struct CrtStage::Impl {
         }
     }
 
-    // Shader path into `target` (any size).
-    void shade(const gpu::Texture &in, gpu::Texture &target, const json &sh, const FrameContext &ctx) {
-        std::string rel = preset_path_for(sh.contains("preset") && sh["preset"].is_string()
-                                              ? sh["preset"].get<std::string>()
-                                              : std::string("glow_gauss"));
+    // Shader path into `target`; false (fb_status / fb_reason set) when the
+    // shader can't run, so the caller draws the bypass instead. A lost device
+    // is rethrown: the owner has to replace it.
+    bool try_shade(const gpu::Texture &in, gpu::Texture &target, const json &sh, const FrameContext &ctx) {
+        const std::string id =
+            sh.contains("preset") && sh["preset"].is_string() ? sh["preset"].get<std::string>() : "glow_gauss";
+        auto f = failed.find(id);
+        if (f == failed.end()) {
+            std::string rel;
+            try {
+                rel = preset_path_for(id);
+                shade(in, target, rel, sh, ctx);
+                return true;
+            } catch (const MissingResource &e) {
+                f = failed.emplace(id, Failure{NTSCRT_ERR_MISSING_RESOURCE, e.what()}).first;
+            } catch (const crt::PresetError &e) {
+                f = failed.emplace(id, Failure{NTSCRT_ERR_MISSING_RESOURCE, e.what()}).first;
+            } catch (const std::exception &e) {
+                if (dev->lost()) throw;
+                f = failed.emplace(id, Failure{NTSCRT_ERR_GPU, e.what()}).first;
+            }
+            if (!rel.empty()) chains.erase(rel);  // half-built or broken: rebuilt after flush()
+        }
+        fb_status = f->second.status;
+        fb_reason = "CRT shader '" + id + "' unavailable, showing the picture without it: " + f->second.msg;
+        return false;
+    }
+
+    void shade(const gpu::Texture &in, gpu::Texture &target, const std::string &rel, const json &sh,
+               const FrameContext &ctx) {
         CachedChain &c = chain_for(rel);
         apply_params(c, rel, sh.contains("params") ? sh["params"] : json());
         const auto frame_count = uint64_t(std::max<int64_t>(0, shader_frame(ctx)));
@@ -215,8 +258,9 @@ void CrtStage::render(const gpu::Texture &in, gpu::Texture &out, const FrameCont
     const bool full = r == crt::Rect{0, 0, ow, oh};
     gpu::Texture &target = full ? out : *impl_->tex(impl_->rect_tex, r.w, r.h, out.desc().format);
 
-    if (enabled) impl_->shade(in, target, sh, ctx);
-    else impl_->bypass(in, target);
+    impl_->fb_status = 0;
+    impl_->fb_reason.clear();
+    if (!enabled || !impl_->try_shade(in, target, sh, ctx)) impl_->bypass(in, target);
 
     if (!full) {
         struct { int32_t ox, oy; uint32_t w, h; } p{r.x, r.y, uint32_t(ow), uint32_t(oh)};
@@ -231,7 +275,12 @@ void CrtStage::render(const gpu::Texture &in, gpu::Texture &out, const FrameCont
 
 void CrtStage::flush() {
     impl_->clear_history = true;
+    impl_->failed.clear();
     for (auto &[k, c] : impl_->chains) c.last_frame = -1000;
 }
+
+int CrtStage::fallback_status() const { return impl_->fb_status; }
+const std::string &CrtStage::fallback_reason() const { return impl_->fb_reason; }
+size_t CrtStage::chain_load_attempts() const { return impl_->attempts; }
 
 }  // namespace ntscrt

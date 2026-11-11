@@ -333,6 +333,8 @@ public:
         }
     }
 
+    bool lost() const override { return dev_->GetDeviceRemovedReason() != S_OK; }
+
     void *native_device() const override { return dev_.Get(); }
     void *native_context() override { return ctx_.Get(); }
 

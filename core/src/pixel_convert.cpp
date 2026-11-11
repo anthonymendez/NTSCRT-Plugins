@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "../stages/crt/crt_sizing.h"
+
 namespace ntscrt {
 namespace {
 inline uint8_t q8(float v) { return uint8_t(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); }
@@ -40,23 +42,32 @@ inline uint16_t float_to_half(float x) {
     return uint16_t(s | (uint32_t(e) << 10) | ((m + 0x1000u) >> 13));
 }
 
-inline void read_px(const uint8_t *row, int x, ntscrt_pixel_format f, float o[4]) {
-    switch (f) {
-    case NTSCRT_RGBA8: { auto p = row + x * 4; for (int c = 0; c < 4; ++c) o[c] = p[c] / 255.f; break; }
-    case NTSCRT_BGRA8: { auto p = row + x * 4; o[0] = p[2] / 255.f; o[1] = p[1] / 255.f; o[2] = p[0] / 255.f; o[3] = p[3] / 255.f; break; }
-    case NTSCRT_RGBA16: { auto p = reinterpret_cast<const uint16_t *>(row) + x * 4; for (int c = 0; c < 4; ++c) o[c] = p[c] / 65535.f; break; }
-    case NTSCRT_RGBA16F: { auto p = reinterpret_cast<const uint16_t *>(row) + x * 4; for (int c = 0; c < 4; ++c) o[c] = half_to_float(p[c]); break; }
-    case NTSCRT_RGBA32F: { auto p = reinterpret_cast<const float *>(row) + x * 4; for (int c = 0; c < 4; ++c) o[c] = p[c]; break; }
-    }
+// Per-format pixel access, resolved at compile time so the conversion loops
+// don't switch on the format for every pixel.
+template <ntscrt_pixel_format F> inline void read_px(const uint8_t *row, int x, float o[4]) {
+    if constexpr (F == NTSCRT_RGBA8) { auto p = row + x * 4; for (int c = 0; c < 4; ++c) o[c] = p[c] / 255.f; }
+    else if constexpr (F == NTSCRT_BGRA8) { auto p = row + x * 4; o[0] = p[2] / 255.f; o[1] = p[1] / 255.f; o[2] = p[0] / 255.f; o[3] = p[3] / 255.f; }
+    else if constexpr (F == NTSCRT_RGBA16) { auto p = reinterpret_cast<const uint16_t *>(row) + x * 4; for (int c = 0; c < 4; ++c) o[c] = p[c] / 65535.f; }
+    else if constexpr (F == NTSCRT_RGBA16F) { auto p = reinterpret_cast<const uint16_t *>(row) + x * 4; for (int c = 0; c < 4; ++c) o[c] = half_to_float(p[c]); }
+    else { auto p = reinterpret_cast<const float *>(row) + x * 4; for (int c = 0; c < 4; ++c) o[c] = p[c]; }
 }
 
-inline void write_px(uint8_t *row, int x, ntscrt_pixel_format f, const float v[4]) {
+template <ntscrt_pixel_format F> inline void write_px(uint8_t *row, int x, const float v[4]) {
+    if constexpr (F == NTSCRT_RGBA8) { auto p = row + x * 4; for (int c = 0; c < 4; ++c) p[c] = q8(v[c]); }
+    else if constexpr (F == NTSCRT_BGRA8) { auto p = row + x * 4; p[0] = q8(v[2]); p[1] = q8(v[1]); p[2] = q8(v[0]); p[3] = q8(v[3]); }
+    else if constexpr (F == NTSCRT_RGBA16) { auto p = reinterpret_cast<uint16_t *>(row) + x * 4; for (int c = 0; c < 4; ++c) p[c] = uint16_t(std::lround(std::clamp(v[c], 0.f, 1.f) * 65535.f)); }
+    else if constexpr (F == NTSCRT_RGBA16F) { auto p = reinterpret_cast<uint16_t *>(row) + x * 4; for (int c = 0; c < 4; ++c) p[c] = float_to_half(v[c]); }
+    else { auto p = reinterpret_cast<float *>(row) + x * 4; for (int c = 0; c < 4; ++c) p[c] = v[c]; }
+}
+
+// Calls fn.template operator()<F>() for the image's format.
+template <class Fn> void with_format(ntscrt_pixel_format f, Fn &&fn) {
     switch (f) {
-    case NTSCRT_RGBA8: { auto p = row + x * 4; for (int c = 0; c < 4; ++c) p[c] = q8(v[c]); break; }
-    case NTSCRT_BGRA8: { auto p = row + x * 4; p[0] = q8(v[2]); p[1] = q8(v[1]); p[2] = q8(v[0]); p[3] = q8(v[3]); break; }
-    case NTSCRT_RGBA16: { auto p = reinterpret_cast<uint16_t *>(row) + x * 4; for (int c = 0; c < 4; ++c) p[c] = uint16_t(std::lround(std::clamp(v[c], 0.f, 1.f) * 65535.f)); break; }
-    case NTSCRT_RGBA16F: { auto p = reinterpret_cast<uint16_t *>(row) + x * 4; for (int c = 0; c < 4; ++c) p[c] = float_to_half(v[c]); break; }
-    case NTSCRT_RGBA32F: { auto p = reinterpret_cast<float *>(row) + x * 4; for (int c = 0; c < 4; ++c) p[c] = v[c]; break; }
+    case NTSCRT_RGBA8: fn.template operator()<NTSCRT_RGBA8>(); break;
+    case NTSCRT_BGRA8: fn.template operator()<NTSCRT_BGRA8>(); break;
+    case NTSCRT_RGBA16: fn.template operator()<NTSCRT_RGBA16>(); break;
+    case NTSCRT_RGBA16F: fn.template operator()<NTSCRT_RGBA16F>(); break;
+    case NTSCRT_RGBA32F: fn.template operator()<NTSCRT_RGBA32F>(); break;
     }
 }
 }  // namespace
@@ -76,34 +87,43 @@ constexpr float kTransparent = 0.5f / 255.f;  // alpha at or below this counts a
 
 void to_bgra8(const ntscrt_image &src, ImageBGRA8 &out, std::vector<float> *alpha_out, AlphaMode mode,
               bool src_premult) {
-    out.resize(src.width, src.height);
+    out.width = src.width;
+    out.height = src.height;
+    out.px.resize(size_t(src.width) * src.height * 4);  // every byte is written below
     std::vector<float> local;
+    // Alpha is only stored once a pixel isn't opaque: empty = fully opaque
+    // (most video), which saves the buffer and the fill below.
     std::vector<float> *alpha = alpha_out ? alpha_out : (mode == AlphaMode::Clip ? &local : nullptr);
-    if (alpha) alpha->assign(size_t(src.width) * src.height, 1.f);
+    if (alpha) alpha->clear();
     bool any_transparent = false;
-    for (int y = 0; y < src.height; ++y) {
-        auto row = static_cast<const uint8_t *>(src.data) + ptrdiff_t(y) * src.row_bytes;
-        uint8_t *o = out.row(y);
-        for (int x = 0; x < src.width; ++x) {
-            float v[4];
-            read_px(row, x, src.format, v);
-            const float a = std::clamp(v[3], 0.f, 1.f);
-            if (mode == AlphaMode::Clip) {
-                // straight colour: what the element looks like on its own
-                if (src_premult && a > kTransparent && a < 1.f)
-                    for (int c = 0; c < 3; ++c) v[c] /= a;
-            } else if (!src_premult) {
-                // the element over black
-                for (int c = 0; c < 3; ++c) v[c] *= a;
+    with_format(src.format, [&]<ntscrt_pixel_format F>() {
+        for (int y = 0; y < src.height; ++y) {
+            auto row = static_cast<const uint8_t *>(src.data) + ptrdiff_t(y) * src.row_bytes;
+            uint8_t *o = out.row(y);
+            for (int x = 0; x < src.width; ++x) {
+                float v[4];
+                read_px<F>(row, x, v);
+                const float a = std::clamp(v[3], 0.f, 1.f);
+                if (mode == AlphaMode::Clip) {
+                    // straight colour: what the element looks like on its own
+                    if (src_premult && a > kTransparent && a < 1.f)
+                        for (int c = 0; c < 3; ++c) v[c] /= a;
+                } else if (!src_premult) {
+                    // the element over black
+                    for (int c = 0; c < 3; ++c) v[c] *= a;
+                }
+                any_transparent |= a <= kTransparent;
+                o[x * 4 + 0] = q8(v[2]);
+                o[x * 4 + 1] = q8(v[1]);
+                o[x * 4 + 2] = q8(v[0]);
+                o[x * 4 + 3] = 255;
+                if (alpha && a != 1.f) {
+                    if (alpha->empty()) alpha->assign(size_t(src.width) * src.height, 1.f);
+                    (*alpha)[size_t(y) * src.width + x] = a;
+                }
             }
-            any_transparent |= a <= kTransparent;
-            o[x * 4 + 0] = q8(v[2]);
-            o[x * 4 + 1] = q8(v[1]);
-            o[x * 4 + 2] = q8(v[0]);
-            o[x * 4 + 3] = 255;
-            if (alpha) (*alpha)[size_t(y) * src.width + x] = a;
         }
-    }
+    });
     if (mode == AlphaMode::Clip && any_transparent) fill_transparent(out, *alpha);
 }
 
@@ -113,7 +133,7 @@ void to_bgra8(const ntscrt_image &src, ImageBGRA8 &out, std::vector<float> *alph
 void fill_transparent(ImageBGRA8 &im, const std::vector<float> &alpha) {
     struct Level { int w, h; std::vector<float> px; };  // r, g, b, weight (colour straight)
     const int W = im.width, H = im.height;
-    if (W <= 0 || H <= 0) return;
+    if (W <= 0 || H <= 0 || alpha.size() < size_t(W) * H) return;  // empty alpha: opaque
     bool any = false, all = true;
     for (float a : alpha) { bool e = a <= kTransparent; any |= e; all &= e; }
     if (!any || all) return;  // nothing to fill / nothing to fill from
@@ -186,17 +206,36 @@ void fill_transparent(ImageBGRA8 &im, const std::vector<float> &alpha) {
     }
 }
 
+void letterbox(const ImageBGRA8 &in, int out_w, int out_h, ImageBGRA8 &out) {
+    out.resize(out_w, out_h);  // black bars (opaque black, like the GPU bypass)
+    for (size_t i = 3; i < out.px.size(); i += 4) out.px[i] = 255;
+    if (in.width <= 0 || in.height <= 0 || out_w <= 0 || out_h <= 0) return;
+    const crt::Rect r = crt::fit_rect(in.width, in.height, out_w, out_h);
+    std::vector<int> sx(size_t(r.w));
+    for (int x = 0; x < r.w; ++x) sx[size_t(x)] = std::min(in.width - 1, int((x + 0.5) * in.width / r.w));
+    for (int y = 0; y < r.h; ++y) {
+        const uint8_t *s = in.row(std::min(in.height - 1, int((y + 0.5) * in.height / r.h)));
+        uint8_t *o = out.row(r.y + y) + size_t(r.x) * 4;
+        for (int x = 0; x < r.w; ++x) std::memcpy(o + size_t(x) * 4, s + size_t(sx[size_t(x)]) * 4, 4);
+    }
+}
+
 void from_bgra8(const ImageBGRA8 &in, const std::vector<float> *alpha, ntscrt_image &dst, AlphaMode mode,
                 bool premult) {
     const float missing = mode == AlphaMode::Spill ? 0.f : 1.f;
-    for (int y = 0; y < dst.height && y < in.height; ++y) {
-        auto row = static_cast<uint8_t *>(dst.data) + ptrdiff_t(y) * dst.row_bytes;
-        const uint8_t *s = in.row(y);
-        for (int x = 0; x < dst.width && x < in.width; ++x) {
-            float v[4] = {s[x * 4 + 2] / 255.f, s[x * 4 + 1] / 255.f, s[x * 4 + 0] / 255.f, 1.f};
-            merge_alpha(v, alpha ? (*alpha)[size_t(y) * in.width + x] : missing, mode, premult);
-            write_px(row, x, dst.format, v);
+    const bool opaque = alpha && alpha->empty();  // to_bgra8 stores no alpha for opaque sources
+    if (opaque) alpha = nullptr;
+    const float fixed = opaque ? 1.f : missing;
+    with_format(dst.format, [&]<ntscrt_pixel_format F>() {
+        for (int y = 0; y < dst.height && y < in.height; ++y) {
+            auto row = static_cast<uint8_t *>(dst.data) + ptrdiff_t(y) * dst.row_bytes;
+            const uint8_t *s = in.row(y);
+            for (int x = 0; x < dst.width && x < in.width; ++x) {
+                float v[4] = {s[x * 4 + 2] / 255.f, s[x * 4 + 1] / 255.f, s[x * 4 + 0] / 255.f, 1.f};
+                merge_alpha(v, alpha ? (*alpha)[size_t(y) * in.width + x] : fixed, mode, premult);
+                write_px<F>(row, x, v);
+            }
         }
-    }
+    });
 }
 }  // namespace ntscrt

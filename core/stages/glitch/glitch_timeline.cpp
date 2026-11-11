@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 #include "glitch_kernels.h"
 
@@ -70,14 +71,21 @@ const GlitchFieldPlan &GlitchTimeline::plan_for(const FrameContext &ctx, int wid
     const int64_t F = std::max<int64_t>(0, ctx.frame);
 
     // Settings at frame k: the host's keyframes, read once per call.
+    // Frames whose look is this frame's own (no keyframes: all of them) share
+    // one parse.
     std::map<int64_t, GlitchSettings> memo;
+    std::optional<GlitchSettings> current;
     auto settings_at = [&](int64_t k) -> const GlitchSettings & {
         auto it = memo.find(k);
         if (it != memo.end()) return it->second;
+        const json *j = k == ctx.frame && ctx.look ? ctx.look : ctx.look_at ? &ctx.look_at(k) : ctx.look;
         GlitchSettings s;
-        if (k == ctx.frame && ctx.look) s = GlitchSettings::from_look(*ctx.look);
-        else if (ctx.look_at) s = GlitchSettings::from_look(ctx.look_at(k));
-        else if (ctx.look) s = GlitchSettings::from_look(*ctx.look);
+        if (j && j == ctx.look) {
+            if (!current) current = GlitchSettings::from_look(*ctx.look);
+            s = *current;
+        } else if (j) {
+            s = GlitchSettings::from_look(*j);
+        }
         return memo.emplace(k, s).first->second;
     };
 
@@ -101,7 +109,13 @@ const GlitchFieldPlan &GlitchTimeline::plan_for(const FrameContext &ctx, int wid
         probes.push_back(c);
         if (c > 0) {
             probes.push_back(c - 1);
-            for (int i = 0; i < kProbes; i++) probes.push_back((c - 1) * i / (kProbes - 1));
+            // Spread over 0..c-1, on whole seconds: the same frames from one
+            // render to the next, so a host that caches looks per frame
+            // builds no new ones while playing.
+            for (int i = 0; i < kProbes; i++) {
+                const double f = double((c - 1) * i / (kProbes - 1));
+                probes.push_back(std::min<int64_t>(c - 1, std::llround(std::floor(f / fps) * fps)));
+            }
         }
         std::sort(probes.begin(), probes.end());
         probes.erase(std::unique(probes.begin(), probes.end()), probes.end());

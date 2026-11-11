@@ -39,7 +39,23 @@ struct GlitchStage::Impl {
     GlitchTimeline timeline;
     std::shared_ptr<gpu::Buffer> rows, gate, color, drops;
     size_t rows_cap = 0, gate_cap = 0, color_cap = 0, drops_cap = 0;
+    // Output textures, reused once nobody else holds them (GPU work on one
+    // queue runs in order, so a released texture is safe to overwrite).
+    std::vector<std::shared_ptr<gpu::Texture>> pool;
     explicit Impl(gpu::Device &d) : dev(d) {}
+
+    std::shared_ptr<gpu::Texture> acquire(const gpu::TextureDesc &d) {
+        for (auto &t : pool) {
+            const gpu::TextureDesc &e = t->desc();
+            if (t.use_count() == 1 && e.width == d.width && e.height == d.height && e.format == d.format &&
+                e.shader_write == d.shader_write && e.render_target == d.render_target)
+                return t;
+        }
+        auto t = dev.create_texture(d);
+        if (pool.size() >= 4) pool.erase(pool.begin());
+        pool.push_back(t);
+        return t;
+    }
 
     // Reuses `buf` when it already holds `bytes`; uploads `data` if given.
     void ensure(std::shared_ptr<gpu::Buffer> &buf, size_t &cap, size_t bytes, const void *data) {
@@ -77,7 +93,7 @@ std::shared_ptr<gpu::Texture> GlitchStage::run(const std::shared_ptr<gpu::Textur
     gpu::TextureDesc od = d;
     od.shader_write = true;
     od.render_target = false;
-    auto out = dev.create_texture(od);
+    auto out = impl_->acquire(od);
 
     gpu::Kernel *kGate = dev.kernel("glitch/glitch_gate");
     gpu::Kernel *kChroma = dev.kernel("glitch/glitch_chroma");

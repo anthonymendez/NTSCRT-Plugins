@@ -4,8 +4,13 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <ntscrt/ntscrt.h>
+
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
 #include <vector>
 #include <string>
 
@@ -15,6 +20,7 @@
 #include "stages/stages.h"
 
 using namespace gputest;
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -200,6 +206,7 @@ TEST_CASE("each bundled CRT preset renders the test frame") {
             std::vector<uint8_t> o;
             try {
                 crt.render(*chain_in, *out, ctx);
+                if (crt.fallback_status()) throw std::runtime_error(crt.fallback_reason());  // drew the bypass
                 o = read(*d, *out);
             } catch (const std::exception &e) {
                 // GitHub's macOS runners are VMs with a paravirtualized GPU that times out
@@ -248,5 +255,52 @@ TEST_CASE("shader params and preset ids/paths are honoured") {
     CHECK(stats(dim).mean < stats(base).mean - 5);
     CHECK(again == base);
     CHECK(by_path == base);
-    CHECK_THROWS(render({{"preset", "no_such_preset"}}));
+    CHECK(crt.fallback_status() == 0);
+}
+
+// A preset that can't load draws the bypass picture, says why, and isn't
+// retried every frame (only after a flush).
+TEST_CASE("missing or broken presets fall back to the bypass") {
+    auto d = device();
+    if (!d) return;
+    auto src = bgra(*d, 64, 48, gray_image(64, 48, [](int x, int y) { return (x / 4 + y / 4) % 2 ? 180 : 60; }));
+    CrtStage crt(*d, NTSCRT_RESOURCES_DIR);
+    auto render = [&](const json &shader) {
+        json look = {{"shader", shader}};
+        FrameContext ctx;
+        ctx.look = &look;
+        auto out = d->create_texture({256, 192, gpu::Format::BGRA8, true, true});
+        crt.render(*src, *out, ctx);
+        return read(*d, *out);
+    };
+    const auto plain = render({{"enabled", false}});
+    CHECK(crt.fallback_status() == 0);
+
+    const fs::path dir = fs::temp_directory_path() / "ntscrt_test_crt_broken";
+    fs::create_directories(dir);
+    const fs::path broken = dir / "broken.slangp";
+    { std::ofstream(broken) << "shaders = 1\nshader0 = \"does_not_exist.slang\"\nscale_type0 = garbage\n"; }
+    auto u8 = broken.u8string();
+    const std::string broken_path(u8.begin(), u8.end());  // absolute: replaces <resources>/shaders
+
+    for (const std::string preset : {std::string("no_such_preset"), std::string("crt/nope.slangp"), broken_path}) {
+        CAPTURE(preset);
+        const size_t before = crt.chain_load_attempts();
+        CHECK(render({{"preset", preset}}) == plain);
+        CHECK((crt.fallback_status() == NTSCRT_ERR_MISSING_RESOURCE || crt.fallback_status() == NTSCRT_ERR_GPU));
+        CHECK(crt.fallback_reason().find(preset) != std::string::npos);
+        const size_t after_first = crt.chain_load_attempts();
+        CHECK(after_first - before <= 1);
+        for (int i = 0; i < 3; ++i) CHECK(render({{"preset", preset}}) == plain);  // not retried
+        CHECK(crt.chain_load_attempts() == after_first);
+        CHECK(crt.fallback_status() != 0);
+        crt.flush();  // an edit: tried once more
+        render({{"preset", preset}});
+        CHECK(crt.chain_load_attempts() - after_first == after_first - before);
+    }
+    // A good preset afterwards runs normally.
+    render({{"preset", "glow_gauss"}});
+    CHECK(crt.fallback_status() == 0);
+    CHECK(crt.fallback_reason().empty());
+    fs::remove_all(dir);
 }
