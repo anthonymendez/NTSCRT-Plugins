@@ -271,3 +271,124 @@ TEST_CASE("model: Digital video legacy controls and version 1 presets") {
     CHECK(hv[ccd->host_id].get<double>() == doctest::Approx(1.0));
     CHECK(hv[legacy->host_id].get<double>() == doctest::Approx(0.0));
 }
+
+// ---- animated presets, applies, Digital video formats, upstream JSON ----
+namespace {
+const Model &real_model() {
+    static Model m = Model::from_schema(json::parse(ntscrt_param_schema_json()), load("fxplug/param_ids.json"), nullptr);
+    return m;
+}
+json keyed_at(const std::vector<std::pair<int64_t, json>> &keys, int64_t n) {
+    json v = keys.front().second;
+    for (const auto &[f, x] : keys)
+        if (f <= n) v = x;
+    return v;
+}
+// The look a host holding pk (keys; base look = the preset, as applyPreset stores it) builds at frame n.
+json keyed_look(const Model &m, const PresetKeys &pk, const json &base, int64_t n) {
+    return m.build_look(base, [&](const Param &p) {
+        auto it = pk.keys.find(p.host_id);
+        return it != pk.keys.end() ? keyed_at(it->second, n) : m.default_host_value(p);
+    });
+}
+// The look a host builds after setting every param from `look` (host_values_from_preset).
+json held_look(const Model &m, const json &base, const json &look) {
+    auto hv = m.host_values_from_preset(look, false);
+    return m.build_look(base, [&](const Param &p) {
+        auto it = hv.find(p.host_id);
+        return it != hv.end() ? it->second : m.default_host_value(p);
+    });
+}
+}  // namespace
+
+TEST_CASE("model: animated presets become keyframes matching the upstream timeline") {
+    const Model &m = real_model();
+    for (const std::string name : {"Glitch pop", "V Hold glitch", "Tracking Noise up"}) {
+        CAPTURE(name);
+        const json preset = load("presets/" + name + ".json");
+        const double fps = 30;
+        const PresetKeys pk = m.preset_keys(preset, fps, 150);
+        REQUIRE(pk.animated());
+        CHECK(pk.pass == 60);  // 2 s at 30 fps
+        CHECK(pk.frames == 150);
+        size_t moving = 0;
+        for (const auto &[id, k] : pk.keys) {
+            const Param *p = m.find_host(id);
+            REQUIRE(p);
+            CHECK_FALSE(p->feedback);
+            REQUIRE_FALSE(k.empty());
+            CHECK(k.front().first == 0);
+            if (k.size() > 1) {
+                ++moving;
+                if (p->kind != Kind::Bool && p->kind != Kind::Choice) CHECK(k.size() == 150);
+            }
+        }
+        CHECK(moving > 3);
+        bool differs = false;
+        const json first = keyed_look(m, pk, preset, 0);
+        for (int64_t n : {0, 1, 13, 29, 59, 60, 77, 149}) {
+            CAPTURE(n);
+            const json want = held_look(m, preset, m.preset_look_at_frame(preset, n, fps));
+            const json got = keyed_look(m, pk, preset, n);
+            CHECK(got == want);
+            differs |= got != first;
+        }
+        CHECK(differs);
+    }
+    CHECK_FALSE(m.preset_keys(load("presets/Clean VHS.json"), 30, 100).animated());
+    CHECK_FALSE(m.preset_keys(load("presets/Screen Loop/Bottom to top.json"), 30, 100).animated());
+    CHECK(m.preset_keys(load("presets/Glitch pop.json"), 30, 0).frames == 60);  // unknown length: one pass
+}
+
+TEST_CASE("model: Horizontal resolution applies, Custom demotion, Digital video formats") {
+    const Model &m = real_model();
+    const Param *pre = m.find("downscale.preset"), *w = m.find("downscale.width");
+    REQUIRE(pre);
+    REQUIRE(w);
+    int64_t arcade = -1, custom = -1;
+    for (size_t i = 0; i < pre->options.size(); ++i) {
+        if (pre->options[i].value == "Arcade (384px)") arcade = int64_t(i);
+        if (pre->options[i].value == "Custom") custom = int64_t(i);
+    }
+    REQUIRE(arcade >= 0);
+    auto hv = m.option_host_values(*pre, arcade);
+    REQUIRE(hv.size() == 1);
+    CHECK(hv[w->host_id] == 384);
+    CHECK(m.option_host_values(*pre, custom).empty());
+    CHECK_FALSE(m.demoted_choice(*pre, arcade, *w, 384));
+    CHECK(m.demoted_choice(*pre, arcade, *w, 400) == json(custom));
+
+    json bundled = json::array({{{"name", "Clean VHS"}, {"kind", "look"}, {"json", json::object()}},
+                                {{"name", "Screen Loop/x"}, {"kind", "feedback"}, {"json", json::object()}}});
+    auto menu = m.look_menu(bundled);
+    REQUIRE(menu.size() == 7);
+    CHECK(menu[0].name == "Clean VHS");
+    CHECK(menu[3].name == "Digital video/MiniDV");
+    CHECK(menu[3].format);
+    auto fv = m.applies_host_values(menu[3].data);
+    CHECK(fv[m.find("digital.enabled")->host_id] == true);
+    CHECK(fv[w->host_id] == 720);
+    const Param *dp = m.find("downscale.preset");
+    CHECK(dp->options[size_t(fv[dp->host_id].get<int64_t>())].value == "MiniDV (720px)");
+    CHECK(fv.count(m.find("digital.quality2")->host_id));
+    CHECK_FALSE(fv.count(m.find("ntsc.enabled")->host_id));
+}
+
+TEST_CASE("model: looks are upstream JSON (constants, numeric toggles) and presets round-trip") {
+    const Model &m = real_model();
+    auto def = [&](const Param &p) { return m.default_host_value(p); };
+    json look = m.build_look(json{{"version", 1}}, def);
+    CHECK(look["version"] == 2);  // the params hold today's values, whatever the base said
+    CHECK(look["ntsc"]["settings"]["version"] == 1);
+    CHECK(look["glitch"]["values"]["closed_captions"] == 1);
+    auto fb = m.build_feedback(true, json::object(), def);
+    REQUIRE(fb);
+    CHECK((*fb)["version"] == 2);
+    CHECK((*fb)["values"]["loop"] == 0);
+    for (const std::string name : {"Chunky webcam", "CD-ROM (low quality)", "Webcam (low quality)", "Clean CRT"}) {
+        CAPTURE(name);
+        const json preset = load("presets/" + name + ".json");
+        const json a = held_look(m, preset, preset);
+        CHECK(held_look(m, a, a) == a);  // save -> load -> the same look
+    }
+}

@@ -10,6 +10,7 @@
 namespace ntscrt_ofx {
 namespace {
 const char kFbPrefix[] = "fb:";
+const char kFormatMenuPrefix[] = "Digital video/";
 
 std::optional<Cond> parse_cond(const json &j) {
     if (j.is_string()) return Cond{j.get<std::string>(), false, json()};
@@ -118,6 +119,7 @@ Schema Schema::parse(const char *schema_json) {
         p.has_step = num(pj, "step", p.step);
         p.animatable = pj.value("animatable", true);
         p.in_presets = pj.value("preset", true);
+        p.encode_number = pj.value("encode", std::string()) == "number";
         if (pj.contains("enabled_if")) p.enabled_if = parse_cond(pj["enabled_if"]);
         if (pj.contains("visible_if")) p.visible_if = parse_cond(pj["visible_if"]);
         if (p.type == PType::Choice) {
@@ -128,8 +130,10 @@ Schema Schema::parse(const char *schema_json) {
                                         : v.is_string()                             ? v.get<std::string>()
                                                                                     : v.dump();
                     p.options.emplace_back(v, label);
+                    p.option_applies.push_back(o.contains("applies") && o["applies"].is_object() ? o["applies"] : json());
                 } else {
                     p.options.emplace_back(o, o.is_string() ? o.get<std::string>() : o.dump());
+                    p.option_applies.push_back(json());
                 }
             }
             if (p.options.empty()) continue;
@@ -154,6 +158,9 @@ Schema Schema::parse(const char *schema_json) {
         (p.feedback ? s.by_fb_path : s.by_look_path)[p.path] = s.params.size();
         s.params.push_back(std::move(p));
     }
+    if (j.contains("constants") && j["constants"].is_object()) s.constants = j["constants"];
+    if (j.contains("digital_formats") && j["digital_formats"].is_array()) s.digital_formats = j["digital_formats"];
+    s.timeline = ntscrt::timeline::Rules::from_schema(j);
     return s;
 }
 
@@ -170,7 +177,7 @@ bool is_feedback_preset(const json &j) {
     return j.is_object() && j.value("kind", std::string()) == "ntscrt-video-feedback";
 }
 
-std::vector<Preset> parse_presets(const char *presets_json) {
+std::vector<Preset> parse_presets(const char *presets_json, const json &digital_formats) {
     std::vector<Preset> out;
     json j = json::parse(presets_json ? presets_json : "[]", nullptr, false);
     if (!j.is_array()) return out;
@@ -189,6 +196,16 @@ std::vector<Preset> parse_presets(const char *presets_json) {
         p.feedback = e.value("kind", std::string()) == "feedback" || is_feedback_preset(p.data);
         if (!p.name.empty()) out.push_back(std::move(p));
     }
+    // Upstream 0.20 offers the Digital video formats in its Preset menu ("Digital video" section).
+    if (digital_formats.is_array())
+        for (const auto &f : digital_formats) {
+            if (!f.is_object() || !f.contains("name") || !f["name"].is_string() || !f.contains("applies")) continue;
+            Preset p;
+            p.name = kFormatMenuPrefix + f["name"].get<std::string>();
+            p.format = true;
+            p.data = f["applies"];
+            out.push_back(std::move(p));
+        }
     // Hosts save the Preset menus by index: released presets keep their place,
     // newer ones follow (alphabetically, as the core lists them).
     const auto &released = released_preset_order();
@@ -213,6 +230,10 @@ const std::vector<std::string> &released_preset_order() {
         "Screen Loop/7 copies slow luma", "Screen Loop/Bottom to top", "Static loop 1", "Tracking Noise up",
         "Two blips loop", "V Hold glitch", "Vertical Freak Out", "Vertical spike loop", "Very wavy", "Wavy loop",
         "Webcam (low quality)",
+        // v0.5.0 (upstream 0.20 sync): two new looks, then upstream's Digital video formats
+        "CD-ROM (low quality)", "Chunky webcam", "Digital video/Webcam (2005)", "Digital video/Video call",
+        "Digital video/MiniDV", "Digital video/Early web video", "Digital video/CD-ROM (Video 1)",
+        "Digital video/Datamosh",
     };
     return names;
 }
@@ -288,6 +309,18 @@ json color_value(const ParamDef &p, const std::vector<double> &c) {
 void build_look(const Schema &s, const ValueFn &value, json &look, json &feedback) {
     look = json::object();
     feedback = s.has_feedback() ? json{{"kind", "ntscrt-video-feedback"}, {"version", 2}} : json();
+    // Schema constants (/version, /ntsc/settings/version, fb:/kind, fb:/version): the
+    // look is then upstream's file format as it is.
+    for (auto &[path, v] : s.constants.items()) {
+        try {
+            if (path.rfind(kFbPrefix, 0) == 0) {
+                if (!feedback.is_null()) feedback[json::json_pointer(path.substr(sizeof(kFbPrefix) - 1))] = v;
+            } else {
+                look[json::json_pointer(path)] = v;
+            }
+        } catch (const std::exception &) {
+        }
+    }
     for (size_t i = 0; i < s.params.size(); ++i) {
         const ParamDef &p = s.params[i];
         // Hidden params aren't written: CRT presets share /shader/params/<NAME> keys
@@ -296,25 +329,119 @@ void build_look(const Schema &s, const ValueFn &value, json &look, json &feedbac
         if (p.visible_if && !cond_true(s, *p.visible_if, value)) continue;
         try {
             json::json_pointer ptr(p.path);
-            (p.feedback ? feedback : look)[ptr] = value(i);
+            json v = value(i);
+            if (p.encode_number && v.is_boolean()) v = v.get<bool>() ? 1 : 0;
+            (p.feedback ? feedback : look)[ptr] = std::move(v);
         } catch (const std::exception &) {
             // malformed pointer in schema: ignore this param
         }
     }
 }
 
-std::optional<json> preset_value(const ParamDef &p, const json &preset_in, bool feedback_preset) {
+namespace {
+// preset_value on a preset that is already upgraded (or a feedback preset).
+std::optional<json> preset_value_raw(const ParamDef &p, const json &preset, bool feedback_preset) {
     if (p.feedback != feedback_preset || !p.in_presets) return std::nullopt;
-    // Older looks' Digital video values mapped onto today's controls, as the
-    // core does when it renders such a look (core/stages/digital/migrate.h).
-    std::optional<json> upgraded;
-    if (!feedback_preset && p.path.rfind("/digital/", 0) == 0) upgraded = ntscrt::digital::migrate::upgraded(preset_in);
-    const json &preset = upgraded ? *upgraded : preset_in;
     if (auto v = lookup(preset, p.path)) {
         if (auto c = coerce(p, *v)) return c;
     }
     if (feedback_preset && p.type == PType::Bool && p.path == "/enabled") return json(true);
     return p.def;
+}
+}  // namespace
+
+std::optional<json> preset_value(const ParamDef &p, const json &preset_in, bool feedback_preset) {
+    if (p.feedback != feedback_preset || !p.in_presets) return std::nullopt;
+    // Older looks' Digital video values mapped onto today's controls, as the
+    // core does when it renders such a look (core/stages/digital/migrate.h).
+    if (!feedback_preset && p.path.rfind("/digital/", 0) == 0)
+        return preset_value_raw(p, ntscrt::digital::migrate::upgraded(preset_in), false);
+    return preset_value_raw(p, preset_in, feedback_preset);
+}
+
+std::vector<std::pair<size_t, json>> option_applies(const Schema &s, size_t pi, const json &value) {
+    if (pi >= s.params.size()) return {};
+    const ParamDef &p = s.params[pi];
+    const int k = choice_index(p, value);
+    if (k < 0 || size_t(k) >= p.option_applies.size()) return {};
+    return applies_values(s, p.option_applies[size_t(k)]);
+}
+
+std::vector<std::pair<size_t, json>> applies_values(const Schema &s, const json &applies) {
+    std::vector<std::pair<size_t, json>> out;
+    if (!applies.is_object()) return out;
+    auto one = [&](const std::string &path, const json &v) {
+        const ParamDef *o = s.owner(path);
+        if (!o) return;
+        if (auto c = coerce(*o, v)) out.emplace_back(size_t(o - s.params.data()), *c);
+    };
+    for (auto &[path, v] : applies.items()) {
+        if (v.is_object()) {
+            for (auto &[k, x] : v.items()) one(path + "/" + k, x);
+        } else {
+            one(path, v);
+        }
+    }
+    return out;
+}
+
+std::optional<json> demoted_choice(const Schema &s, size_t ci, const json &choice_value, size_t edited,
+                                   const json &edited_value) {
+    if (ci >= s.params.size() || edited >= s.params.size()) return std::nullopt;
+    const ParamDef &c = s.params[ci];
+    const int k = choice_index(c, choice_value);
+    if (k < 0 || size_t(k) >= c.option_applies.size()) return std::nullopt;
+    const json &a = c.option_applies[size_t(k)];
+    const ParamDef &e = s.params[edited];
+    if (!a.is_object() || e.feedback != c.feedback || !a.contains(e.path)) return std::nullopt;
+    auto want = coerce(e, a[e.path]);
+    if (want && json_equal(*want, edited_value)) return std::nullopt;
+    for (size_t i = 0; i < c.options.size(); ++i)  // the option that sets nothing ("Custom")
+        if (i < c.option_applies.size() && c.option_applies[i].is_null()) return c.options[i].first;
+    return std::nullopt;
+}
+
+json preset_look_at_frame(const Schema &s, const json &preset, int64_t n, double fps) {
+    const json up = ntscrt::digital::migrate::upgraded(preset);
+    return ntscrt::timeline::look_at_frame(up, ntscrt::timeline::parse(up), s.timeline, n, fps);
+}
+
+PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available) {
+    namespace tl = ntscrt::timeline;
+    PresetKeys out;
+    if (is_feedback_preset(preset)) return out;
+    const json up = ntscrt::digital::migrate::upgraded(preset);
+    const tl::Timeline t = tl::parse(up);
+    if (!t.animated()) return out;
+    out.pass = tl::pass_frames(t, fps);
+    out.frames = available > 0 ? std::min(available, kMaxKeyedFrames) : out.pass;
+    // One pass of looks: later passes repeat it.
+    std::vector<json> looks;
+    looks.reserve(size_t(out.pass));
+    for (int64_t i = 0; i < out.pass; ++i) looks.push_back(tl::look_at(up, t, s.timeline, tl::time_of_frame(i, out.pass)));
+    for (size_t pi = 0; pi < s.params.size(); ++pi) {
+        const ParamDef &p = s.params[pi];
+        if (p.feedback || !p.in_presets) continue;
+        std::vector<json> v;
+        v.reserve(looks.size());
+        bool still = true;
+        for (const auto &l : looks) {
+            v.push_back(*preset_value_raw(p, l, false));
+            if (still && !json_equal(v.back(), v.front())) still = false;
+        }
+        auto &keys = out.keys[pi];
+        if (still) {
+            keys.emplace_back(0, v.front());
+            continue;
+        }
+        const bool stepped = p.type == PType::Bool || p.type == PType::Choice;
+        for (int64_t n = 0; n < out.frames; ++n) {
+            const json &x = v[size_t(n % out.pass)];
+            if (stepped && !keys.empty() && json_equal(keys.back().second, x)) continue;
+            keys.emplace_back(n, x);
+        }
+    }
+    return out;
 }
 
 bool cond_true(const Schema &s, const Cond &c, const ValueFn &value) {

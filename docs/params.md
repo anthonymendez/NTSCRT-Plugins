@@ -14,7 +14,7 @@ NTSCRT v0.20.0, look `"version"` 2) to `ntscrt_render_*`, evaluated at the frame
                 "legacy": {"quality": 0.22}},   // NTSCRT-Plugins: 0.4.0 controls, see "Digital video" below
   "crop":      {"enabled": false, "ratio": "1:1", "x": 0.5, "y": 0.5, "scale": 1.0},
   "alpha":     {"mode": "clip"},   // NTSCRT-Plugins addition: "clip" | "spill" (see below)
-  "timeline":  { /* ignored: hosts keyframe instead */ },
+  "timeline":  { /* ignored by the core: hosts turn its keys into keyframes (below) */ },
   "view":      { /* ignored */ }
 }
 ```
@@ -125,11 +125,44 @@ cleared, the Downscale on with the format's width. The rest of the look stays as
 
 Bundled presets in the hosts' Preset menus: released presets keep their index (saved projects store it):
 the order a release shipped, then newer presets alphabetically (`ofx/ofx_params.cpp`
-`released_preset_order`; add the new names there when releasing).
+`released_preset_order`; add the new names there when releasing). The Digital video formats are menu entries
+`Digital video/<name>` (in `released_preset_order` since 0.5.0, after that release's new looks).
 
 Screen Loop: `fb:/seconds` (upstream "Length" for stills, 0.5…60 s) is the time drift/push/spin/loop
 span; hosts may set it from the effect duration.
 
+**Choice `applies`:** when the user picks an option that has `applies`, the host writes each entry into the
+param owning that path (Horizontal resolution `SNES (256px)` sets Width 256). When the user then edits such a
+value by hand so it no longer matches, the choice drops to its option without `applies` (`Custom`), as
+upstream's Downscale panel does. The Digital video formats' Downscale labels (`MiniDV (720px)`, ...) are
+options too (appended after `Custom`), so a look made with a format keeps its label.
+
+**Writing presets:** the look a host saves is built as above, so it is upstream's file format: constants
+(`"version": 2`), toggles stored as 1/0 where `encode: number` says so. NTSCRT-Plugins adds the Screen Loop
+settings under `"screen_loop"` (a feedback object; upstream ignores the key, Load applies it) and, while the
+loop is on, writes them beside the look as `<name> (Screen Loop).json` too. Saving writes the look at the
+playhead (not the keyframes).
+
 Host extras (not in schema, each host adds them): **Preset** choice (bundled presets from
 `ntscrt_bundled_presets_json`), **Load preset…/Save preset…** (file path), **Seed** (int), **Screen Loop preset**.
-Choosing a preset writes all its values into the host params (so they can then be keyframed).
+Choosing a preset writes all its values into the host params (so they can then be keyframed), clearing
+those params' keyframes first; a Digital video format writes only what it applies.
+
+## Animated presets (`timeline`)
+Upstream looks can carry `"timeline": {"duration": seconds, "fps", "enabled", "keys": [...]}`, each key
+`{"t": 0…1, "easing": "Linear"|"Ease in"|"Ease out"|"Ease in-out"|"Hold", "shader", "ntsc", "glitch",
+"digital"}` (upstream `Sources/CrtApp/Timeline.swift`). Evaluation (`core/params/timeline.h`, shared by both hosts
+and `ntscrt-cli --timeline`) is upstream's: the segment's easing shapes its progress; CRT params lerp in Float and
+snap to their step; ntsc-rs floats lerp, ints lerp and round, bools / enums hold; Glitch toggles and Digital
+choices hold; Digital structure controls (frame rate, keyframe interval, codec, chroma, fields, aliasing) never
+key; keys carry the whole ntsc settings object (it replaces the look's), the other sections merge over the
+look's values. A look with keys animates whatever `enabled` says (upstream opens the timeline when one loads).
+
+**Host time:** the timeline starts at the effect's first frame (OFX: the source clip's first frame, the frame
+the core calls 0) and lasts `duration` seconds at the host's frame rate: `N = round(duration × fps)` frames,
+frame `n` at `t = (n mod N) / (N - 1)`, so it **loops** until the effect ends, as upstream's playback does (the
+timeline's own `fps` is ignored: it is upstream's rate for stills). Applying the preset clears every look
+param's keyframes and writes host keyframes for the params that move: one per frame for numbers (exact at
+every frame whatever interpolation the host uses between keys), one per change for bools and choices; params
+that hold still get a plain value. At most 3600 frames are keyed (the last values hold after that); with an
+unknown effect length, one pass. The FxPlug model offers the same (`Model::preset_keys`).
