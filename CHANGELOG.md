@@ -55,6 +55,14 @@ written but not yet built.
   at t + 0.5 used the next frame), and asks the host for RGBA when the source is RGB.
 
 ### Changed
+- One parameter model for both plug-ins: the new host-independent library `hostparams/` builds the look, applies
+  presets (keyframes, Digital video formats, choice applies, migration), evaluates the grey-out / hide rules,
+  orders the Preset menus and writes the log for the Resolve and the Final Cut plug-in alike, replacing
+  `ofx/ofx_params.*` and most of `fxplug/model/param_model.*`. Resolve renders exactly as before (a test compares
+  every bundled preset's look with what the old code built). Where the two differed, Final Cut now does what
+  Resolve does (table in docs/params.md): looks are built from the controls alone (no hidden saved preset copy),
+  the Screen Loop menu's Off / (Custom) switch the Screen Loop checkbox, conditions and choice labels are read
+  the same way, the Preset menu keeps the released order, Seed goes up to 2147483647.
 - Synced with upstream NTSCRT v0.20.0 (was v0.18.0). Digital video: **CCD response** replaces Exposure and
   Black level (a 90s 3-CCD camcorder's auto exposure, flare, knee and setup lift); Aliasing samples red,
   green and blue a third of a pixel apart (rainbow moiré) and boosts fine detail above 50%; Lens softness is
@@ -104,6 +112,10 @@ written but not yet built.
 - The one-line installs (`install.ps1` / `install.sh` from `main`) work again with v0.3.0 and v0.4.0, which
   predate `SHA256SUMS`: they resolve `latest` to its tag and install those two releases with a warning
   instead of refusing them; a missing `SHA256SUMS` on any other release is still refused.
+- Final Cut: choosing or loading a Screen Loop preset file without an `"enabled"` key turns Screen Loop on in the
+  shared model itself (the core's "missing means on" rule), replacing a workaround in the plug-in.
+- Resolve: loading the plug-in no longer creates and destroys a GPU device just to list the bundled presets
+  (about 140 ms at every describe); they are read straight from the bundle. Final Cut likewise.
 - Faster seeks and edits in Resolve with Glitch on (the default): when no parameter is keyframed the plug-in no
   longer rebuilds the look from all ~300 parameters for every earlier frame the Glitch receiver replays (up to
   18 per frame while playing, every frame from 0 after an edit); keyframed looks are built once per frame and

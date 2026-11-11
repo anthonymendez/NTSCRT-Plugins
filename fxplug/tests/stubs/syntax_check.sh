@@ -19,7 +19,7 @@ for f in NTSCRTPlugIn.mm MetalSupport.mm renderer_main.mm app_main.mm; do
     if xcrun clang++ -fsyntax-only -x objective-c++ -std=c++20 -fobjc-arc -arch "$arch" \
         -isysroot "$sdk" -mmacosx-version-min=12.0 \
         -Wall -Wextra -Wno-unused-parameter \
-        -I "$here" -I "$root/core/include" -I "$root/fxplug/model" -I "$root/fxplug/src" -I "$json" \
+        -I "$here" -I "$root/core/include" -I "$root/hostparams" -I "$root/fxplug/model" -I "$root/fxplug/src" -I "$json" \
         "$root/fxplug/src/$f"; then
       echo "ok   $f ($arch)"
     else

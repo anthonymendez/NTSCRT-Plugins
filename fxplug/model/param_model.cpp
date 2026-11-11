@@ -1,83 +1,12 @@
 #include "param_model.h"
 
-#include "../../core/stages/digital/migrate.h"
+#include <ntscrt/ntscrt.h>
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
-#include <chrono>
-#include <ctime>
-#include <filesystem>
-#include <fstream>
-#include <mutex>
-#include <sstream>
-#include <thread>
 
 namespace ntscrt_fx {
-
-namespace {
-
-double num(const json &j, const char *key, double fallback) {
-    auto it = j.find(key);
-    return (it != j.end() && it->is_number()) ? it->get<double>() : fallback;
-}
-
-Kind parse_kind(const std::string &t) {
-    if (t == "bool") return Kind::Bool;
-    if (t == "int") return Kind::Int;
-    if (t == "choice") return Kind::Choice;
-    if (t == "color") return Kind::Color;
-    return Kind::Float;
-}
-
-bool parse_hex_color(const std::string &s, double rgb[3]) {
-    if (s.size() != 7 || s[0] != '#') return false;
-    for (int i = 0; i < 3; ++i) {
-        char buf[3] = {s[1 + 2 * i], s[2 + 2 * i], 0};
-        char *end = nullptr;
-        long v = std::strtol(buf, &end, 16);
-        if (end != buf + 2) return false;
-        rgb[i] = double(v) / 255.0;
-    }
-    return true;
-}
-
-std::string hex_color(const double rgb[3]) {
-    char buf[8];
-    auto c = [](double v) { return int(std::lround(std::clamp(v, 0.0, 1.0) * 255.0)); };
-    std::snprintf(buf, sizeof buf, "#%02x%02x%02x", c(rgb[0]), c(rgb[1]), c(rgb[2]));
-    return buf;
-}
-
-// Splits "fb:/a/b" -> (true, "/a/b").
-std::pair<bool, std::string> split_fb(const std::string &path) {
-    if (path.rfind("fb:", 0) == 0) return {true, path.substr(3)};
-    return {false, path};
-}
-
-}  // namespace
-
-json value_at(const json &doc, const std::string &pointer) {
-    if (!doc.is_object() && !doc.is_array()) return nullptr;
-    try {
-        json::json_pointer p(pointer);
-        if (!doc.contains(p)) return nullptr;
-        return doc.at(p);
-    } catch (const std::exception &) {
-        return nullptr;
-    }
-}
-
-bool set_at(json &doc, const std::string &pointer, const json &v) {
-    try {
-        if (doc.is_null()) doc = json::object();
-        doc[json::json_pointer(pointer)] = v;
-        return true;
-    } catch (const std::exception &) {
-        return false;
-    }
-}
 
 uint32_t fallback_id(const std::string &key, const std::set<uint32_t> &used) {
     uint32_t h = 2166136261u;  // FNV-1a
@@ -91,6 +20,7 @@ uint32_t fallback_id(const std::string &key, const std::set<uint32_t> &used) {
 Model Model::from_schema(const json &schema, const json &id_map, std::vector<std::string> *warnings) {
     auto warn = [&](std::string s) { if (warnings) warnings->push_back(std::move(s)); };
     Model m;
+    m.schema = host::Schema::parse(schema);
     json ids = id_map.is_object() && id_map.contains("ids") ? id_map["ids"] : json::object();
     std::set<uint32_t> used;
     for (auto &[k, v] : ids.items()) {
@@ -110,76 +40,24 @@ Model Model::from_schema(const json &schema, const json &id_map, std::vector<std
         return id;
     };
 
-    const json groups = schema.value("groups", json::array());
-    for (const auto &g : groups) {
-        Group G;
-        G.id = g.value("id", "");
-        G.label = g.value("label", G.id);
-        if (g.contains("parent") && g["parent"].is_string()) G.parent = g["parent"];
-        if (G.id.empty()) continue;
-        G.host_id = assign("group:" + G.id);
-        m.groups.push_back(std::move(G));
-    }
-    std::set<std::string> seen;
-    for (const auto &q : schema.value("params", json::array())) {
+    for (const auto &g : m.schema.groups) m.groups.push_back({g.id, g.label, g.parent, assign("group:" + g.id)});
+    for (size_t i = 0; i < m.schema.params.size(); ++i) {
         Param P;
-        P.id = q.value("id", "");
-        if (P.id.empty() || !seen.insert(P.id).second) {
-            warn("schema: missing or duplicate param id '" + P.id + "'");
-            continue;
-        }
-        P.group = q.value("group", "");
-        P.label = q.value("label", P.id);
-        P.hint = q.value("hint", "");
-        P.kind = parse_kind(q.value("type", "float"));
-        P.def = q.contains("default") ? q["default"] : json();
-        auto [fb, ptr] = split_fb(q.value("path", ""));
-        P.feedback = fb;
-        P.pointer = ptr;
-        P.animatable = q.value("animatable", P.kind == Kind::Float || P.kind == Kind::Int || P.kind == Kind::Color);
-        P.in_presets = q.value("preset", true);
-        P.encode_number = q.value("encode", std::string()) == "number";
-        if (q.contains("enabled_if") && q["enabled_if"].is_string()) P.enabled_if = q["enabled_if"];
-        if (q.contains("visible_if") && q["visible_if"].is_object()) {
-            P.visible_path = q["visible_if"].value("path", "");
-            P.visible_equals = q["visible_if"].value("equals", json());
-            P.visible_truthy = !q["visible_if"].contains("equals");
-        }
-        switch (P.kind) {
-        case Kind::Bool:
-            if (!P.def.is_boolean()) P.def = truthy(P.def);
-            break;
-        case Kind::Int:
-        case Kind::Float: {
-            const double d = P.def.is_number() ? P.def.get<double>() : 0.0;
-            if (!P.def.is_number()) P.def = d;
-            P.min = num(q, "min", std::min(0.0, d));
-            P.max = num(q, "max", std::max({1.0, d, P.min + 1.0}));
-            if (P.max < P.min) std::swap(P.min, P.max);
-            P.slider_min = std::max(P.min, num(q, "display_min", P.min));
-            P.slider_max = std::min(P.max, num(q, "display_max", P.max));
-            if (P.slider_max <= P.slider_min) { P.slider_min = P.min; P.slider_max = P.max; }
-            P.step = num(q, "step", P.kind == Kind::Int ? 1.0 : (P.slider_max - P.slider_min) / 100.0);
-            if (P.step <= 0) P.step = P.kind == Kind::Int ? 1.0 : 0.01;
-            break;
-        }
-        case Kind::Choice:
-            for (const auto &o : q.value("options", json::array())) {
-                if (o.is_object())
-                    P.options.push_back({o.value("value", json()), o.value("label", o.value("value", json()).dump()),
-                                         o.contains("applies") && o["applies"].is_object() ? o["applies"] : json()});
-                else P.options.push_back({o, o.is_string() ? o.get<std::string>() : o.dump(), json()});
-            }
-            if (P.options.empty()) { warn("schema: choice '" + P.id + "' has no options"); continue; }
-            break;
-        case Kind::Color:
-            break;
-        }
-        if (P.pointer.empty() || P.pointer[0] != '/') {
-            warn("schema: param '" + P.id + "' has no JSON-Pointer path");
-            continue;
-        }
+        static_cast<host::ParamDef &>(P) = m.schema.params[i];
+        P.index = i;
         P.host_id = assign(P.id);
+        if (P.type == Kind::Int || P.type == Kind::Float) {
+            // FxPlug sliders need a finite range: the schema's, else one around the default.
+            const double d = P.def.is_number() ? P.def.get<double>() : 0.0;
+            P.ui_min = P.has_min ? P.min : std::min(0.0, d);
+            P.ui_max = P.has_max ? P.max : std::max({1.0, d, P.ui_min + 1.0});
+            if (P.ui_max < P.ui_min) std::swap(P.ui_min, P.ui_max);
+            P.slider_min = std::max(P.ui_min, P.has_dmin ? P.dmin : P.ui_min);
+            P.slider_max = std::min(P.ui_max, P.has_dmax ? P.dmax : P.ui_max);
+            if (P.slider_max <= P.slider_min) { P.slider_min = P.ui_min; P.slider_max = P.ui_max; }
+            P.ui_step = P.has_step ? P.step : (P.type == Kind::Int ? 1.0 : (P.slider_max - P.slider_min) / 100.0);
+            if (P.ui_step <= 0) P.ui_step = P.type == Kind::Int ? 1.0 : 0.01;
+        }
         m.params.push_back(std::move(P));
     }
 
@@ -204,10 +82,6 @@ Model Model::from_schema(const json &schema, const json &id_map, std::vector<std
     for (size_t pi = 0; pi < m.params.size(); ++pi)
         if (!group_ids.count(m.params[pi].group)) m.layout.push_back({UiItem::Control, pi});
 
-    if (schema.contains("constants") && schema["constants"].is_object()) m.constants = schema["constants"];
-    if (schema.contains("digital_formats") && schema["digital_formats"].is_array()) m.digital_formats = schema["digital_formats"];
-    m.timeline = ntscrt::timeline::Rules::from_schema(schema);
-
     std::set<uint32_t> all;
     for (const auto &g : m.groups) if (!all.insert(g.host_id).second) warn("duplicate host id " + std::to_string(g.host_id));
     for (const auto &p : m.params) if (!all.insert(p.host_id).second) warn("duplicate host id " + std::to_string(p.host_id));
@@ -220,274 +94,143 @@ const Param *Model::find_host(uint32_t host_id) const {
 }
 
 const Param *Model::find(const std::string &id) const {
-    for (const auto &p : params) if (p.id == id) return &p;
-    return nullptr;
+    auto i = schema.index_of(id);
+    return i ? &params[*i] : nullptr;
 }
 
 json Model::default_host_value(const Param &p) const {
-    auto h = to_host_value(p, p.def);
-    if (h) return *h;
-    switch (p.kind) {
+    if (auto h = to_host_value(p, p.def)) return *h;
+    switch (p.type) {
     case Kind::Bool: return false;
-    case Kind::Int: return int64_t(std::llround(p.min));
-    case Kind::Float: return p.min;
+    case Kind::Int: return int64_t(std::llround(p.ui_min));
+    case Kind::Float: return p.ui_min;
     case Kind::Choice: return 0;
     case Kind::Color: return json::array({1.0, 1.0, 1.0});
     }
     return nullptr;
 }
 
-json Model::to_look_value(const Param &p, const json &host) const {
-    switch (p.kind) {
-    case Kind::Bool:
-        if (p.encode_number) return truthy(host) ? 1 : 0;
-        return truthy(host);
-    case Kind::Int: {
-        double v = host.is_number() ? host.get<double>() : 0.0;
-        return int64_t(std::llround(std::clamp(v, p.min, p.max)));
-    }
-    case Kind::Float: {
-        double v = host.is_number() ? host.get<double>() : 0.0;
-        return std::clamp(v, p.min, p.max);
-    }
+json Model::to_look_value(const Param &p, const json &h) const {
+    switch (p.type) {
     case Kind::Choice: {
-        int64_t i = host.is_number() ? host.get<int64_t>() : 0;
-        i = std::clamp<int64_t>(i, 0, int64_t(p.options.size()) - 1);
-        return p.options[size_t(i)].value;
+        // An index outside the menu reads as the default option (as the OpenFX plug-in does).
+        const int64_t i = h.is_number() ? h.get<int64_t>() : -1;
+        if (i >= 0 && size_t(i) < p.options.size()) return p.options[size_t(i)].value;
+        return p.def;
     }
     case Kind::Color: {
-        double rgb[3] = {1, 1, 1};
-        if (host.is_array())
-            for (size_t i = 0; i < 3 && i < host.size(); ++i) rgb[i] = host[i].is_number() ? host[i].get<double>() : 0.0;
-        if (p.def.is_string()) return hex_color(rgb);
-        json a = json::array({rgb[0], rgb[1], rgb[2]});
-        if (p.def.is_array() && p.def.size() >= 4) a.push_back(p.def[3]);
-        return a;
+        std::vector<double> c = host::color_components(p, p.def);  // alpha from the default
+        if (h.is_array())
+            for (size_t i = 0; i < 3 && i < h.size(); ++i) c[i] = h[i].is_number() ? h[i].get<double>() : 0.0;
+        return host::color_value(p, c);
+    }
+    default: {
+        auto v = host::coerce(p, h);
+        return v ? *v : p.def;
     }
     }
-    return nullptr;
 }
 
 std::optional<json> Model::to_host_value(const Param &p, const json &v) const {
-    switch (p.kind) {
-    case Kind::Bool:
-        if (v.is_boolean()) return v;
-        if (v.is_number()) return v.get<double>() != 0.0;
-        return std::nullopt;
-    case Kind::Int:
-        if (v.is_boolean()) return int64_t(v.get<bool>());
-        if (!v.is_number()) return std::nullopt;
-        return int64_t(std::llround(std::clamp(v.get<double>(), p.min, p.max)));
-    case Kind::Float:
-        if (v.is_boolean()) return v.get<bool>() ? 1.0 : 0.0;
-        if (!v.is_number()) return std::nullopt;
-        return std::clamp(v.get<double>(), p.min, p.max);
-    case Kind::Choice:
-        for (size_t i = 0; i < p.options.size(); ++i)
-            if (p.options[i].value == v) return int64_t(i);
-        return std::nullopt;
+    auto c = host::coerce(p, v);
+    if (!c) return std::nullopt;
+    switch (p.type) {
+    case Kind::Choice: return json(int64_t(host::choice_index(p, *c)));
     case Kind::Color: {
-        double rgb[3];
-        if (v.is_string() && parse_hex_color(v.get<std::string>(), rgb)) return json::array({rgb[0], rgb[1], rgb[2]});
-        if (v.is_array() && v.size() >= 3 && v[0].is_number() && v[1].is_number() && v[2].is_number())
-            return json::array({v[0].get<double>(), v[1].get<double>(), v[2].get<double>()});
-        return std::nullopt;
+        const auto rgb = host::color_components(p, *c);
+        return json::array({rgb[0], rgb[1], rgb[2]});
     }
+    default: return c;
     }
-    return std::nullopt;
 }
 
-json Model::build_look(const json &base_look, const std::function<json(const Param &)> &get) const {
-    json look = base_look.is_object() ? base_look : json::object();
-    // Schema constants: the look is upstream's file format, at the version the params hold
-    // (a base from an older preset carries its own "version"; its values were migrated).
-    for (auto &[path, v] : constants.items())
-        if (path.rfind("fb:", 0) != 0) set_at(look, path, v);
-    for (const auto &p : params)
-        if (!p.feedback && p.visible_path.empty()) set_at(look, p.pointer, to_look_value(p, get(p)));
-    // Hidden params aren't written: CRT presets share /shader/params/<NAME> keys
-    // (e.g. GAMMA_INPUT in aperture and easymode), so only the selected preset's
-    // values may go into the look (docs/params.md). Their condition reads the look
-    // built above (e.g. /shader/preset).
-    for (const auto &p : params) {
-        if (p.feedback || p.visible_path.empty()) continue;
-        if (p.visible_truthy && p.visible_path == p.pointer) {
-            // Shown (and written) only while its own value is truthy: the
-            // Digital video controls kept from 0.4.0 (schema "legacy").
-            json v = to_look_value(p, get(p));
-            if (truthy(v)) set_at(look, p.pointer, v);
-        } else if (is_visible(p, look, json())) {
-            set_at(look, p.pointer, to_look_value(p, get(p)));
-        }
-    }
-    return look;
-}
-
-std::optional<json> Model::build_feedback(bool on, const json &base, const std::function<json(const Param &)> &get) const {
-    if (!on) return std::nullopt;
-    json fb = base.is_object() ? base : json::object();
-    if (!fb.contains("kind")) fb["kind"] = "ntscrt-video-feedback";
-    for (auto &[path, v] : constants.items())
-        if (path.rfind("fb:", 0) == 0) set_at(fb, path.substr(3), v);
-    for (const auto &p : params)
-        if (p.feedback) set_at(fb, p.pointer, to_look_value(p, get(p)));
-    return fb;
-}
-
-std::map<uint32_t, json> Model::host_values_from_preset(const json &preset_in, bool feedback) const {
-    std::map<uint32_t, json> out;
-    // Older looks' Digital video values mapped onto today's controls (as the core does).
-    const json preset = feedback ? preset_in : ntscrt::digital::migrate::upgraded(preset_in);
-    for (const auto &p : params) {
-        if (p.feedback != feedback || !p.in_presets) continue;
-        json v = value_at(preset, p.pointer);
-        std::optional<json> h = v.is_null() ? std::nullopt : to_host_value(p, v);
-        out[p.host_id] = h ? *h : default_host_value(p);
+HostValues Model::to_host_values(const std::vector<std::pair<size_t, json>> &vals) const {
+    HostValues out;
+    for (const auto &[i, v] : vals) {
+        if (i >= params.size()) continue;
+        auto h = to_host_value(params[i], v);
+        out[params[i].host_id] = h ? *h : default_host_value(params[i]);
     }
     return out;
 }
 
-std::vector<MenuPreset> Model::look_menu(const json &bundled) const {
-    std::vector<MenuPreset> out;
-    if (bundled.is_array())
-        for (const auto &p : bundled) {
-            if (!p.is_object() || p.value("kind", std::string("look")) == "feedback") continue;
-            const json &n = p.contains("name") ? p["name"] : json();
-            if (!n.is_string()) continue;
-            out.push_back({n.get<std::string>(), false, p.value("json", json::object())});
-        }
-    for (const auto &f : digital_formats)
-        if (f.is_object() && f.contains("name") && f["name"].is_string() && f.contains("applies"))
-            out.push_back({"Digital video/" + f["name"].get<std::string>(), true, f["applies"]});
+host::ValueFn Model::look_values(const HostGetter &get) const {
+    return [this, &get](size_t i) { return to_look_value(params[i], get(params[i])); };
+}
+
+host::Built Model::build(const HostGetter &get) const { return host::build_look(schema, look_values(get)); }
+
+bool Model::is_enabled(const Param &p, const HostGetter &get) const {
+    return host::is_enabled(schema, p, look_values(get));
+}
+
+bool Model::is_visible(const Param &p, const HostGetter &get) const {
+    return host::is_visible(schema, p, look_values(get));
+}
+
+std::vector<host::Preset> Model::look_menu(const json &bundled) const {
+    std::vector<host::Preset> out;
+    for (auto &p : host::parse_presets(bundled, schema.digital_formats))
+        if (!p.feedback) out.push_back(std::move(p));
     return out;
 }
 
-std::map<uint32_t, json> Model::applies_host_values(const json &applies) const {
-    std::map<uint32_t, json> out;
-    if (!applies.is_object()) return out;
-    auto one = [&](const std::string &path, const json &v) {
-        auto [fb, ptr] = split_fb(path);
-        for (const auto &p : params)
-            if (p.feedback == fb && p.pointer == ptr) {
-                if (auto h = to_host_value(p, v)) out[p.host_id] = *h;
-                return;
-            }
-    };
-    for (auto &[path, v] : applies.items()) {
-        if (v.is_object())
-            for (auto &[k, x] : v.items()) one(path + "/" + k, x);
-        else
-            one(path, v);
-    }
+std::vector<host::Preset> Model::loop_menu(const json &bundled) const {
+    std::vector<host::Preset> out;
+    for (auto &p : host::parse_presets(bundled))
+        if (p.feedback) out.push_back(std::move(p));
     return out;
 }
 
-std::map<uint32_t, json> Model::option_host_values(const Param &p, const json &host_choice) const {
-    if (p.kind != Kind::Choice || !host_choice.is_number()) return {};
-    const int64_t i = host_choice.get<int64_t>();
-    if (i < 0 || size_t(i) >= p.options.size()) return {};
-    return applies_host_values(p.options[size_t(i)].applies);
-}
-
-std::optional<json> Model::demoted_choice(const Param &c, const json &c_host, const Param &edited,
-                                          const json &edited_host) const {
-    if (c.kind != Kind::Choice || !c_host.is_number() || c.feedback != edited.feedback) return std::nullopt;
-    const int64_t i = c_host.get<int64_t>();
-    if (i < 0 || size_t(i) >= c.options.size()) return std::nullopt;
-    const json &a = c.options[size_t(i)].applies;
-    if (!a.is_object() || !a.contains(edited.pointer)) return std::nullopt;
-    auto want = to_host_value(edited, a[edited.pointer]);
-    if (want && to_look_value(edited, *want) == to_look_value(edited, edited_host)) return std::nullopt;
-    for (size_t k = 0; k < c.options.size(); ++k)  // the option that sets nothing ("Custom")
-        if (c.options[k].applies.is_null()) return json(int64_t(k));
-    return std::nullopt;
-}
-
-json Model::preset_look_at_frame(const json &preset, int64_t n, double fps) const {
-    const json up = ntscrt::digital::migrate::upgraded(preset);
-    return ntscrt::timeline::look_at_frame(up, ntscrt::timeline::parse(up), timeline, n, fps);
-}
-
-namespace {
-// Host values equal, numbers to 1e-9 (presets carry 0.029 and 0.028999999999999998).
-bool same_host_value(const json &a, const json &b) {
-    if (a.is_number() && b.is_number()) return std::fabs(a.get<double>() - b.get<double>()) < 1e-9;
-    if (a.is_array() && b.is_array() && a.size() == b.size()) {
-        for (size_t i = 0; i < a.size(); ++i)
-            if (!same_host_value(a[i], b[i])) return false;
-        return true;
-    }
-    return a == b;
-}
-}  // namespace
-
-PresetKeys Model::preset_keys(const json &preset, double fps, int64_t available) const {
-    namespace tl = ntscrt::timeline;
-    PresetKeys out;
-    if (preset.is_object() && preset.value("kind", std::string()) == "ntscrt-video-feedback") return out;
-    const json up = ntscrt::digital::migrate::upgraded(preset);
-    const tl::Timeline t = tl::parse(up);
-    if (!t.animated()) return out;
-    out.pass = tl::pass_frames(t, fps);
-    out.frames = available > 0 ? std::min(available, kMaxKeyedFrames) : out.pass;
-    std::vector<json> looks;  // one pass; later passes repeat it
-    looks.reserve(size_t(out.pass));
-    for (int64_t i = 0; i < out.pass; ++i) looks.push_back(tl::look_at(up, t, timeline, tl::time_of_frame(i, out.pass)));
-    for (const auto &p : params) {
-        if (p.feedback || !p.in_presets) continue;
-        std::vector<json> v;
-        v.reserve(looks.size());
-        bool still = true;
-        for (const auto &l : looks) {
-            json x = value_at(l, p.pointer);
-            std::optional<json> h = x.is_null() ? std::nullopt : to_host_value(p, x);
-            v.push_back(h ? *h : default_host_value(p));
-            if (still && !same_host_value(v.back(), v.front())) still = false;
-        }
-        auto &keys = out.keys[p.host_id];
-        if (still || !p.animatable) {  // a param the host can't key: the timeline's first value
-            keys.emplace_back(0, v.front());
-            continue;
-        }
-        const bool stepped = p.kind == Kind::Bool || p.kind == Kind::Choice;
-        for (int64_t n = 0; n < out.frames; ++n) {
-            const json &x = v[size_t(n % out.pass)];
-            if (stepped && !keys.empty()) {
-                if (same_host_value(keys.back().second, x)) continue;
-                // The old value again just before the change: hosts that interpolate a
-                // checkbox / menu then still switch exactly at frame n.
-                if (keys.back().first < n - 1) keys.emplace_back(n - 1, keys.back().second);
-            }
-            keys.emplace_back(n, x);
+HostPlan Model::plan_preset(const json &preset, double fps, int64_t available) const {
+    const host::PresetPlan p = host::plan_preset(schema, preset, fps, available);
+    HostPlan out;
+    out.replaces_look = p.replaces_look;
+    out.pass = p.look.pass;
+    out.frames = p.look.frames;
+    for (const auto &[i, entries] : p.look.keys) {
+        auto &keys = out.look[params[i].host_id];
+        for (const auto &[n, v] : entries) {
+            auto h = to_host_value(params[i], v);
+            keys.emplace_back(n, h ? *h : default_host_value(params[i]));
         }
     }
+    out.feedback = to_host_values(p.feedback);
     return out;
 }
 
-bool Model::truthy(const json &v) {
-    if (v.is_boolean()) return v.get<bool>();
-    if (v.is_number()) return v.get<double>() != 0.0;
-    if (v.is_string()) return !v.get<std::string>().empty();
-    return !v.is_null();
+HostValues Model::applies_host_values(const json &applies) const {
+    return to_host_values(host::applies_values(schema, applies));
 }
 
-bool Model::is_enabled(const Param &p, const json &look, const json &feedback) const {
-    if (p.enabled_if.empty()) return true;
-    auto [fb, ptr] = split_fb(p.enabled_if);
-    json v = value_at(fb ? feedback : look, ptr);
-    return v.is_null() ? true : truthy(v);
+HostValues Model::edit_effects(const Param &edited, const HostGetter &get) const {
+    return to_host_values(host::edit_effects(schema, edited.index, look_values(get)));
 }
 
-bool Model::is_visible(const Param &p, const json &look, const json &feedback) const {
-    if (p.visible_path.empty()) return true;
-    auto [fb, ptr] = split_fb(p.visible_path);
-    json v = value_at(fb ? feedback : look, ptr);
-    return p.visible_truthy ? truthy(v) : v == p.visible_equals;
+HostValues Model::screen_loop_switch(bool on) const {
+    auto it = schema.by_fb_path.find("/enabled");
+    if (it == schema.by_fb_path.end()) return {};
+    return {{params[it->second].host_id, json(on)}};
 }
 
-bool needs_history(const json &look, const std::optional<json> &feedback) {
-    if (feedback) return true;
-    return Model::truthy(value_at(look, "/digital/enabled")) || Model::truthy(value_at(look, "/glitch/enabled"));
+uint32_t Model::cache_mask(uint32_t pid, bool keyed) const {
+    switch (pid) {
+    case kPresetMenu:
+    case kLoadPreset:
+    case kSavePreset:
+    case kScreenLoopMenu:  // menus write their values as edits of the params below
+    case kHistoryFrames:
+    case kBaseLook:        // unused since 0.5.0
+    case kBaseFeedback:
+    case kDebugLogging:
+    case kOpenLogs:
+    case kTopGroup:
+    case kExtrasGroup: return 0;
+    default: break;
+    }
+    const Param *p = find_host(pid);
+    if (!p) return NTSCRT_CACHE_ALL;  // the seed, anything unknown
+    return host::cache_mask(*p, keyed);
 }
 
 std::string RenderState::serialize() const {
@@ -534,53 +277,6 @@ int64_t frame_from_offset(int64_t ov, int32_t ot, int64_t fv, int32_t ft) {
     if (ot == 0 || fv == 0 || ft == 0) return 0;
     long double frames = (static_cast<long double>(ov) * ft) / (static_cast<long double>(ot) * fv);
     return static_cast<int64_t>(std::llround(static_cast<double>(frames)));
-}
-
-// ---- FileLog ------------------------------------------------------------------
-FileLog::FileLog(std::string path, uint64_t max_bytes) : path_(std::move(path)), max_bytes_(max_bytes) {}
-
-std::string FileLog::folder() const {
-    if (path_.empty()) return std::string();
-    auto s = std::filesystem::u8path(path_).parent_path().u8string();
-    return std::string(s.begin(), s.end());
-}
-
-void FileLog::write(const std::string &msg) const {
-    if (path_.empty()) return;
-    try {
-        namespace fs = std::filesystem;
-        static std::mutex mu;
-        std::lock_guard<std::mutex> lk(mu);
-        const fs::path p = fs::u8path(path_);
-        std::error_code ec;
-        fs::create_directories(p.parent_path(), ec);
-        if (fs::exists(p, ec) && fs::file_size(p, ec) > max_bytes_) {
-            fs::path old = p;
-            old.replace_extension();
-            old += ".old";
-            old += p.extension();
-            fs::remove(old, ec);
-            fs::rename(p, old, ec);
-        }
-        std::ofstream f(p, std::ios::app);
-        const auto now = std::chrono::system_clock::now();
-        const std::time_t t = std::chrono::system_clock::to_time_t(now);
-        const int ms = int(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
-        std::tm tm{};
-#ifdef _WIN32
-        localtime_s(&tm, &t);
-#else
-        localtime_r(&t, &tm);
-#endif
-        char ts[32];
-        std::strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tm);
-        char msbuf[8];
-        std::snprintf(msbuf, sizeof msbuf, ".%03d", ms);
-        std::ostringstream tid;
-        tid << std::this_thread::get_id();
-        f << ts << msbuf << " [" << tid.str() << "] " << msg << '\n';
-    } catch (...) {
-    }
 }
 
 }  // namespace ntscrt_fx

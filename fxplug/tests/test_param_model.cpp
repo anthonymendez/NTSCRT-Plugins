@@ -81,7 +81,8 @@ TEST_CASE("model: value conversion round trips") {
     const Param &mode = *m.find("b.mode");
     CHECK(m.default_host_value(mode) == 1);
     CHECK(m.to_look_value(mode, 0) == "x");
-    CHECK(m.to_look_value(mode, 99) == 3);  // clamped to last
+    CHECK(m.to_look_value(mode, 99) == "y");  // outside the menu: the default option (as OpenFX reads it)
+    CHECK(m.to_host_value(mode, "Three") == json(2));  // a label works too
     CHECK(m.to_host_value(mode, 3) == json(2));
     CHECK_FALSE(m.to_host_value(mode, "nope").has_value());
 
@@ -97,45 +98,48 @@ TEST_CASE("model: value conversion round trips") {
     CHECK(m.to_host_value(w, 100.6) == json(101));
 }
 
-TEST_CASE("model: builds look and feedback JSON over a base") {
+TEST_CASE("model: builds look and feedback JSON from the params alone") {
     Model m = Model::from_schema(kSchema, ids_for(kSchema), nullptr);
-    json base = json::parse(R"({"a": {"keep": 1, "width": 1}, "view": {"x": 1}})");
     auto get = [&](const Param &p) { return m.default_host_value(p); };
-    json look = m.build_look(base, get);
-    CHECK(look["a"]["keep"] == 1);
-    CHECK(look["a"]["width"] == 320);
-    CHECK(look["a"]["b"]["mode"] == "y");
-    CHECK(look["a"]["b"]["amount"].get<double>() == doctest::Approx(0.05));
-    CHECK_FALSE(look.contains("copies"));
-    CHECK_FALSE(m.build_feedback(false, json(), get).has_value());
-    auto fb = m.build_feedback(true, json::parse(R"({"other": 2})"), get);
-    REQUIRE(fb.has_value());
-    CHECK((*fb)["copies"] == 7);
-    CHECK((*fb)["other"] == 2);
-    CHECK((*fb)["kind"] == "ntscrt-video-feedback");
+    const host::Built b = m.build(get);
+    CHECK(b.look == json::parse(R"({"a": {"enabled": true, "width": 320, "b": {"amount": 0.05, "mode": "y"}}})"));
+    CHECK(b.feedback == json::parse(R"({"kind": "ntscrt-video-feedback", "version": 2, "copies": 7})"));
 }
 
 TEST_CASE("model: preset values and UI gating") {
     Model m = Model::from_schema(kSchema, ids_for(kSchema), nullptr);
     json preset = json::parse(R"({"a": {"enabled": false, "b": {"mode": "x", "amount": 2.0}}})");
-    auto v = m.host_values_from_preset(preset, false);
+    const HostPlan plan = m.plan_preset(preset, 30, 100);
+    CHECK(plan.replaces_look);
+    CHECK_FALSE(plan.animated());
+    CHECK(plan.feedback.empty());
+    std::map<uint32_t, json> v;
+    for (const auto &[id, k] : plan.look) {
+        REQUIRE(k.size() == 1);
+        v[id] = k.front().second;
+    }
     CHECK(v.size() == 5);
     CHECK(v[m.find("a.on")->host_id] == false);
     CHECK(v[m.find("b.mode")->host_id] == 0);
     CHECK(v[m.find("b.amount")->host_id].get<double>() == doctest::Approx(1.0));  // clamped to max
     CHECK(v[m.find("a.width")->host_id] == 320);                                  // missing -> default
-    CHECK(m.host_values_from_preset(json::parse(R"({"copies": 12})"), true)[m.find("fb.copies")->host_id] == 12);
+    json loop = json::parse(R"({"kind": "ntscrt-video-feedback", "copies": 12})");
+    CHECK(m.plan_preset(loop, 30, 100).feedback.at(m.find("fb.copies")->host_id) == 12);
+    CHECK(m.plan_preset(loop, 30, 100).look.empty());
 
-    CHECK_FALSE(m.is_enabled(*m.find("b.amount"), preset, json()));
-    CHECK(m.is_visible(*m.find("b.tint"), preset, json()));
-    CHECK(m.is_enabled(*m.find("b.amount"), json::object(), json()));  // missing path -> enabled
-    CHECK_FALSE(m.is_visible(*m.find("b.tint"), json::object(), json()));
+    auto from = [&](const std::map<uint32_t, json> &vals) {
+        return [&m, vals](const Param &p) {
+            auto it = vals.find(p.host_id);
+            return it != vals.end() ? it->second : m.default_host_value(p);
+        };
+    };
+    CHECK_FALSE(m.is_enabled(*m.find("b.amount"), from(v)));
+    CHECK(m.is_visible(*m.find("b.tint"), from(v)));
+    CHECK(m.is_enabled(*m.find("b.amount"), from({})));
+    CHECK_FALSE(m.is_visible(*m.find("b.tint"), from({})));  // mode "y"
 }
 
-TEST_CASE("model: temporal detection, render state, frame math") {
-    CHECK_FALSE(needs_history(json::parse(R"({"digital":{"enabled":false}})"), std::nullopt));
-    CHECK(needs_history(json::parse(R"({"glitch":{"enabled":true}})"), std::nullopt));
-    CHECK(needs_history(json::object(), json::object()));
+TEST_CASE("model: render state, frame math") {
 
     RenderState s;
     s.frame = 42; s.fps = 29.97; s.history = 3; s.look = R"({"a":1})"; s.feedback = "";
@@ -166,7 +170,7 @@ TEST_CASE("model: real schema + checked-in id map are complete and valid") {
     for (auto &g : m.groups) CHECK(s.insert(g.host_id).second);
     for (uint32_t id : s) CHECK((id >= kFirstMappedID && id <= 9998));
     // building a look from defaults must give valid JSON that ntscrt accepts structurally
-    json look = m.build_look(json::object(), [&](const Param &p) { return m.default_host_value(p); });
+    json look = m.build([&](const Param &p) { return m.default_host_value(p); }).look;
     CHECK(look.is_object());
 }
 
@@ -177,9 +181,7 @@ TEST_CASE("model: only the selected CRT preset's shader params go into the look"
     REQUIRE(preset);
     auto look_for = [&](const char *id) {
         json host = *m.to_host_value(*preset, json(id));
-        return m.build_look(json::object(), [&](const Param &p) {
-            return &p == preset ? host : m.default_host_value(p);
-        });
+        return m.build([&](const Param &p) { return &p == preset ? host : m.default_host_value(p); }).look;
     };
     // aperture/easymode share GAMMA_*, easymode/hyllian share MASK_STRENGTH (different defaults)
     json ap = look_for("aperture");
@@ -205,12 +207,15 @@ TEST_CASE("model: diagnostics are host extras outside the look, presets and sche
     }
     // presets can't set them, the look never contains them
     json preset = {{"debug_logging", true}, {"debug", true}};
-    for (bool fb : {false, true}) {
-        auto v = m.host_values_from_preset(preset, fb);
-        CHECK(v.count(kDebugLogging) == 0);
-        CHECK(v.count(kOpenLogs) == 0);
+    json loop = preset;
+    loop["kind"] = "ntscrt-video-feedback";
+    for (const json &p : {preset, loop}) {
+        auto v = m.plan_preset(p, 30, 0);
+        CHECK(v.look.count(kDebugLogging) == 0);
+        CHECK(v.look.count(kOpenLogs) == 0);
+        CHECK(v.feedback.count(kDebugLogging) == 0);
     }
-    json look = m.build_look(json::object(), [&](const Param &p) { return m.default_host_value(p); });
+    json look = m.build([&](const Param &p) { return m.default_host_value(p); }).look;
     CHECK(look.dump().find("debug") == std::string::npos);
 
     // the per-frame flag travels in the plug-in state, not in the look
@@ -260,16 +265,16 @@ TEST_CASE("model: Digital video legacy controls and version 1 presets") {
     REQUIRE(legacy);
     REQUIRE(q2);
     REQUIRE(ccd);
-    json look = m.build_look(json::object(), [&](const Param &p) { return m.default_host_value(p); });
+    json look = m.build([&](const Param &p) { return m.default_host_value(p); }).look;
     CHECK_FALSE(look["digital"].contains("legacy"));
     CHECK(look["digital"]["values"]["quality"].get<double>() == doctest::Approx(0.749));
-    look = m.build_look(json::object(), [&](const Param &p) { return &p == legacy ? json(0.3) : m.default_host_value(p); });
+    look = m.build([&](const Param &p) { return &p == legacy ? json(0.3) : m.default_host_value(p); }).look;
     CHECK(look["digital"]["legacy"]["quality"].get<double>() == doctest::Approx(0.3));
     json v1 = {{"version", 1}, {"digital", {{"enabled", true}, {"values", {{"quality", 0.22}, {"black_level", 0.08}}}}}};
-    auto hv = m.host_values_from_preset(v1, false);
-    CHECK(hv[q2->host_id].get<double>() == doctest::Approx(0.749).epsilon(0.002));
-    CHECK(hv[ccd->host_id].get<double>() == doctest::Approx(1.0));
-    CHECK(hv[legacy->host_id].get<double>() == doctest::Approx(0.0));
+    auto hv = m.plan_preset(v1, 30, 0).look;
+    CHECK(hv[q2->host_id].front().second.get<double>() == doctest::Approx(0.749).epsilon(0.002));
+    CHECK(hv[ccd->host_id].front().second.get<double>() == doctest::Approx(1.0));
+    CHECK(hv[legacy->host_id].front().second.get<double>() == doctest::Approx(0.0));
 }
 
 // ---- animated presets, applies, Digital video formats, upstream JSON ----
@@ -284,20 +289,17 @@ json keyed_at(const std::vector<std::pair<int64_t, json>> &keys, int64_t n) {
         if (f <= n) v = x;
     return v;
 }
-// The look a host holding pk (keys; base look = the preset, as applyPreset stores it) builds at frame n.
-json keyed_look(const Model &m, const PresetKeys &pk, const json &base, int64_t n) {
-    return m.build_look(base, [&](const Param &p) {
-        auto it = pk.keys.find(p.host_id);
-        return it != pk.keys.end() ? keyed_at(it->second, n) : m.default_host_value(p);
-    });
+// The look a host holding pk's values / keys builds at frame n.
+json keyed_look(const Model &m, const HostPlan &pk, int64_t n) {
+    return m.build([&](const Param &p) {
+        auto it = pk.look.find(p.host_id);
+        return it != pk.look.end() ? keyed_at(it->second, n) : m.default_host_value(p);
+    }).look;
 }
-// The look a host builds after setting every param from `look` (host_values_from_preset).
-json held_look(const Model &m, const json &base, const json &look) {
-    auto hv = m.host_values_from_preset(look, false);
-    return m.build_look(base, [&](const Param &p) {
-        auto it = hv.find(p.host_id);
-        return it != hv.end() ? it->second : m.default_host_value(p);
-    });
+// The look a host builds after applying `look` as a still look (its timeline left out).
+json held_look(const Model &m, json look) {
+    look.erase("timeline");
+    return keyed_look(m, m.plan_preset(look, 30, 0), 0);
 }
 }  // namespace
 
@@ -307,12 +309,12 @@ TEST_CASE("model: animated presets become keyframes matching the upstream timeli
         CAPTURE(name);
         const json preset = load("presets/" + name + ".json");
         const double fps = 30;
-        const PresetKeys pk = m.preset_keys(preset, fps, 150);
+        const HostPlan pk = m.plan_preset(preset, fps, 150);
         REQUIRE(pk.animated());
         CHECK(pk.pass == 60);  // 2 s at 30 fps
         CHECK(pk.frames == 150);
         size_t moving = 0;
-        for (const auto &[id, k] : pk.keys) {
+        for (const auto &[id, k] : pk.look) {
             const Param *p = m.find_host(id);
             REQUIRE(p);
             CHECK_FALSE(p->feedback);
@@ -320,24 +322,24 @@ TEST_CASE("model: animated presets become keyframes matching the upstream timeli
             CHECK(k.front().first == 0);
             if (k.size() > 1) {
                 ++moving;
-                if (p->kind != Kind::Bool && p->kind != Kind::Choice) CHECK(k.size() == 150);
+                if (p->type != Kind::Bool && p->type != Kind::Choice) CHECK(k.size() == 150);
             }
         }
         CHECK(moving > 3);
         bool differs = false;
-        const json first = keyed_look(m, pk, preset, 0);
+        const json first = keyed_look(m, pk, 0);
         for (int64_t n : {0, 1, 13, 29, 59, 60, 77, 149}) {
             CAPTURE(n);
-            const json want = held_look(m, preset, m.preset_look_at_frame(preset, n, fps));
-            const json got = keyed_look(m, pk, preset, n);
+            const json want = held_look(m, host::preset_look_at_frame(m.schema, preset, n, fps));
+            const json got = keyed_look(m, pk, n);
             CHECK(got == want);
             differs |= got != first;
         }
         CHECK(differs);
     }
-    CHECK_FALSE(m.preset_keys(load("presets/Clean VHS.json"), 30, 100).animated());
-    CHECK_FALSE(m.preset_keys(load("presets/Screen Loop/Bottom to top.json"), 30, 100).animated());
-    CHECK(m.preset_keys(load("presets/Glitch pop.json"), 30, 0).frames == 60);  // unknown length: one pass
+    CHECK_FALSE(m.plan_preset(load("presets/Clean VHS.json"), 30, 100).animated());
+    CHECK_FALSE(m.plan_preset(load("presets/Screen Loop/Bottom to top.json"), 30, 100).animated());
+    CHECK(m.plan_preset(load("presets/Glitch pop.json"), 30, 0).frames == 60);  // unknown length: one pass
 }
 
 TEST_CASE("model: Horizontal resolution applies, Custom demotion, Digital video formats") {
@@ -351,12 +353,19 @@ TEST_CASE("model: Horizontal resolution applies, Custom demotion, Digital video 
         if (pre->options[i].value == "Custom") custom = int64_t(i);
     }
     REQUIRE(arcade >= 0);
-    auto hv = m.option_host_values(*pre, arcade);
+    auto state = [&](int64_t choice, int64_t width) {
+        return [&m, pre, w, choice, width](const Param &p) {
+            return &p == pre ? json(choice) : &p == w ? json(width) : m.default_host_value(p);
+        };
+    };
+    auto hv = m.edit_effects(*pre, state(arcade, 320));  // Arcade chosen: sets the width
     REQUIRE(hv.size() == 1);
     CHECK(hv[w->host_id] == 384);
-    CHECK(m.option_host_values(*pre, custom).empty());
-    CHECK_FALSE(m.demoted_choice(*pre, arcade, *w, 384));
-    CHECK(m.demoted_choice(*pre, arcade, *w, 400) == json(custom));
+    CHECK(m.edit_effects(*pre, state(custom, 320)).empty());
+    CHECK(m.edit_effects(*w, state(arcade, 384)).empty());  // width still the option's
+    hv = m.edit_effects(*w, state(arcade, 400));           // width edited by hand: Custom
+    REQUIRE(hv.size() == 1);
+    CHECK(hv[pre->host_id] == json(custom));
 
     json bundled = json::array({{{"name", "Clean VHS"}, {"kind", "look"}, {"json", json::object()}},
                                 {{"name", "Screen Loop/x"}, {"kind", "feedback"}, {"json", json::object()}}});
@@ -364,6 +373,8 @@ TEST_CASE("model: Horizontal resolution applies, Custom demotion, Digital video 
     REQUIRE(menu.size() == 7);
     CHECK(menu[0].name == "Clean VHS");
     CHECK(menu[3].name == "Digital video/MiniDV");
+    REQUIRE(m.loop_menu(bundled).size() == 1);
+    CHECK(m.loop_menu(bundled)[0].name == "Screen Loop/x");
     CHECK(menu[3].format);
     auto fv = m.applies_host_values(menu[3].data);
     CHECK(fv[m.find("digital.enabled")->host_id] == true);
@@ -377,18 +388,17 @@ TEST_CASE("model: Horizontal resolution applies, Custom demotion, Digital video 
 TEST_CASE("model: looks are upstream JSON (constants, numeric toggles) and presets round-trip") {
     const Model &m = real_model();
     auto def = [&](const Param &p) { return m.default_host_value(p); };
-    json look = m.build_look(json{{"version", 1}}, def);
-    CHECK(look["version"] == 2);  // the params hold today's values, whatever the base said
-    CHECK(look["ntsc"]["settings"]["version"] == 1);
-    CHECK(look["glitch"]["values"]["closed_captions"] == 1);
-    auto fb = m.build_feedback(true, json::object(), def);
-    REQUIRE(fb);
-    CHECK((*fb)["version"] == 2);
-    CHECK((*fb)["values"]["loop"] == 0);
+    const host::Built b = m.build(def);
+    CHECK(b.look["version"] == 2);
+    CHECK(b.look["ntsc"]["settings"]["version"] == 1);
+    CHECK(b.look["glitch"]["values"]["closed_captions"] == 1);
+    CHECK(b.feedback["version"] == 2);
+    CHECK(b.feedback["values"]["loop"] == 0);
+    CHECK(b.feedback["enabled"] == false);
     for (const std::string name : {"Chunky webcam", "CD-ROM (low quality)", "Webcam (low quality)", "Clean CRT"}) {
         CAPTURE(name);
         const json preset = load("presets/" + name + ".json");
-        const json a = held_look(m, preset, preset);
-        CHECK(held_look(m, a, a) == a);  // save -> load -> the same look
+        const json a = held_look(m, preset);
+        CHECK(held_look(m, a) == a);  // save -> load -> the same look
     }
 }

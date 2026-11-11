@@ -39,6 +39,7 @@ option(NTSCRT_BUILD_TOOLS "Build ntscrt-cli" ON)
 option(NTSCRT_BUILD_TESTS "Build tests" ON)
 
 add_subdirectory(core)
+add_subdirectory(hostparams)  # shared host param model (OpenFX + FxPlug)
 if(NTSCRT_BUILD_TOOLS)
   add_subdirectory(tools/ntscrt-cli)
 endif()

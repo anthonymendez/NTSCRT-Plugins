@@ -156,7 +156,7 @@ def animated(look):
 
 def preset_menu_index(file_name):
     """Index of a bundled preset in the plug-in's Preset menu (make_presets_gallery.menu_orders: the order
-    ofx/ofx_params.cpp builds; index 0 is the menu's first, empty entry)."""
+    hostparams/src/params.cpp builds; index 0 is the menu's first, empty entry)."""
     import make_presets_gallery as mpg  # imported here: it imports this module
     looks, _ = mpg.menu_orders(mpg.load_schema())
     return looks.index(Path(file_name).stem) + 1
