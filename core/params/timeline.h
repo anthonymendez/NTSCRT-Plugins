@@ -1,6 +1,6 @@
 // timeline.h — upstream NTSCRT's keyframe timeline ("timeline" in a look /
 // preset file), evaluated the way the app does. Header-only (nlohmann::json)
-// so both host param models (ofx/ofx_params.cpp, fxplug/model/param_model.cpp),
+// so the host param model (hostparams/, shared by the OpenFX and FxPlug plug-ins),
 // ntscrt-cli and the tests share one evaluation.
 //
 // Port of upstream Sources/CrtApp/Timeline.swift (KeyEasing, TimelineEvaluator)

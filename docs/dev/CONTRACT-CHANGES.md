@@ -157,3 +157,13 @@ migrated). NTSCRT-Plugins extensions, all optional:
   the frame instead of re-running the window; flushed with the loop's history (`NTSCRT_CACHE_SCREENLOOP`). A run
   that met a missing past source takes no checkpoints after it; the engine assumes the host can fetch every
   past frame it rendered (as the main input).
+- 2026-11-11, agent I (shared host params), `docs/params.md`: the param model both hosts follow is now one library,
+  `hostparams/` (`ntscrt::host`, target `ntscrt_hostparams`; `ntscrt_host/params.h`, `ntscrt_host/file_log.h`),
+  replacing `ofx/ofx_params.*` (deleted) and the logic in `fxplug/model/param_model.*` (now FxPlug ids, layout,
+  menu-index / RGB values and plug-in state over it). Reason: the hosts built the same preset differently. The
+  rules the shared model settles (OpenFX's, except clamping to the schema range) are tabled in docs/params.md
+  "One model for both plug-ins". Visible to hosts: feedback JSON is always an object with `"enabled"` (FxPlug
+  passed NULL for Screen Loop off; the core treats both as off); `released_preset_order()` moved to
+  `hostparams/src/params.cpp` (scripts that parse it follow); bundled presets can be listed without a core
+  instance (`ntscrt::host::bundled_presets_json(resource_dir)`, same JSON as `ntscrt_bundled_presets_json`).
+  No ABI change. FxPlug's hidden *Base Look* / *Base Screen Loop* params (ids 8, 9) are kept but no longer read.

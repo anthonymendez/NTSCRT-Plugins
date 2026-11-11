@@ -3,7 +3,7 @@
 #include <doctest/doctest.h>
 #include <ntscrt/ntscrt.h>
 
-#include "ofx_params.h"
+#include "ntscrt_host/params.h"
 #include "../../core/stages/digital/migrate.h"
 
 #include <cmath>
@@ -11,7 +11,7 @@
 #include <fstream>
 #include <sstream>
 
-using namespace ntscrt_ofx;
+using namespace ntscrt::host;
 namespace tl = ntscrt::timeline;
 
 namespace {

@@ -536,9 +536,9 @@ class Suite:
 
     def look_preset_index(self, name):
         """Index of a bundled look in the plug-in's Preset menu (0 = "(none)"): released presets
-        in their shipped order (ofx/ofx_params.cpp released_preset_order), then newer ones
+        in their shipped order (hostparams/src/params.cpp released_preset_order), then newer ones
         alphabetically."""
-        src = (ROOT / "ofx/ofx_params.cpp").read_text(encoding="utf-8")
+        src = (ROOT / "hostparams/src/params.cpp").read_text(encoding="utf-8")
         block = src[src.index("released_preset_order() {"):]
         block = block[:block.index("};")]
         released = re.findall(r'"([^"]+)"', block)
