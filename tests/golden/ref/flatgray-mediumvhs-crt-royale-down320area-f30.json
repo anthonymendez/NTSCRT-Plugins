@@ -1,0 +1,28 @@
+{
+  "downscale_height": 240,
+  "height": 480,
+  "id": "flatgray-mediumvhs-crt-royale-down320area-f30",
+  "librashader_commit": "76462c03",
+  "shader_params": {
+    "convergence_offset_x_g": 0.0
+  },
+  "smoke_args": [
+    "TestAssets/flat-gray.png",
+    "Vendor/slang-shaders/crt/crt-royale.slangp",
+    "golden-refs/flatgray-mediumvhs-crt-royale-down320area-f30.png",
+    "Vendor/librashader/librashader.dylib",
+    "640",
+    "480",
+    "320",
+    "240",
+    "area",
+    "--ntsc",
+    "../../../../../../../var/folders/2s/vty41l455yv698g4xkgfv7z00000gn/T/golden-ntsc-g7uzohus/flatgray-mediumvhs-crt-royale-down320area-f30.ntsc.json",
+    "--ntsc-dylib",
+    "Vendor/ntscrs-capi/ntscrs_capi.dylib",
+    "--frame",
+    "30"
+  ],
+  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "width": 640
+}

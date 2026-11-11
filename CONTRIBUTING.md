@@ -17,6 +17,8 @@ Security problems: see [SECURITY.md](SECURITY.md) instead of opening an issue.
 See [Build from source](README.md#build-from-source) in the README. Before sending a pull request:
 
 - `ctest` passes (Windows: `ctest --test-dir <build> -C Release`; macOS: `ctest --test-dir build`).
+  A change that alters a look on purpose regenerates the golden self-references
+  (`cmake --build <build> --config Release --target golden-update`, see [tests/golden](tests/golden/README.md)).
 - If you changed rendering, compare against the previous build with the same preset, for example with
   `ntscrt-cli` (`tools/ntscrt-cli`) or the Resolve test suite in [tests/resolve](tests/resolve/README.md)
   (needs Resolve Studio).

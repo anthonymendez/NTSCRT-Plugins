@@ -50,6 +50,14 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 - [Presets gallery](docs/PRESETS-GALLERY.md): an animated GIF of every bundled look, Digital video format,
   Screen Loop preset and CRT shader, linked from the README; `scripts/make_presets_gallery.py` regenerates the
   GIFs (through the plug-in in headless Resolve, or `ntscrt-cli`) and the page.
+- Golden image tests now compare something: 11 references rendered by upstream NTSCRT's own `crt-smoke`
+  (golden workflow, macOS; the CRT shaders, downscale methods and ntsc-rs presets) and 52 self-reference
+  baselines from the plug-ins' core (Digital with both codecs, Glitch over time, every Screen Loop preset,
+  alpha Clip / Spill, crop, a moving sequence, proxy render scale, every bundled look), checked strictly on
+  Windows and macOS in CI. `cmake --build <build> --target golden-update` regenerates the baselines after an
+  intended look change (tests/golden/README.md).
+- Tests for 16-bit and half-float frames (every alpha value round-trips; NaN, infinities, subnormals and
+  out-of-range values come out in range), proxy render scale and crop with a transparent source.
 
 ### Changed
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac
@@ -91,6 +99,9 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   unchanged.
 
 ### Fixed
+- The golden workflow builds upstream's `crt-smoke` again (a build-time workaround for a Swift type-checker
+  limit in upstream's `DigitalVideoRenderer.swift`, applied on the runner only).
+- `ntscrt_doctor.py` collects the macOS installer log from `/Library/Logs/NTSCRT/` (where the .pkg writes it).
 - **Downscale → Horizontal resolution** sets the Width again (schema `applies`), and editing the Width by hand
   switches it to *Custom*, as in the NTSCRT app. The Digital video formats' labels (*MiniDV (720px)*, …) are
   appended to its options.

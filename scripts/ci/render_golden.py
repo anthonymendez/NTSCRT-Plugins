@@ -44,6 +44,14 @@ def round_half_away(x):
     return int(x + 0.5) if x >= 0 else -int(-x + 0.5)
 
 
+# upstream AppState.appShaderDefaults: the app (and ntscrt_core, core/stages/crt/crt.cpp
+# house_defaults) starts these presets from these values, not the .slangp initials.
+# crt-smoke doesn't, so they're passed as --set (entry shader_params still win).
+APP_SHADER_DEFAULTS = {
+    "crt/crtglow_gauss.slangp": {"BOOST": 1.1, "GLOW_ROLLOFF": 2.4, "BLOOM_STRENGTH": 0.1},
+    "crt/crtglow_lanczos.slangp": {"BOOST": 1.1, "GLOW_ROLLOFF": 2.4, "BLOOM_STRENGTH": 0.1},
+}
+
 SET_GET = re.compile(r"^set/get (\S+): wrote (\S+), read back (\S+)")
 OVERRIDE = re.compile(r"^override (\S+) = (\S+)")
 
@@ -102,7 +110,9 @@ def main():
                 cmd += ["--ntsc", sp]
             cmd += ["--ntsc-dylib", ntscrs]
         cmd += ["--frame", str(e.get("frame", 1))]
-        for k, v in (e.get("shader_params") or {}).items():
+        params = dict(APP_SHADER_DEFAULTS.get(e["shader"], {}))
+        params.update(e.get("shader_params") or {})
+        for k, v in params.items():
             cmd += ["--set", f"{k}={v}"]
 
         print("::group::" + eid)

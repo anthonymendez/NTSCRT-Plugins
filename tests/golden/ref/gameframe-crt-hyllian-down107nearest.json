@@ -1,0 +1,24 @@
+{
+  "downscale_height": 80,
+  "height": 240,
+  "id": "gameframe-crt-hyllian-down107nearest",
+  "librashader_commit": "76462c03",
+  "shader_params": {
+    "crt_nonono": 0.0
+  },
+  "smoke_args": [
+    "TestAssets/game-frame.png",
+    "Vendor/slang-shaders/crt/crt-hyllian.slangp",
+    "golden-refs/gameframe-crt-hyllian-down107nearest.png",
+    "Vendor/librashader/librashader.dylib",
+    "320",
+    "240",
+    "107",
+    "80",
+    "nearest",
+    "--frame",
+    "1"
+  ],
+  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "width": 320
+}
