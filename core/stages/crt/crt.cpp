@@ -261,7 +261,7 @@ struct CrtStage::Impl {
         // follows the target's (the picture's) shape, not the lines' (one field).
         const int kw = int(std::lround(double(tw) * double(ih * k) / double(th)));
         if (k > 1 && kw > tw && ih * k > th) {
-            dst = tex(big_tex, kw, ih * k, gpu::Format::BGRA8).get();
+            dst = tex(big_tex, kw, ih * k, target.desc().format).get();  // RGBA16F for high-precision hosts
             integrate = true;
         } else if (!target.desc().render_target) {
             dst = tex(rt_tex, tw, th, target.desc().format).get();

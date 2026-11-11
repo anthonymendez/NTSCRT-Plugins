@@ -10,3 +10,4 @@ if(WIN32)
 endif()
 
 ntscrt_add_test(test_core_device test_shared_device.cpp)
+ntscrt_add_test(test_core_bitdepth test_bit_depth.cpp)

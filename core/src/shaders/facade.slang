@@ -1,5 +1,6 @@
 // facade/alpha_merge: final output step of ntscrt_render_metal. RGB from the
-// pipeline result (opaque 8-bit BGRA; upstream ignores alpha), alpha from the
+// pipeline result (opaque BGRA8, or RGBA16F for 16-bit / float destinations,
+// clamped to 0..1 like an 8-bit target; upstream ignores alpha), alpha from the
 // host's source frame, combined per the look's alpha mode (same maths as
 // merge_alpha in pixel_convert.h), written in the destination's format.
 //   mode 0 Clip:  alpha = source alpha
@@ -18,7 +19,7 @@ RWTexture2D<float4> dst : register(u0);
 void alpha_merge(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= P.size.x || id.y >= P.size.y) return;
-    float3 c = rgb.Load(int3(id.xy, 0)).rgb;
+    float3 c = saturate(rgb.Load(int3(id.xy, 0)).rgb);
     float a = P.use_alpha != 0 ? saturate(alpha_src.Load(int3(id.xy, 0)).a) : (P.mode != 0 ? 0.0 : 1.0);
     if (P.mode != 0) {
         a = max(a, max(c.r, max(c.g, c.b)));

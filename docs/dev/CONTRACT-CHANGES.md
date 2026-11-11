@@ -131,3 +131,8 @@ migrated). NTSCRT-Plugins extensions, all optional:
   CRT chains of presets without history are shared per (device, preset) across CrtStages
   (`NTSCRT_SHARED_CHAINS=0` turns that off); `core/stages/digital/parallel.h`: `shutdown_threads()`,
   `threads_running()`, called by `ntscrt_destroy` for the last instance.
+- 2026-11-11, agent G (bit depth): the façade picks the CRT output texture format per host picture: RGBA16F for
+  `NTSCRT_RGBA16` / `RGBA16F` / `RGBA32F` destinations (and RGBA16F/32F Metal textures) when the look's CRT shader is
+  on, BGRA8 otherwise (8-bit hosts and the bypass are unchanged; `NTSCRT_OUTPUT_8BIT=1` forces BGRA8). The CRT
+  stage's supersample target follows its output's format. `core/src/pixel_convert.h`: `from_rgba16f()`.
+  `facade/alpha_merge` saturates RGB (a no-op for 8-bit input).

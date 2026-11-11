@@ -220,22 +220,54 @@ void letterbox(const ImageBGRA8 &in, int out_w, int out_h, ImageBGRA8 &out) {
     }
 }
 
-void from_bgra8(const ImageBGRA8 &in, const std::vector<float> *alpha, ntscrt_image &dst, AlphaMode mode,
-                bool premult) {
+namespace {
+// Result picture (in_w x in_h, read by `rgb(x, y, v)`) + source alpha -> host
+// image; the alpha conventions of from_bgra8.
+template <class Rgb>
+void merge_out(int in_w, int in_h, Rgb &&rgb, const std::vector<float> *alpha, ntscrt_image &dst, AlphaMode mode,
+               bool premult) {
     const float missing = mode == AlphaMode::Spill ? 0.f : 1.f;
     const bool opaque = alpha && alpha->empty();  // to_bgra8 stores no alpha for opaque sources
     if (opaque) alpha = nullptr;
     const float fixed = opaque ? 1.f : missing;
     with_format(dst.format, [&]<ntscrt_pixel_format F>() {
-        for (int y = 0; y < dst.height && y < in.height; ++y) {
+        for (int y = 0; y < dst.height && y < in_h; ++y) {
             auto row = static_cast<uint8_t *>(dst.data) + ptrdiff_t(y) * dst.row_bytes;
-            const uint8_t *s = in.row(y);
-            for (int x = 0; x < dst.width && x < in.width; ++x) {
-                float v[4] = {s[x * 4 + 2] / 255.f, s[x * 4 + 1] / 255.f, s[x * 4 + 0] / 255.f, 1.f};
-                merge_alpha(v, alpha ? (*alpha)[size_t(y) * in.width + x] : fixed, mode, premult);
+            for (int x = 0; x < dst.width && x < in_w; ++x) {
+                float v[4];
+                rgb(x, y, v);
+                v[3] = 1.f;
+                merge_alpha(v, alpha ? (*alpha)[size_t(y) * in_w + x] : fixed, mode, premult);
                 write_px<F>(row, x, v);
             }
         }
     });
+}
+// 0..1, NaN -> 0 (what an 8-bit UNORM target stores)
+inline float unit(float v) { return v > 0.f ? (v < 1.f ? v : 1.f) : 0.f; }
+}  // namespace
+
+void from_bgra8(const ImageBGRA8 &in, const std::vector<float> *alpha, ntscrt_image &dst, AlphaMode mode,
+                bool premult) {
+    merge_out(
+        in.width, in.height,
+        [&](int x, int y, float v[4]) {
+            const uint8_t *s = in.row(y) + size_t(x) * 4;
+            v[0] = s[2] / 255.f;
+            v[1] = s[1] / 255.f;
+            v[2] = s[0] / 255.f;
+        },
+        alpha, dst, mode, premult);
+}
+
+void from_rgba16f(const uint16_t *px, int w, int h, const std::vector<float> *alpha, ntscrt_image &dst,
+                  AlphaMode mode, bool premult) {
+    merge_out(
+        w, h,
+        [&](int x, int y, float v[4]) {
+            const uint16_t *s = px + (size_t(y) * w + x) * 4;
+            for (int c = 0; c < 3; ++c) v[c] = unit(half_to_float(s[c]));
+        },
+        alpha, dst, mode, premult);
 }
 }  // namespace ntscrt

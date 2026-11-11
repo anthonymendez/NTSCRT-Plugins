@@ -75,6 +75,9 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   (glow_gauss): instances are created in ~0 ms instead of ~21 ms each, the first frames take ~0.9 s instead of
   1.6 s in total, and the process uses ~390 MB instead of ~1140 MB of memory and ~190 MB instead of ~410 MB of
   GPU memory. Rendering waits for the GPU on an event instead of spinning a CPU core.
+- 16-bit and 32-bit float projects get the CRT shader's result at half-float precision instead of 8 bits: a
+  smooth gradient through Glow (Gauss) comes out with ~2350 levels instead of ~250, so it no longer bands when it's
+  graded afterwards. 8-bit projects, and looks with the CRT shader off, render exactly as before.
 
 ### Fixed
 - macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't
