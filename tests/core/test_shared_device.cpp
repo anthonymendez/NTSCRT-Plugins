@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <thread>
@@ -73,7 +74,7 @@ std::vector<uint8_t> render(ntscrt_instance *inst, Clip &clip, int64_t frame, co
     ntscrt_image dst{clip.w, clip.h, ptrdiff_t(clip.w) * 4, NTSCRT_RGBA8, px.data()};
     ntscrt_status st = ntscrt_render_cpu(inst, &a, &src, &dst);
     if (st_out) *st_out = st;
-    else CHECK(st == NTSCRT_OK);
+    else CHECK_MESSAGE(st == NTSCRT_OK, "frame " << frame << " look " << look << ": " << ntscrt_last_error(inst));
     return px;
 }
 
@@ -145,6 +146,8 @@ TEST_CASE("instances sharing the device and chains render what a lone instance r
         std::vector<ntscrt_instance *> inst;
         for (size_t i = 0; i < n; ++i) inst.push_back(make());
         std::atomic<int> mismatches{0}, failures{0};
+        std::mutex err_mu;
+        std::vector<std::string> errors;
         std::vector<std::thread> th;
         for (size_t i = 0; i < n; ++i)
             th.emplace_back([&, i] {
@@ -153,11 +156,16 @@ TEST_CASE("instances sharing the device and chains render what a lone instance r
                 for (int64_t f = 0; f < 4; ++f) {
                     ntscrt_status st;
                     auto px = render(inst[i], clip, f, L[l], &st);
-                    if (st != NTSCRT_OK) ++failures;
+                    if (st != NTSCRT_OK) {
+                        ++failures;
+                        std::lock_guard<std::mutex> lk(err_mu);
+                        errors.push_back(L[l] + ": " + ntscrt_last_error(inst[i]));
+                    }
                     else if (px != ref[l][size_t(f)]) ++mismatches;
                 }
             });
         for (auto &t : th) t.join();
+        for (const auto &e : errors) MESSAGE(e);
         CHECK(failures == 0);
         CHECK(mismatches == 0);
         for (auto *p : inst) ntscrt_destroy(p);
