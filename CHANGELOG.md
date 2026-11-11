@@ -14,6 +14,11 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Fixed
+- A CRT shader that can't load (missing or broken preset, librashader missing) no longer fails every frame and
+  retries the load each time: the frame renders without the shader and the reason is shown once (Resolve: a
+  persistent warning on the effect, plus the log). `ntscrt-cli` writes such frames and prints a warning.
+
 ### Changed
 - Less work per frame: opaque sources (most video) no longer get a per-pixel alpha buffer, the pixel-format
   conversion loops are specialised per format, and an uncropped picture is moved instead of copied. Output is

@@ -156,7 +156,7 @@ void *Library::open_preset(const std::string &preset_path, std::vector<ShaderPar
     if (!create || !get_params || !free_params) throw std::runtime_error("librashader: preset functions missing");
     libra_shader_preset_t preset = nullptr;
     if (libra_error_t e = create(preset_path.c_str(), &preset))
-        throw std::runtime_error("librashader preset_create(" + preset_path + "): " + take_error(e));
+        throw PresetError("librashader preset_create(" + preset_path + "): " + take_error(e));
     libra_preset_param_list_t list{};
     if (libra_error_t e = get_params(&preset, &list)) {
         free_preset(preset);

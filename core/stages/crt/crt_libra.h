@@ -6,12 +6,18 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "../../gpu/gpu.h"
 
 namespace ntscrt::crt {
+
+// The preset file can't be read or parsed (vs. a chain / GPU failure).
+struct PresetError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 
 struct ShaderParam {
     std::string name;

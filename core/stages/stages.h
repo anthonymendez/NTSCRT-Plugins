@@ -91,6 +91,13 @@ public:
     // look["shader"]["enabled"]==false -> ShaderBypass path.
     void render(const gpu::Texture &chain_input, gpu::Texture &out, const FrameContext &ctx);
     void flush();
+    // When the shader can't run (preset missing or broken, librashader
+    // unavailable, chain failed) render() draws the ShaderBypass picture
+    // instead and these say why: an ntscrt_status code (0 = the shader ran or
+    // was off) and a message. A failing preset isn't retried until flush().
+    int fallback_status() const;
+    const std::string &fallback_reason() const;
+    size_t chain_load_attempts() const;  // tests: how often a chain was (re)built
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };

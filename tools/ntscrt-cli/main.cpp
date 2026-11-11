@@ -89,7 +89,9 @@ int main(int argc, char **argv) {
         ra.feedback_json = fb.empty() ? nullptr : fb.c_str(); ra.render_scale = 1.0;
         if (!seq.empty()) { ra.fetch_source = seq_fetch; ra.release_source = seq_release; ra.user = &su; }
         ntscrt_status st = ntscrt_render_cpu(inst, &ra, &L->img, &dst);
-        if (st != NTSCRT_OK) { std::fprintf(stderr, "render frame %lld failed (%d): %s\n", f, st, ntscrt_last_error(inst)); rc = 1; break; }
+        if (st == NTSCRT_ERR_GPU || st == NTSCRT_ERR_MISSING_RESOURCE || st == NTSCRT_ERR_SOURCE_UNAVAILABLE)
+            std::fprintf(stderr, "warning: frame %lld degraded (%d): %s\n", f, st, ntscrt_last_error(inst));  // still written
+        else if (st != NTSCRT_OK) { std::fprintf(stderr, "render frame %lld failed (%d): %s\n", f, st, ntscrt_last_error(inst)); rc = 1; break; }
         std::string op = fmt_path(out, f);
         if (!stbi_write_png(op.c_str(), L->w, L->h, 4, o.data(), L->w * 4)) { std::fprintf(stderr, "cannot write %s\n", op.c_str()); rc = 1; break; }
     }

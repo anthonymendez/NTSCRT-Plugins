@@ -105,6 +105,9 @@ public:
 
     // Submit queued work and block until complete.
     virtual void finish() = 0;
+    // True once the device is gone for good (D3D11 device removed / reset):
+    // every later call fails, so the owner must create a new device.
+    virtual bool lost() const { return false; }
 
     // For librashader: ID3D11Device* / ID3D11DeviceContext*, or id<MTLDevice> /
     // current id<MTLCommandBuffer> (begins one if needed).
