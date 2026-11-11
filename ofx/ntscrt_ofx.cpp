@@ -100,13 +100,10 @@ const Globals &globals() {
         auto *gl = new Globals;
         gl->res_dir = resource_dir();
         gl->schema = Schema::parse(ntscrt_param_schema_json());
-        ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, gl->res_dir.c_str()};
-        ntscrt_instance *tmp = nullptr;
-        if (ntscrt_create(&ci, &tmp) == NTSCRT_OK && tmp) {
-            for (auto &p : parse_presets(ntscrt_bundled_presets_json(tmp), gl->schema.digital_formats))
-                (p.feedback ? gl->loops : gl->looks).push_back(std::move(p));
-            ntscrt_destroy(tmp);
-        }
+        // The bundled preset files, read straight from Resources: no core instance (its
+        // GPU device took ~140 ms to create and destroy at describe time).
+        for (auto &p : parse_presets(bundled_presets_json(gl->res_dir).c_str(), gl->schema.digital_formats))
+            (p.feedback ? gl->loops : gl->looks).push_back(std::move(p));
         return gl;
     }();
     return *g;

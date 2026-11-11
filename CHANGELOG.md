@@ -130,6 +130,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 ### Fixed
 - Final Cut: choosing or loading a Screen Loop preset file without an `"enabled"` key turns Screen Loop on in the
   shared model itself (the core's "missing means on" rule), replacing a workaround in the plug-in.
+- Resolve: loading the plug-in no longer creates and destroys a GPU device just to list the bundled presets
+  (about 140 ms at every describe); they are read straight from the bundle. Final Cut likewise.
 - The golden workflow builds upstream's `crt-smoke` again (a build-time workaround for a Swift type-checker
   limit in upstream's `DigitalVideoRenderer.swift`, applied on the runner only).
 - `ntscrt_doctor.py` collects the macOS installer log from `/Library/Logs/NTSCRT/` (where the .pkg writes it).

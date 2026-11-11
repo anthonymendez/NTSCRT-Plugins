@@ -106,15 +106,11 @@ const Shared &GetShared() {
         }
         for (const auto &w : warnings) LogLine("schema: " + w);
 
-        // Bundled presets need an instance; it never renders. Same menu order as the OpenFX plug-in.
-        ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_METAL, nullptr, nullptr, sh->resource_dir.c_str()};
-        ntscrt_instance *meta = nullptr;
-        if (ntscrt_create(&ci, &meta) == NTSCRT_OK && meta) {
-            const json arr = json::parse(ntscrt_bundled_presets_json(meta), nullptr, false);
-            sh->menu = sh->model.look_menu(arr.is_array() ? arr : json::array());
-            sh->loops = sh->model.loop_menu(arr.is_array() ? arr : json::array());
-            ntscrt_destroy(meta);
-        }
+        // Bundled presets, read from Resources/presets without a core instance (no Metal device),
+        // in the same stable menu order as the OpenFX plug-in.
+        const json arr = json::parse(host::bundled_presets_json(sh->resource_dir), nullptr, false);
+        sh->menu = sh->model.look_menu(arr.is_array() ? arr : json::array());
+        sh->loops = sh->model.loop_menu(arr.is_array() ? arr : json::array());
         return sh;
     }();
     return *s;
