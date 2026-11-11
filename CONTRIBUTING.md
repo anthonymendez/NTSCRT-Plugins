@@ -22,7 +22,10 @@ See [Build from source](README.md#build-from-source) in the README. Before sendi
 - If you changed rendering, compare against the previous build with the same preset, for example with
   `ntscrt-cli` (`tools/ntscrt-cli`) or the Resolve test suite in [tests/resolve](tests/resolve/README.md)
   (needs Resolve Studio).
-- macOS and Final Cut code can't be built everywhere; CI builds and tests both platforms on every pull request.
+- macOS code can't be built everywhere; CI builds and tests the OpenFX plug-in on Windows and macOS on every
+  pull request. The Final Cut (FxPlug) sources are only syntax-checked against stub SDK headers there, never
+  built, because the `FXPLUG_SDK_URL` secret isn't set (see [fxplug/README.md](fxplug/README.md)); build them
+  yourself with the FxPlug SDK if you change them.
 
 ## Pull requests
 

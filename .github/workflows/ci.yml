@@ -123,15 +123,18 @@ jobs:
           if-no-files-found: warn
 
       # install.ps1's download path: serve the zip + a SHA256SUMS over local HTTP (-BaseUrl),
-      # install into a temp folder, then check that a tampered zip is refused.
-      - name: Smoke-test install.ps1 (checksum verified, tampered zip refused)
+      # install into a temp folder, then check that a tampered zip is refused, that a release
+      # without SHA256SUMS is refused, and that the pre-checksum v0.4.0 installs with a warning.
+      - name: Smoke-test install.ps1 (checksum verified, tampered zip / missing SHA256SUMS refused)
         if: hashFiles('dist/NTSCRT-OFX-windows-x64.zip') != ''
         shell: pwsh
         run: |
           $zipName = "NTSCRT-OFX-windows-x64.zip"
           $srv = Join-Path $env:RUNNER_TEMP "srv"; $bad = Join-Path $env:RUNNER_TEMP "srv-bad"
-          New-Item -ItemType Directory -Force $srv, $bad | Out-Null
+          $nosums = Join-Path $env:RUNNER_TEMP "srv-nosums"
+          New-Item -ItemType Directory -Force $srv, $bad, $nosums | Out-Null
           Copy-Item "dist/$zipName" $srv
+          Copy-Item "dist/$zipName" $nosums
           $h = (Get-FileHash "$srv/$zipName" -Algorithm SHA256).Hash.ToLower()
           "$h  $zipName" | Set-Content -Encoding ascii "$srv/SHA256SUMS"
           Copy-Item "$srv/SHA256SUMS" $bad
@@ -148,6 +151,21 @@ jobs:
             try { ./install.ps1 -BaseUrl "http://127.0.0.1:8765/srv-bad" -Dest $dest2 } catch { $failed = $true; Write-Host "refused as expected: $_" }
             if (-not $failed) { throw "install.ps1 accepted a tampered zip" }
             if (Test-Path "$dest2/NTSCRT.ofx.bundle") { throw "the tampered bundle was installed" }
+            # No SHA256SUMS: refused for a normal release (and for an unresolved "latest") ...
+            foreach ($v in "v9.9.9", "latest") {
+              $dest3 = Join-Path $env:RUNNER_TEMP "ofx-test-nosums-$v"
+              $failed = $false
+              try { ./install.ps1 -BaseUrl "http://127.0.0.1:8765/srv-nosums" -Version $v -Dest $dest3 } catch { $failed = $true; Write-Host "refused as expected: $_" }
+              if (-not $failed) { throw "install.ps1 installed $v without SHA256SUMS" }
+              if (Test-Path "$dest3/NTSCRT.ofx.bundle") { throw "the unverified $v bundle was installed" }
+            }
+            # ... but v0.4.0, published before checksums existed, installs with a warning.
+            $dest4 = Join-Path $env:RUNNER_TEMP "ofx-test-legacy"
+            $log = ./install.ps1 -BaseUrl "http://127.0.0.1:8765/srv-nosums" -Version v0.4.0 -Dest $dest4 3>&1 | Out-String
+            Write-Host $log
+            if ($log -notmatch "predates checksums") { throw "no pre-checksum warning for v0.4.0" }
+            if (-not (Test-Path "$dest4/NTSCRT.ofx.bundle/Contents/Win64/NTSCRT.ofx")) { throw "install.ps1 refused the pre-checksum v0.4.0" }
+            ./install.ps1 -Uninstall -Dest $dest4
             ./install.ps1 -Uninstall -Dest $dest
             if (Test-Path "$dest/NTSCRT.ofx.bundle") { throw "uninstall left the bundle" }
             Write-Host "install.ps1 checksum verification OK"
@@ -322,13 +340,16 @@ jobs:
           test ! -e /Library/OFX/Plugins/NTSCRT.ofx.bundle
 
       # install.sh's download path: serve the zip + SHA256SUMS over local HTTP (--base-url),
-      # install, then check that a tampered zip is refused and the installed copy is untouched.
-      - name: Smoke-test install.sh (checksum verified, tampered zip refused)
+      # install, then check that a tampered zip and a release without SHA256SUMS are refused (the
+      # installed copy untouched), and that the pre-checksum v0.4.0 installs with a warning.
+      - name: Smoke-test install.sh (checksum verified, tampered zip / missing SHA256SUMS refused)
         if: hashFiles('dist/NTSCRT-OFX-macos-universal.zip') != ''
         run: |
           zipname=NTSCRT-OFX-macos-universal.zip
-          srv="$RUNNER_TEMP/srv"; bad="$RUNNER_TEMP/srv-bad"; mkdir -p "$srv" "$bad"
+          srv="$RUNNER_TEMP/srv"; bad="$RUNNER_TEMP/srv-bad"; nosums="$RUNNER_TEMP/srv-nosums"
+          mkdir -p "$srv" "$bad" "$nosums"
           cp "dist/$zipname" "$srv/"
+          cp "dist/$zipname" "$nosums/"
           (cd "$srv" && shasum -a 256 "$zipname" > SHA256SUMS)
           cp "$srv/SHA256SUMS" "$bad/"
           python3 -c 'import sys; b = bytearray(open(sys.argv[1], "rb").read()); b[100] ^= 0xFF; open(sys.argv[2], "wb").write(b)' "$srv/$zipname" "$bad/$zipname"
@@ -342,6 +363,19 @@ jobs:
           fi
           after="$(sudo find /Library/OFX/Plugins/NTSCRT.ofx.bundle -type f -exec shasum {} + | shasum)"
           [ "$before" = "$after" ] || { echo "::error::the refused install changed the installed bundle"; exit 1; }
+          # No SHA256SUMS: refused for a normal release (and for an unresolved "latest") ...
+          for v in v9.9.9 latest; do
+            if sudo sh install.sh --resolve --version "$v" --base-url "http://127.0.0.1:8765/srv-nosums"; then
+              echo "::error::install.sh installed $v without SHA256SUMS"; exit 1
+            fi
+          done
+          after="$(sudo find /Library/OFX/Plugins/NTSCRT.ofx.bundle -type f -exec shasum {} + | shasum)"
+          [ "$before" = "$after" ] || { echo "::error::a refused install changed the installed bundle"; exit 1; }
+          # ... but v0.4.0, published before checksums existed, installs with a warning.
+          sudo sh install.sh --resolve --uninstall
+          sudo sh install.sh --resolve --version v0.4.0 --base-url "http://127.0.0.1:8765/srv-nosums" 2>&1 | tee "$RUNNER_TEMP/legacy.log"
+          grep -q "predates checksums" "$RUNNER_TEMP/legacy.log" || { echo "::error::no pre-checksum warning for v0.4.0"; exit 1; }
+          test -f /Library/OFX/Plugins/NTSCRT.ofx.bundle/Contents/MacOS/NTSCRT.ofx
           sudo sh install.sh --resolve --uninstall
           test ! -e /Library/OFX/Plugins/NTSCRT.ofx.bundle
           echo "install.sh checksum verification OK"

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Renders the README preview animations with the NTSCRT OpenFX plug-in inside DaVinci Resolve (headless).
 
-  python scripts/make_previews_resolve.py [--bundle C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle]
-                                          [--build C:/ntb/main] [--work DIR] [--out docs/images]
+  python scripts/make_previews_resolve.py --build <cmake build dir> [--bundle <NTSCRT.ofx.bundle>]
+                                          [--work DIR] [--out docs/images]
+
+--build defaults to the NTSCRT_BUILD_DIR environment variable; --bundle to
+<build>/ofx/Release/NTSCRT.ofx.bundle.
 
 1. scripts/make_previews.ps1 -SceneOnly writes the looping test scene (PNG frames).
 2. Resolve Studio is started with -nogui and loads a copy of --bundle (OFX_PLUGIN_PATH, the same
@@ -32,7 +35,9 @@ import run_resolve_tests as rrt  # noqa: E402  (PNG I/O, Resolve start-up, comps
 
 W, H, FPS = 960, 540, 30
 GIF_FRAMES = 60
-# Must match the looks in make_previews.ps1 (name, look, first frame of the loop).
+# Must match the looks in make_previews.ps1 (name, look, first frame of the loop). A file name is a
+# bundled preset: it is chosen from the effect's Preset menu, as a user would (so presets saved in an
+# older format are converted, and an animated one gets its keyframes); a dict is set control by control.
 LOOKS = [
     ("default", {}, 0),
     ("vhold", "V Hold glitch.json", 30),
@@ -127,17 +132,34 @@ def render_in_resolve(r, a, seq, renders, looks):
             if d["mean"] > 1.0:
                 raise RuntimeError(f"Resolve changed the scene frames (frame {f}: mean diff {d['mean']}): "
                                    "colour management or a frame offset?")
-        for name, look, start in looks:
+        for name, look, start, menu_index in looks:
             fx = s.ntscrt(fu, loader)
-            refused = apply_look(fx, s.schema, look)
-            if refused:
-                log(f"  {name}: Fusion refused {len(refused)} inputs: {', '.join(refused[:8])}...")
+            if menu_index is not None:
+                # The user's action: the plug-in writes the values (and an animated preset's keyframes).
+                fx.SetInput("host_preset", menu_index)
+            else:
+                refused = apply_look(fx, s.schema, look)
+                if refused:
+                    log(f"  {name}: Fusion refused {len(refused)} inputs: {', '.join(refused[:8])}...")
             t0 = time.time()
             fu.capture(fx, (start, start + GIF_FRAMES - 1), name)
             log(f"  {name}: frames {start}-{start + GIF_FRAMES - 1} rendered in {time.time() - t0:.1f}s")
         return s.r.GetVersionString(), s.version
     finally:
         s.close()
+
+
+def animated(look):
+    """A look with timeline keys: choosing it from the Preset menu keys its animation."""
+    return len((look.get("timeline") or {}).get("keys") or []) >= 2
+
+
+def preset_menu_index(file_name):
+    """Index of a bundled preset in the plug-in's Preset menu (make_presets_gallery.menu_orders: the order
+    ofx/ofx_params.cpp builds; index 0 is the menu's first, empty entry)."""
+    import make_presets_gallery as mpg  # imported here: it imports this module
+    looks, _ = mpg.menu_orders(mpg.load_schema())
+    return looks.index(Path(file_name).stem) + 1
 
 
 def compare_with_cli(a, seq, renders, looks, work):
@@ -153,7 +175,7 @@ def compare_with_cli(a, seq, renders, looks, work):
     out = {}
     cdir = work / "cli"
     cdir.mkdir(parents=True, exist_ok=True)
-    for name, look, start in looks:
+    for name, look, start, _ in looks:
         lp = cdir / f"{name}.json"
         lp.write_text(json.dumps(look), encoding="utf-8")
         frames = [start, start + GIF_FRAMES // 2, start + GIF_FRAMES - 1]
@@ -161,6 +183,8 @@ def compare_with_cli(a, seq, renders, looks, work):
             o = cdir / f"{name}-{f:04d}.png"
             cmd = [str(cli), "--seq", str(seq / "in_%04d.png"), "--out", str(cdir / f"{name}-%04d.png"), "--frame", str(f),
                    "--frames", "1", "--fps", str(FPS), "--look", str(lp), "--resources", str(res)]
+            if animated(look):
+                cmd.append("--timeline")  # keyed from the effect's first frame, as choosing it in the menu does
             p = subprocess.run(cmd, capture_output=True, text=True)
             if p.returncode or not o.exists():
                 raise RuntimeError(f"ntscrt-cli failed: {p.stderr.strip()}")
@@ -173,22 +197,28 @@ def compare_with_cli(a, seq, renders, looks, work):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bundle", default="C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle" if sys.platform == "win32" else None,
-                    help="the NTSCRT.ofx.bundle Resolve loads (a copy, via OFX_PLUGIN_PATH)")
-    ap.add_argument("--build", default="C:/ntb/main", help="CMake build dir with ntscrt-cli, for the comparison")
+    ap.add_argument("--build", default=os.environ.get("NTSCRT_BUILD_DIR"),
+                    help="CMake build dir with ntscrt-cli, for the comparison (default: $NTSCRT_BUILD_DIR)")
+    ap.add_argument("--bundle", help="the NTSCRT.ofx.bundle Resolve loads (a copy, via OFX_PLUGIN_PATH; "
+                                     "default: <build>/ofx/Release/NTSCRT.ofx.bundle)")
     ap.add_argument("--work", default=os.path.join(tempfile.gettempdir(), "ntscrt-previews-resolve"))
     ap.add_argument("--out", default=str(ROOT / "docs" / "images"))
     ap.add_argument("--wait", type=float, default=40, help="minutes to wait for a running Resolve to quit")
     ap.add_argument("--max-diff", type=float, default=2.0, help="fail if a look differs from ntscrt-cli by more")
     a = ap.parse_args()
+    if not a.build:
+        ap.error("--build (or the NTSCRT_BUILD_DIR environment variable) is required")
+    a.bundle = a.bundle or str(Path(a.build) / "ofx" / "Release" / "NTSCRT.ofx.bundle")
+    if not Path(a.bundle).is_dir():
+        ap.error(f"no plug-in bundle at {a.bundle}: build first, or pass --bundle")
     work = Path(a.work)
     work.mkdir(parents=True, exist_ok=True)
     ps1 = ROOT / "scripts" / "make_previews.ps1"
     ps = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1)]
     t_all = time.time()
 
-    looks = [(n, json.loads((ROOT / "presets" / l).read_text(encoding="utf-8")) if isinstance(l, str) else l, s)
-             for n, l, s in LOOKS]
+    looks = [(n, json.loads((ROOT / "presets" / l).read_text(encoding="utf-8")), s, preset_menu_index(l))
+             if isinstance(l, str) else (n, l, s, None) for n, l, s in LOOKS]
     log("scene frames ...")
     subprocess.run(ps + ["-SceneOnly", "-WorkDir", str(work)], check=True)
     seq = work / "seq"

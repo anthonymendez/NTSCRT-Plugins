@@ -15,6 +15,8 @@
 # (GitHub CLI, signed in) or the GITHUB_TOKEN environment variable.
 # A downloaded zip is checked against the release's SHA256SUMS before anything is
 # installed; a missing or mismatching checksum stops the install (-From skips the check).
+# The only exception: v0.3.0 and v0.4.0 were published before SHA256SUMS existed, so
+# they install with a warning ("latest" is resolved to its tag first).
 # Works in Windows PowerShell 5.1 and PowerShell 7.
 param(
     [string]$Version = "latest",          # release tag, e.g. v0.4.1 or v0.5.0-rc.1
@@ -30,6 +32,9 @@ $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with
 
 $Asset = "NTSCRT-OFX-windows-x64.zip"
 $Target = Join-Path $Dest "NTSCRT.ofx.bundle"
+$TagPattern = '^v\d+\.\d+\.\d+(-rc\.\d+)?$'
+# Releases published before SHA256SUMS existed: these (and only these) install unverified, with a warning.
+$PreChecksumReleases = @("v0.3.0", "v0.4.0")
 if ($Version -notmatch '^(latest|v\d+\.\d+\.\d+(-rc\.\d+)?)$') {
     throw "-Version must be 'latest' or a release tag like v0.4.1 / v0.5.0-rc.1 (got '$Version')."
 }
@@ -165,7 +170,13 @@ function Get-ListedHash([string]$SumsFile, [string]$Name) {
 function Test-ReleaseChecksum([string]$Zip, [string]$OutDir) {
     $help = "Nothing was installed. If you trust the file anyway, download it yourself and run with -From <zip>."
     $sums = Get-ReleaseAsset "SHA256SUMS" $OutDir
-    if (-not $sums) { throw "Couldn't download SHA256SUMS for $Version (releases before v0.4.1 don't have one), so $Asset can't be verified. $help" }
+    if (-not $sums) {
+        if ($PreChecksumReleases -ccontains $Version) {
+            Write-Warning "NTSCRT $Version predates checksums (SHA256SUMS exists from v0.4.1 on); installing without verification."
+            return
+        }
+        throw "Couldn't download SHA256SUMS for $Version, so $Asset can't be verified (only v0.3.0 and v0.4.0, which predate checksums, install without one). $help"
+    }
     $want = Get-ListedHash $sums $Asset
     if (-not $want) { throw "SHA256SUMS of $Version doesn't list $Asset, so it can't be verified. $help" }
     $have = (Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -173,6 +184,25 @@ function Test-ReleaseChecksum([string]$Zip, [string]$OutDir) {
         throw "Checksum mismatch for ${Asset}: expected $want, got $have. The download is corrupt or was tampered with. $help"
     }
     Say "Checksum OK (SHA-256 $have)"
+}
+# The tag "latest" points at (from the redirect of /releases/latest; no token needed;
+# falls back to the GitHub CLI), or "" if it can't be found.
+function Get-LatestTag {
+    try {
+        $req = [Net.HttpWebRequest]::Create("https://github.com/$Repo/releases/latest")
+        $req.Method = "HEAD"; $req.AllowAutoRedirect = $false; $req.UserAgent = "ntscrt-installer"
+        $req.KeepAlive = $false   # don't leave a half-used HEAD connection in the pool for the downloads
+        $resp = $req.GetResponse()
+        try { $loc = [string]$resp.Headers["Location"] } finally { $resp.Close() }
+        $tag = ($loc -split "/")[-1]
+        if ($loc -match '/releases/tag/' -and $tag -cmatch $TagPattern) { return $tag }
+        Write-Host "    unexpected answer for releases/latest: '$loc'"
+    } catch { Write-Host "    couldn't look up the latest release: $($_.Exception.Message)" }
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        $tag = [string](& gh release view --repo $Repo --json tagName --jq .tagName 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $tag.Trim() -cmatch $TagPattern) { return $tag.Trim() }
+    }
+    return ""
 }
 function Get-Release([string]$OutDir) {
     $zip = Get-ReleaseAsset $Asset $OutDir
@@ -201,7 +231,16 @@ try {
     if (-not $src -and $PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "NTSCRT.ofx.bundle"))) {
         $src = Join-Path $PSScriptRoot "NTSCRT.ofx.bundle"
     }
-    if (-not $src) { $src = Get-Release $work }
+    if (-not $src) {
+        # Pin "latest" to its tag: the zip and SHA256SUMS then come from the same release,
+        # and the pre-checksum exception knows which release it is.
+        if ($Version -eq "latest" -and -not $BaseUrl) {
+            $tag = Get-LatestTag
+            if ($tag) { Say "Latest release is $tag"; $Version = $tag }
+            else { Say "Couldn't resolve the latest release's tag; downloading 'latest' (it must have a SHA256SUMS)" }
+        }
+        $src = Get-Release $work
+    }
     $src = (Resolve-Path $src).Path
     if ((Get-Item $src).PSIsContainer) {
         $bundle = $src

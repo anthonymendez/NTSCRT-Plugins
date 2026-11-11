@@ -2,8 +2,11 @@
 """Regenerates the presets gallery: docs/PRESETS-GALLERY.md and one animated GIF per preset in
 docs/images/presets/<slug>.gif.
 
-  python scripts/make_presets_gallery.py [--renderer resolve|cli] [--bundle C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle]
-                                         [--build C:/ntb/main] [--work DIR] [--only slug,slug] [--page-only]
+  python scripts/make_presets_gallery.py --build <cmake build dir> [--renderer resolve|cli]
+                                         [--bundle <NTSCRT.ofx.bundle>] [--work DIR] [--only slug,slug] [--page-only]
+
+--build defaults to the NTSCRT_BUILD_DIR environment variable; --bundle to
+<build>/ofx/Release/NTSCRT.ofx.bundle.
 
 The preset list comes from the code, so new presets show up by themselves:
   - Looks and Digital video formats: the plug-in's Preset menu (bundled presets/*.json in the order of
@@ -63,7 +66,7 @@ GROUPS = [
     ("loop", "Screen Loop", "**Presets → Screen Loop preset**: video feedback, a camcorder filming the TV that shows "
                             "its own picture. These set only the Screen Loop controls (here over the default look). "
                             "Each GIF shows the preset's Length: one move."),
-    ("crt", "CRT shaders", "**CRT shader → Shader**: the libretro slang CRT shaders over the default look "
+    ("crt", "CRT shaders", "**CRT → Shader**: the libretro slang CRT shaders over the default look "
                            "(which uses CRT Glow (Gaussian)). Best seen at full size: the GIFs are scaled down, "
                            "so the masks and scanlines blur."),
 ]
@@ -112,8 +115,8 @@ def nest(pointers):
 
 
 def timeline_keys(look):
-    t = look.get("timeline") or {}
-    return t.get("keys") or [] if t.get("enabled", True) else []
+    # Keys play whatever the timeline's "enabled" says, as in the core (core/params/timeline.h).
+    return (look.get("timeline") or {}).get("keys") or []
 
 
 def entries(schema):
@@ -462,7 +465,7 @@ def write_page(all_entries, P, info):
              "Every preset that ships with the NTSCRT plug-ins, applied to the same synthetic test scene (a looping "
              "synthwave grid, 2 s at 30 fps) so they can be compared side by side. In DaVinci Resolve they're in the "
              "NTSCRT effect's Inspector, in the **Presets** group at the top: **Preset** (looks and Digital video "
-             "formats), **Screen Loop preset**, and **CRT shader → Shader**. Choosing a preset writes its values into "
+             "formats) and **Screen Loop preset**; the CRT shaders are in **CRT → Shader**. Choosing a preset writes its values into "
              "the controls below it, so you can tweak or keyframe them afterwards.", "",
              "The GIFs loop; the animated looks loop one pass of their keyframes. They're scaled down to "
              f"{GIF_W} px and limited to a GIF palette, so fine detail (scanlines, masks, noise) looks rougher than "
@@ -517,7 +520,7 @@ def write_page(all_entries, P, info):
                       f"difference {worst:.2f} of 255."]
     lines += ["", "Regenerate the GIFs and this page (Resolve Studio closed, ffmpeg on PATH; `--renderer cli` "
                   "renders without Resolve):", "", "```",
-              "python scripts/make_presets_gallery.py --bundle C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle --build C:/ntb/main",
+              "python scripts/make_presets_gallery.py --build <your CMake build dir>",
               "```", "", "New presets in `presets/`, new Digital video formats and new CRT shaders in "
               "`core/params/schema.json` are picked up automatically.", ""]
     PAGE.write_text("\n".join(lines), encoding="utf-8", newline="\n")
@@ -537,8 +540,9 @@ def md_inline(s):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--renderer", choices=("resolve", "cli"), default="resolve")
-    ap.add_argument("--bundle", default="C:/ntb/main/ofx/Release/NTSCRT.ofx.bundle" if sys.platform == "win32" else None)
-    ap.add_argument("--build", default="C:/ntb/main", help="CMake build dir with ntscrt-cli")
+    ap.add_argument("--build", default=os.environ.get("NTSCRT_BUILD_DIR"),
+                    help="CMake build dir with ntscrt-cli (default: $NTSCRT_BUILD_DIR)")
+    ap.add_argument("--bundle", help="the NTSCRT.ofx.bundle Resolve loads (default: <build>/ofx/Release/NTSCRT.ofx.bundle)")
     ap.add_argument("--work", default=os.path.join(tempfile.gettempdir(), "ntscrt-presets-gallery"))
     ap.add_argument("--only", default="", help="comma-separated slugs to (re)render; the page still lists all")
     ap.add_argument("--compare", default="all", help="slugs checked against ntscrt-cli ('all', or comma-separated)")
@@ -548,6 +552,10 @@ def main():
     ap.add_argument("--page-only", action="store_true")
     ap.add_argument("--gif-only", action="store_true", help="re-encode the GIFs from the last run's frames")
     a = ap.parse_args()
+    if not a.build and not a.page_only:
+        ap.error("--build (or the NTSCRT_BUILD_DIR environment variable) is required")
+    if a.build and not a.bundle:
+        a.bundle = str(Path(a.build) / "ofx" / "Release" / "NTSCRT.ofx.bundle")
     work = Path(a.work)
     work.mkdir(parents=True, exist_ok=True)
     schema = load_schema()

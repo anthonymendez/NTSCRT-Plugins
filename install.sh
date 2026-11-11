@@ -18,6 +18,8 @@
 # (GitHub CLI, signed in) or the GITHUB_TOKEN environment variable.
 # Downloaded zips are checked against the release's SHA256SUMS before anything is
 # installed; a missing or mismatching checksum stops the install (--from skips it).
+# The only exception: v0.3.0 and v0.4.0 were published before SHA256SUMS existed, so
+# they install with a warning ("latest" is resolved to its tag first).
 set -eu
 
 REPO="${NTSCRT_REPO:-anthonymendez/NTSCRT-Plugins}"
@@ -32,6 +34,7 @@ TEMPLATE_DIR="$HOME/Movies/Motion Templates.localized/Effects.localized/NTSCRT"
 
 say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -56,6 +59,8 @@ version_ok() {
   case "$1" in latest) return 0 ;; *[!0-9a-z.-]*|"") return 1 ;; esac   # also rules out newlines
   printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
 }
+# Releases published before SHA256SUMS existed: these (and only these) install unverified, with a warning.
+pre_checksum_release() { case "$1" in v0.3.0|v0.4.0) return 0 ;; *) return 1 ;; esac; }
 version_ok "$VERSION" || die "--version must be 'latest' or a release tag like v0.4.1 / v0.5.0-rc.1 (got '$VERSION')"
 
 # Run from an unzipped release (script file next to the plugin)? Install that copy.
@@ -158,9 +163,13 @@ download() {  # download <asset> -> prints path of the zip (not yet verified: se
 verify() {
   v_zip="$1"; v_asset="$2"; sums="$WORK/SHA256SUMS"
   help="Nothing was installed. If you trust the file anyway, download it yourself and use --from <zip>."
-  if [ ! -f "$sums" ]; then
-    (fetch_asset SHA256SUMS >/dev/null) ||   # subshell: fetch_asset sets globals
-      die "couldn't download SHA256SUMS for $VERSION (releases before v0.4.1 don't have one), so $v_asset can't be verified. $help"
+  if [ ! -f "$sums" ] && ! (fetch_asset SHA256SUMS >/dev/null); then   # subshell: fetch_asset sets globals
+    rm -f "$sums"
+    if pre_checksum_release "$VERSION"; then
+      warn "NTSCRT $VERSION predates checksums (SHA256SUMS exists from v0.4.1 on); installing $v_asset without verification."
+      return 0
+    fi
+    die "couldn't download SHA256SUMS for $VERSION, so $v_asset can't be verified (only v0.3.0 and v0.4.0, which predate checksums, install without one). $help"
   fi
   want="$(awk -v n="$v_asset" '{ f = $2; sub(/^\*/, "", f); if (f == n && length($1) == 64) { print tolower($1); exit } }' "$sums")"
   [ -n "$want" ] || die "SHA256SUMS of $VERSION doesn't list $v_asset, so it can't be verified. $help"
@@ -169,7 +178,23 @@ verify() {
   say "Checksum OK: $v_asset (SHA-256 $have)"
 }
 
-# has_real_signature <bundle>: signed with a real identity (not ad-hoc / unsigned) and intact.
+# resolve_latest: print the tag "latest" points at (the redirect of /releases/latest; no
+# token needed; falls back to the GitHub CLI), or nothing if it can't be found.
+resolve_latest() {
+  loc="$(curl -fsSI -o /dev/null -w '%{redirect_url}' "https://github.com/$REPO/releases/latest" 2>/dev/null)" || loc=""
+  tag="${loc##*/}"
+  case "$loc" in
+    */releases/tag/*) if [ "$tag" != latest ] && version_ok "$tag"; then echo "$tag"; return 0; fi ;;
+  esac
+  say "couldn't look up the latest release${loc:+ (got '$loc')}" >&2
+  if command -v gh >/dev/null 2>&1; then
+    tag="$(gh release view --repo "$REPO" --json tagName --jq .tagName 2>/dev/null)" || tag=""
+    if [ "$tag" != latest ] && version_ok "$tag"; then echo "$tag"; return 0; fi
+  fi
+  return 0
+}
+
+# has_real_signature <bundle>:signed with a real identity (not ad-hoc / unsigned) and intact.
 has_real_signature() {
   codesign --verify --deep --strict "$1" >/dev/null 2>&1 || return 1
   codesign -dvv "$1" 2>&1 | grep -q '^Authority='
@@ -252,6 +277,14 @@ fi
 if [ -n "$SUDO" ]; then
   say "Administrator password needed to install into $OFX_DEST / $APP_DEST"
   sudo -v || die "sudo failed"
+fi
+
+# Pin "latest" to its tag: every zip and SHA256SUMS then come from the same release,
+# and the pre-checksum exception knows which release it is.
+if [ -z "$FROM" ] && [ -z "$BASE_URL" ] && [ "$VERSION" = latest ]; then
+  tag="$(resolve_latest)"
+  if [ -n "$tag" ]; then say "Latest release is $tag"; VERSION="$tag"
+  else say "Couldn't resolve the latest release's tag; downloading 'latest' (it must have a SHA256SUMS)"; fi
 fi
 
 if [ -n "$WANT_RESOLVE" ]; then
