@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "frames_needed.h"
 #include "migrate.h"
 #include "renderer.h"
 
@@ -88,5 +89,26 @@ void DigitalStage::process(ImageBGRA8 &inout, const FrameContext &ctx) {
 }
 
 void DigitalStage::flush() { impl_->renderer.flush(); }
+
+namespace digital {
+int64_t first_source_frame(const json &look, double fps, int64_t n, uint64_t seed) {
+    auto d = look.find("digital");
+    if (n <= 0 || d == look.end() || !d->is_object() || !d->value("enabled", false)) return std::max<int64_t>(0, n);
+    const Settings s = parse_settings(look);
+    const Timing timing(fps > 0 ? fps : 30.0, s);
+    const int c = timing.captureOfFrame(int(std::clamp<int64_t>(n, 0, INT32_MAX / 2)));
+    int start;
+    if (timing.intraOnly()) {
+        start = std::max(0, c - 1);
+    } else {
+        const int g = timing.keyframeEvery;
+        const uint64_t mix = seed_mix(seed);
+        int b = (c / g) * g;
+        while (b > 0 && timing.kind(b, s.effective(kDatamosh), mix) != FrameKind::Key) b -= g;
+        start = b;
+    }
+    return std::min<int64_t>(n, timing.frameOfCapture(start));
+}
+}  // namespace digital
 
 }  // namespace ntscrt

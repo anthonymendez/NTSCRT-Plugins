@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -685,4 +686,217 @@ TEST_CASE("presets: timeline keyframes, menus with applies, save/load round trip
         fs::remove(tmp);
         fs::remove(side);
     }
+}
+
+// ---- host protocol (getFramesNeeded, isIdentity, fields, abort, clip prefs) --------
+namespace {
+struct ProtoFixture : Fixture {
+    int w = 64, h = 36;
+    std::vector<float> out;
+    ProtoFixture() {
+        create();
+        mock::Clip &s = src();
+        mock::Clip &dst = *inst->clips[kOfxImageEffectOutputClipName];
+        s.width = dst.width = w;
+        s.height = dst.height = h;
+        s.any_frame.resize(size_t(w) * h * 4);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                float *p = &s.any_frame[(size_t(y) * w + x) * 4];
+                p[0] = x / float(w - 1);
+                p[1] = y / float(h - 1);
+                p[2] = float((x / 8 + y / 8) % 2);
+                p[3] = 1.f;
+            }
+        dst.any_frame.assign(s.any_frame.size(), 0.f);
+        s.any_frame_last = dst.any_frame_last = 2000;
+        s.props.set(kOfxImageEffectPropFrameRange, {0.0, 2000.0});
+        host.on_release = [this](const mock::Image &im) {
+            if (im.props.s(kOfxImagePropUniqueIdentifier).rfind(kOfxImageEffectOutputClipName, 0) == 0) out = im.px;
+        };
+    }
+    mock::Clip &src() { return *inst->clips[kOfxImageEffectSimpleSourceClipName]; }
+    void set(const std::string &id, double v) {
+        param(host_name(id))->v[0] = v;
+        REQUIRE(changed(host_name(id)) == kOfxStatOK);
+    }
+    // [min, max] the plug-in declares for the source at t.
+    std::pair<double, double> needed(double t) {
+        mock::PropSet in, o;
+        in.set(kOfxPropTime, {t});
+        REQUIRE(host.action(plug, kOfxImageEffectActionGetFramesNeeded, inst.get(), &in, &o) == kOfxStatOK);
+        const std::string k = std::string("OfxImageClipPropFrameRange_") + kOfxImageEffectSimpleSourceClipName;
+        REQUIRE(o.dim(k) == 2);
+        return {o.d(k, 0), o.d(k, 1)};
+    }
+    OfxStatus render(double t, const char *field = kOfxImageFieldNone) {
+        mock::PropSet in;
+        in.set(kOfxPropTime, {t});
+        in.set(kOfxImageEffectPropFieldToRender, {std::string(field)});
+        in.set(kOfxImageEffectPropRenderWindow, {0, 0, w, h});
+        in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
+        in.set(kOfxImageEffectPropSequentialRenderStatus, {0});
+        in.set(kOfxImageEffectPropInteractiveRenderStatus, {0});
+        in.set(kOfxImageEffectPropRenderQualityDraft, {0});
+        return host.action(plug, kOfxImageEffectActionRender, inst.get(), &in);
+    }
+    std::pair<int, int> fetched_range(size_t from) {
+        const auto &f = src().fetched;
+        int lo = INT_MAX, hi = INT_MIN;
+        for (size_t i = from; i < f.size(); ++i) lo = std::min(lo, f[i]), hi = std::max(hi, f[i]);
+        return {lo, hi};
+    }
+};
+}  // namespace
+
+TEST_CASE("host protocol: describe declares sequential preference and whole-frame fields") {
+    Fixture f;
+    CHECK(f.desc.props.i(kOfxImageEffectInstancePropSequentialRender) == 2);
+    CHECK(f.desc.props.i(kOfxImageEffectPluginPropFieldRenderTwiceAlways) == 0);
+    CHECK(f.desc.clips[kOfxImageEffectSimpleSourceClipName]->props.s(kOfxImageClipPropFieldExtraction) ==
+          kOfxImageFieldBoth);
+}
+
+TEST_CASE("host protocol: getFramesNeeded follows the temporal stages") {
+    ProtoFixture f;
+    SUBCASE("default look (Glitch reads only looks): the current frame") {
+        auto [a, b] = f.needed(100);
+        CHECK(a == 100);
+        CHECK(b == 100);
+    }
+    SUBCASE("Digital video, keyframe every 2 s: back to the keyframe") {
+        f.set("digital.enabled", 1);
+        f.set("digital.keyframe_interval", 2);
+        // 25 fps source, 15 fps capture: a keyframe every 30 captures = 50 source frames
+        auto [a, b] = f.needed(130);
+        CHECK(b == 130);
+        CHECK(a == 100);
+        auto [c, d] = f.needed(100);
+        CHECK(c == 100);
+        CHECK(d == 100);
+        // The render fetches nothing outside what was declared.
+        const size_t mark = f.src().fetched.size();
+        REQUIRE(f.render(130) == kOfxStatOK);
+        auto [lo, hi] = f.fetched_range(mark);
+        CHECK(lo == 100);
+        CHECK(hi <= 130);
+    }
+    SUBCASE("Digital video, every frame a keyframe: the previous capture") {
+        f.set("digital.enabled", 1);
+        f.set("digital.keyframe_interval", 0);
+        auto [a, b] = f.needed(130);
+        CHECK(b == 130);
+        CHECK(a >= 127);
+        CHECK(a < 130);
+    }
+    SUBCASE("Digital video with datamosh: walks back over dropped keys") {
+        f.set("digital.enabled", 1);
+        f.set("digital.keyframe_interval", 1);
+        auto [a0, b0] = f.needed(1000);
+        f.set("digital.datamosh", 1);
+        auto [a1, b1] = f.needed(1000);
+        CHECK(b0 == 1000);
+        CHECK(b1 == 1000);
+        CHECK(a0 > 900);
+        CHECK(a1 == 0);  // every later key dropped: the stream reaches back to frame 0
+    }
+    SUBCASE("Screen Loop: its window start") {
+        f.set("screenloop.enabled", 1);
+        auto [a, b] = f.needed(1000);
+        CHECK(b == 1000);
+        CHECK(a == 720);  // window 240: anchor (1000 / 240 - 1) * 240
+        auto [c, d] = f.needed(300);
+        CHECK(c == 0);  // the first two windows run from frame 0
+        CHECK(d == 300);
+    }
+    SUBCASE("half-frame times cover both readings") {
+        f.set("digital.enabled", 1);
+        f.set("digital.keyframe_interval", 2);
+        auto [a, b] = f.needed(130.5);
+        CHECK(a == 100);
+        CHECK(b == 131);
+    }
+}
+
+TEST_CASE("host protocol: isIdentity only when every stage is off") {
+    ProtoFixture f;
+    auto identity = [&](double t, std::string *clip = nullptr) {
+        mock::PropSet in, o;
+        in.set(kOfxPropTime, {t});
+        in.set(kOfxImageEffectPropFieldToRender, {std::string(kOfxImageFieldNone)});
+        in.set(kOfxImageEffectPropRenderWindow, {0, 0, f.w, f.h});
+        in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
+        OfxStatus st = f.host.action(f.plug, kOfxImageEffectActionIsIdentity, f.inst.get(), &in, &o);
+        if (clip) *clip = o.s(kOfxPropName);
+        return st;
+    };
+    CHECK(identity(10) == kOfxStatReplyDefault);
+    for (const char *id : {"crop.enabled", "downscale.enabled", "digital.enabled", "ntsc.enabled", "glitch.enabled",
+                           "crt.enabled", "screenloop.enabled"})
+        f.param(host_name(id))->v[0] = 0;
+    std::string clip;
+    CHECK(identity(10, &clip) == kOfxStatOK);
+    CHECK(clip == kOfxImageEffectSimpleSourceClipName);
+    for (const char *id : {"crop.enabled", "digital.enabled", "crt.enabled", "screenloop.enabled"}) {
+        CAPTURE(id);
+        f.param(host_name(id))->v[0] = 1;
+        CHECK(identity(10) == kOfxStatReplyDefault);
+        f.param(host_name(id))->v[0] = 0;
+    }
+    // Keyframed on later: identity only where it's off.
+    f.param("crt_enabled")->keys = {{0.0, {0.0}}, {20.0, {0.0}}, {21.0, {1.0}}};
+    CHECK(identity(10) == kOfxStatOK);
+    CHECK(identity(30) == kOfxStatReplyDefault);
+}
+
+TEST_CASE("host protocol: field renders use frame floor(t)") {
+    ProtoFixture f;
+    f.param("host_debug_logging")->v[0] = 1;
+    REQUIRE(f.changed("host_debug_logging") == kOfxStatOK);
+    const std::string before = read_log();
+    REQUIRE(f.render(40.5, kOfxImageFieldUpper) == kOfxStatOK);
+    REQUIRE(f.render(41.5, kOfxImageFieldNone) == kOfxStatOK);
+    const std::string added = read_log().substr(before.size());
+    MESSAGE(added);
+    CHECK(added.find(" t=40.5 frame=40 ") != std::string::npos);  // a field of frame 40
+    CHECK(added.find(" t=41.5 frame=42 ") != std::string::npos);  // unfielded: the nearest frame
+}
+
+TEST_CASE("host protocol: abort stops fetching earlier frames and drops the half-built history") {
+    ProtoFixture f;
+    f.set("digital.enabled", 1);
+    f.set("digital.keyframe_interval", 4);
+    REQUIRE(f.render(0) == kOfxStatOK);  // warm-up
+    long asked = 0;
+    f.host.on_abort = [&] { return ++asked > 3 ? 1 : 0; };
+    const size_t mark = f.src().fetched.size();
+    REQUIRE(f.render(150) == kOfxStatOK);
+    CHECK(f.host.abort_calls > 0);
+    CHECK(f.src().fetched.size() - mark <= 6);  // the current frame + a few earlier ones, not the GOP
+    CHECK(read_log().find("aborted by the host") != std::string::npos);
+    // No abort any more: the same frame equals a render from clean caches.
+    f.host.on_abort = nullptr;
+    REQUIRE(f.render(150) == kOfxStatOK);
+    const std::vector<float> again = f.out;
+    REQUIRE(f.host.action(f.plug, kOfxActionPurgeCaches, f.inst.get()) != kOfxStatFailed);
+    REQUIRE(f.render(150) == kOfxStatOK);
+    CHECK(again == f.out);
+}
+
+TEST_CASE("host protocol: clip preferences ask for RGBA from an RGB source") {
+    ProtoFixture f;
+    f.src().props.set(kOfxImageClipPropUnmappedComponents, {std::string(kOfxImageComponentRGB)});
+    mock::PropSet o;
+    REQUIRE(f.host.action(f.plug, kOfxImageEffectActionGetClipPreferences, f.inst.get(), nullptr, &o) == kOfxStatOK);
+    CHECK(o.s(std::string("OfxImageClipPropComponents_") + kOfxImageEffectSimpleSourceClipName) ==
+          kOfxImageComponentRGBA);
+}
+
+TEST_CASE("host protocol: non-square pixels render with a warning") {
+    ProtoFixture f;
+    f.src().props.set(kOfxImagePropPixelAspectRatio, {0.9});
+    REQUIRE(f.render(5) == kOfxStatOK);
+    bool warned = false;
+    for (auto &m : f.host.log) warned |= m.find("non-square pixels") != std::string::npos;
+    CHECK(warned);
 }

@@ -253,6 +253,12 @@ jobs:
       - name: Build
         run: cmake --build build --parallel "$(sysctl -n hw.ncpu)"
 
+      # The Final Cut plug-in only builds with Apple's FxPlug SDK (the fxplug job, when its secret
+      # is set): without it, at least compile its Objective-C++ against stub headers declaring the
+      # documented FxPlug 4 API, to catch typos and C++ errors.
+      - name: Syntax-check FxPlug sources (stub SDK headers)
+        run: bash fxplug/tests/stubs/syntax_check.sh build
+
       - name: Save Rust target dirs
         if: steps.rust-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
         uses: actions/cache/save@v6

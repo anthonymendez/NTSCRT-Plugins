@@ -96,6 +96,9 @@ public:
     std::vector<std::string> log;  // messages from the plugin
     // Called with every image the plugin releases (lets tests read rendered output).
     std::function<void(const Image &)> on_release;
+    // Answer of the image-effect suite's abort() (default: never abort); `aborts` counts calls.
+    std::function<int()> on_abort;
+    long abort_calls = 0;
 
 private:
     void *lib_ = nullptr;

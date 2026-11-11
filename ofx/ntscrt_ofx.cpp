@@ -355,7 +355,10 @@ public:
         preset_file_ = fetchStringParam(kPresetFileParam);
         seed_ = fetchIntParam(kSeedParam);
         debug_ = fetchBooleanParam(kDebugParam);
-        for (size_t i = 0; i < s.params.size(); ++i) by_name_[s.params[i].name] = i;
+        for (size_t i = 0; i < s.params.size(); ++i) {
+            by_name_[s.params[i].name] = i;
+            if (s.params[i].type == PType::Bool) by_id_[s.params[i].id] = i;
+        }
 
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, g_.res_dir.c_str()};
         if (ntscrt_create(&ci, &inst_) != NTSCRT_OK) inst_ = nullptr;
@@ -400,6 +403,76 @@ public:
         prefs.setOutputFrameVarying(true);  // temporal stages: output differs per frame
         // Output keeps the source's alpha convention (the core writes it that way).
         prefs.setOutputPremultiplication(source_premultiplication());
+        // RGBA only: a host with an RGB (or alpha-only) source converts it for us
+        // instead of handing over images wrap() would refuse.
+        try {
+            if (src_->getUnmappedPixelComponents() != OFX::ePixelComponentRGBA)
+                prefs.setClipComponents(*src_, OFX::ePixelComponentRGBA);
+        } catch (...) {
+        }
+    }
+
+    // ---- host protocol: frames needed, identity ------------------------------
+    // Frame number (relative to the clip start) of host time t. A field render
+    // asks for t and t + 0.5: both fields belong to frame floor(t), which
+    // llround would push to the next frame.
+    static int64_t frame_of(double t, double start, bool field) {
+        const double rel = t - start;
+        return field ? int64_t(std::floor(rel + 1e-6)) : int64_t(std::llround(rel));
+    }
+
+    // The source frames the temporal stages can fetch for this frame (Digital
+    // video's stream back to its keyframe, Screen Loop's window): declared so
+    // hosts that only deliver declared frames (or pre-render them) give us
+    // what fetch_source asks for. Only the current frame when they're off.
+    void getFramesNeeded(const OFX::FramesNeededArguments &args, OFX::FramesNeededSetter &frames) override {
+        const OfxRangeD range = source_frame_range();
+        const double t = std::clamp(args.time, range.min, range.max);
+        // No field information here: cover both readings of a half-frame time
+        // (a field render of floor(t), a retimed frame llround(t)).
+        const int64_t n = frame_of(t, range.min, true), n_hi = frame_of(t, range.min, false);
+        int64_t first = n;
+        if (temporal_sources_possible(t)) {
+            std::string look, fb;
+            look_at_time(t, look, fb);
+            int seed = 0;
+            seed_->getValueAtTime(t, seed);
+            ntscrt_render_args ra{};
+            ra.frame_index = n;
+            ra.fps = source_frame_rate();
+            ra.look_json = look.c_str();
+            ra.feedback_json = fb.empty() ? nullptr : fb.c_str();
+            ra.seed = uint64_t(uint32_t(seed));
+            if (ntscrt_source_frames_needed(&ra, &first) != NTSCRT_OK) first = n;
+        }
+        const OfxRangeD need{std::min(args.time, range.min + double(first)),
+                             std::max(args.time, range.min + double(std::max(n, n_hi)))};
+        if (frames_needed_logged_ < 5 || dlog::verbose()) {
+            ++frames_needed_logged_;
+            std::ostringstream o;
+            o << "instance #" << id_ << " getFramesNeeded t=" << args.time << " -> " << need.min << ".." << need.max;
+            dlog::write(o.str());
+        }
+        frames.setFramesNeeded(*src_, need);
+    }
+
+    // Pass-through when no stage can change the picture: every stage off
+    // (crop included, so the frame keeps its size; alpha passes as it is, which
+    // both alpha modes do when nothing glows). Cheap: reads only the switches.
+    bool isIdentity(const OFX::IsIdentityArguments &args, OFX::Clip *&identityClip, double &identityTime) override {
+        for (const char *id : kStageSwitches) {
+            auto it = by_id_.find(id);
+            if (it == by_id_.end()) return false;  // schema without this switch: can't tell
+            if (bool_at(it->second, args.time)) return false;
+        }
+        identityClip = src_;
+        identityTime = args.time;
+        if (identity_logged_ < 3 || dlog::verbose()) {
+            ++identity_logged_;
+            dlog::write("instance #" + std::to_string(id_) + " isIdentity t=" + std::to_string(args.time) +
+                        ": every stage off, the host passes the source through");
+        }
+        return true;
     }
 
     void purgeCaches() override {
@@ -497,6 +570,26 @@ public:
     }
 
     // ---- values -----------------------------------------------------------
+    // Every stage's on/off switch (schema ids): all off = the source unchanged.
+    static constexpr const char *kStageSwitches[] = {"crop.enabled",  "downscale.enabled", "digital.enabled",
+                                                     "ntsc.enabled",  "glitch.enabled",    "crt.enabled",
+                                                     "screenloop.enabled"};
+    bool bool_at(size_t i, double t) const {
+        try {
+            return static_cast<OFX::BooleanParam *>(params_[i])->getValueAtTime(t);
+        } catch (...) {
+            return true;  // unreadable: assume on
+        }
+    }
+    // Can a stage that reads other source frames (Digital video, Screen Loop) be on at t?
+    bool temporal_sources_possible(double t) const {
+        for (const char *id : {"digital.enabled", "screenloop.enabled"}) {
+            auto it = by_id_.find(id);
+            if (it == by_id_.end() || bool_at(it->second, t)) return true;
+        }
+        return false;
+    }
+
     json value_at(size_t i, double t) const {
         const ParamDef &p = g_.schema.params[i];
         OFX::Param *q = params_[i];
@@ -853,6 +946,9 @@ private:
     OFX::BooleanParam *debug_ = nullptr;
     size_t last_look_hash_ = 0;  // debug logging: full look only when it changes
     std::map<std::string, size_t> by_name_;  // host param name -> schema index
+    std::map<std::string, size_t> by_id_;    // schema id -> schema index (bool params: the stage switches)
+    std::atomic<int> frames_needed_logged_{0}, identity_logged_{0};
+    bool par_warned_ = false;                // non-square pixels: said once
     std::atomic<uint64_t> look_gen_{0};      // bumped by every param change
     std::atomic<bool> keys_dirty_{true};     // re-count keyframes before the next render
     bool animated_ = true;
@@ -886,11 +982,23 @@ struct RenderCtx {
     std::map<const ntscrt_image *, Live> live;
     bool animated = true;  // some param has keyframes: other frames can differ
     int fetches = 0;  // other frames the core pulled (debug log)
+    // The host asked to abort (OFX abort()): the remaining fetches are skipped
+    // (the core has no abort callback; a fetch is the slow part of a history
+    // re-run). The stages that ran on missing frames are flushed afterwards.
+    bool aborted = false;
 
     static const ntscrt_image *fetch(void *u, int64_t frame) {
         auto *c = static_cast<RenderCtx *>(u);
         double t = c->start + double(frame);
         if (t < c->start || t > c->end) return nullptr;
+        if (c->aborted) return nullptr;
+        try {
+            if (c->fx->abort()) {
+                c->aborted = true;
+                return nullptr;
+            }
+        } catch (...) {
+        }
         ++c->fetches;
         try {
             std::unique_ptr<OFX::Image> im(c->fx->src_->fetchImage(t));
@@ -970,8 +1078,23 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     OfxRangeD range = source_frame_range();
     RenderCtx ctx{this, range.min, range.max, win, {}};
 
+    // Non-square pixels: the stages (Downscale height, crop ratios, CRT fit)
+    // assume square ones, so an anamorphic source renders squeezed. Said once.
+    const double par = optional_prop([&] { return src_->getPixelAspectRatio(); }, 1.0);
+    const bool par_bad = std::fabs(par - 1.0) > 1e-3;
+    if (par_bad && !par_warned_) {
+        par_warned_ = true;
+        dlog::write("instance #" + std::to_string(id_) + " source pixel aspect " + std::to_string(par) +
+                    ": rendered as square pixels");
+        report_error("NTSCRT: non-square pixels (aspect " + std::to_string(par) +
+                         ") are processed as square; conform the clip to square pixels for a correct picture",
+                     OFX::Message::eMessageWarning);
+    }
+
     ntscrt_render_args ra{};
-    ra.frame_index = int64_t(std::llround(args.time - range.min));
+    // Fielded render (t and t + 0.5): both fields are frame floor(t).
+    const bool field = args.fieldToRender == OFX::eFieldLower || args.fieldToRender == OFX::eFieldUpper;
+    ra.frame_index = frame_of(args.time, range.min, field);
     ra.fps = source_frame_rate();
     ra.look_json = look.c_str();
     ra.feedback_json = fb.empty() ? nullptr : fb.c_str();
@@ -993,6 +1116,14 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     const size_t builds_before = look_builds_;
     const auto t_core = std::chrono::steady_clock::now();
     ntscrt_status st = ntscrt_render_cpu(inst_, &ra, &s, &d);
+    if (ctx.aborted) {
+        // Frames were skipped: the Digital stream / Screen Loop history built
+        // on stand-ins must not be reused. The host discards this frame.
+        ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_DIGITAL | NTSCRT_CACHE_SCREENLOOP);
+        dlog::write("instance #" + std::to_string(id_) + " render t=" + std::to_string(args.time) +
+                    " aborted by the host after " + std::to_string(ctx.fetches) + " earlier frames");
+        return;
+    }
     const bool degraded =
         st == NTSCRT_ERR_GPU || st == NTSCRT_ERR_MISSING_RESOURCE || st == NTSCRT_ERR_SOURCE_UNAVAILABLE;
     const std::string err = st != NTSCRT_OK ? ntscrt_last_error(inst_) : std::string();
@@ -1016,7 +1147,8 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
             o.precision(2);
             o << " fetch_ms=" << ms(t_start, t_fetched) << " look_ms=" << ms(t_fetched, t_looked)
               << " core_ms=" << ms(t_core, t_done) << " seed=" << seed << " temporal_fetches=" << ctx.fetches
-              << " animated=" << ctx.animated << " look_builds=" << (look_builds_ - builds_before);
+              << " animated=" << ctx.animated << " look_builds=" << (look_builds_ - builds_before)
+              << " sequential=" << args.sequentialRenderStatus << " field=" << int(args.fieldToRender);
             const size_t h = std::hash<std::string>{}(look) ^ (std::hash<std::string>{}(fb) << 1);
             o << " look#" << std::hex << h << std::dec;
             if (h != last_look_hash_) {
@@ -1041,6 +1173,7 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         return;
     }
     last_warning_.clear();
+    if (par_bad) return;  // keep the pixel-aspect warning up
     if (had_error_ && OFX::getImageEffectHostDescription()->supportsMessageSuiteV2) clearPersistentMessage();
     had_error_ = false;
 }
@@ -1109,10 +1242,18 @@ void NtscrtFactory::describe(OFX::ImageEffectDescriptor &desc) {
     desc.setSupportsMultiResolution(false);
     desc.setSupportsTiles(false);
     desc.setTemporalClipAccess(true);
+    // Fielded output: one render per frame unless params animate (then the
+    // host may still render each field; render() maps t + 0.5 to frame t).
     desc.setRenderTwiceAlways(false);
     desc.setSupportsMultipleClipDepths(false);
     desc.setSupportsMultipleClipPARs(false);
+    // One render per instance at a time (renders also lock the instance's
+    // mutex; getFramesNeeded / isIdentity only read params).
     desc.setRenderThreadSafety(OFX::eRenderInstanceSafe);
+    // OFX 1.4 "2": best rendered in frame order (Digital video's stream, the
+    // Glitch receiver and Screen Loop continue instead of re-simulating), but
+    // correct in any order. Hosts without sequential rendering ignore it.
+    desc.getPropertySet().propSetInt(kOfxImageEffectInstancePropSequentialRender, 2, false);
     // GPU paths come later (Wave 2+): CPU only for now.
     desc.setSupportsOpenCLBuffersRender(false);
     desc.setSupportsCudaRender(false);
@@ -1187,6 +1328,9 @@ void NtscrtFactory::describeInContext(OFX::ImageEffectDescriptor &desc, OFX::Con
     src->setTemporalClipAccess(true);
     src->setSupportsTiles(false);
     src->setIsMask(false);
+    // Interlaced sources: the whole frame (the effect makes its own fields),
+    // not one line-doubled field (the OFX default).
+    src->setFieldExtraction(OFX::eFieldExtractBoth);
     OFX::ClipDescriptor *dst = desc.defineClip(kOfxImageEffectOutputClipName);
     dst->addSupportedComponent(OFX::ePixelComponentRGBA);
     dst->setSupportsTiles(false);
