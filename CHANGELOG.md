@@ -33,6 +33,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   default (`latest`) skips; testers install one with `-Version` / `--version vX.Y.Z-rc.N`.
 - Resolve test suite: the `speed` test also reports the plug-in's time for a frame after a seek, a CRT edit, a
   Glitch edit and with keyframed Glitch values.
+- Core: `ntscrt_source_frames_needed` tells a host which earlier source frames a render can fetch (Digital video
+  back to its keyframe, Screen Loop's window; none for Glitch or the CRT).
 
 ### Changed
 - `ntscrt_doctor.py` removes your user name, home folder and computer name from everything in its zip (and Mac

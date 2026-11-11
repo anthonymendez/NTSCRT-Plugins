@@ -191,6 +191,17 @@ NTSCRT_API void ntscrt_flush_caches(ntscrt_instance *inst);
 #define NTSCRT_CACHE_ALL        0xFFFFFFFFu
 NTSCRT_API void ntscrt_flush_caches_mask(ntscrt_instance *inst, uint32_t which);
 
+/* Source frames a render with these args may ask fetch_source for:
+ * [*first, args->frame_index] (*first == frame_index when no temporal stage
+ * reads other source frames: Glitch and the CRT only read looks). For hosts
+ * that declare an effect's inputs up front (OpenFX getFramesNeeded, FxPlug
+ * scheduleInputs). Reads look_json, feedback_json, fps, frame_index and seed
+ * only; no instance needed. Digital video: from the last real keyframe of its
+ * stream (datamosh-dropped keys walked over); Screen Loop: from its window
+ * start (up to 2 x 240 frames back). Settings at earlier frames are taken as
+ * this frame's, so keyframed Digital timing can reach a little further. */
+NTSCRT_API ntscrt_status ntscrt_source_frames_needed(const ntscrt_render_args *args, int64_t *first);
+
 /* Human-readable message for the last non-OK status on this instance. */
 NTSCRT_API const char *ntscrt_last_error(ntscrt_instance *inst);
 

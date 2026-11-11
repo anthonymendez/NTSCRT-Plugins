@@ -121,3 +121,10 @@ migrated). NTSCRT-Plugins extensions, all optional:
   `CrtStage::fallback_status()`, `fallback_reason()`, `chain_load_attempts()`. `core/src/pixel_convert.h`: an
   empty alpha vector means fully opaque. Look history: `FrameContext::look_at` references stay valid for at
   least 256 further lookups in the same render (stages read them on the spot).
+- 2026-11-11, agent H (host protocol), `ntscrt.h`: appended `ntscrt_source_frames_needed(args, &first)` (ABI
+  version unchanged: additive). Reason: hosts that declare an effect's inputs up front (OpenFX getFramesNeeded,
+  FxPlug scheduleInputs) need the source frames the temporal stages can fetch, which only the core knows (Digital
+  video's stream back to its last real keyframe, datamosh-dropped keys included; Screen Loop's window start).
+  Pure function of look/feedback/fps/frame/seed. Implementation in the new `core/src/frames_needed.cpp` (one line
+  added to `core/CMakeLists.txt`) and `digital::first_source_frame` (new `core/stages/digital/frames_needed.h`,
+  defined in `digital.cpp` next to the renderer it mirrors).
