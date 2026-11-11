@@ -475,10 +475,10 @@ jobs:
         run: |
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Scope CurrentUser -Force }
           # Excluded rules: Write-Host is the scripts' console UI (coloured "==>" lines), not pipeline
-          # output; PSReviewUnusedParameter flags script parameters that are only read inside
-          # functions (a known false positive); ShouldProcess (-WhatIf) doesn't apply to these
-          # one-shot scripts' internal New-* helpers.
-          $exclude = 'PSAvoidUsingWriteHost', 'PSReviewUnusedParameter', 'PSUseShouldProcessForStateChangingFunctions'
+          # output; ShouldProcess (-WhatIf) doesn't apply to these one-shot scripts' internal
+          # New-* helpers. (Script parameters are passed to functions explicitly, so
+          # PSReviewUnusedParameter stays on.)
+          $exclude = 'PSAvoidUsingWriteHost', 'PSUseShouldProcessForStateChangingFunctions'
           $r = @(git ls-files '*.ps1' | ForEach-Object {
             Invoke-ScriptAnalyzer -Path $_ -Severity Warning, Error -ExcludeRule $exclude
           })
