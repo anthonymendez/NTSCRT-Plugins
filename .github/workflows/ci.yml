@@ -94,7 +94,16 @@ jobs:
       - name: Test
         env:
           NTSCRT_REQUIRE_GPU: "1"   # a missing D3D11 device fails the GPU tests instead of skipping them
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build -C Release --output-on-failure -LE golden
+
+      # Golden images (docs/TESTING.md): upstream crt-smoke references and self-references,
+      # verbose so every comparison's numbers are in the log. Strict: a missing reference fails.
+      - name: Golden images
+        if: success() || failure()
+        env:
+          NTSCRT_REQUIRE_GPU: "1"
+          NTSCRT_GOLDEN_STRICT: "1"
+        run: ctest --test-dir build -C Release -V -L golden
 
       - name: Check FxPlug parameter IDs cover the schema
         run: python fxplug/tools/update_param_ids.py --check
@@ -253,10 +262,19 @@ jobs:
             build/cargo-ntscrs
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
+      # Golden first: once a shader hangs the VM's paravirtual GPU (test_crt's crt-sim), later
+      # processes' Metal work tends to hang too, and the golden renders are the ones worth having.
+      - name: Golden images
+        env:
+          NTSCRT_REQUIRE_GPU: "1"
+          NTSCRT_GOLDEN_STRICT: "1"
+        run: ctest --test-dir build -V -L golden
+
       - name: Test
+        if: success() || failure()
         env:
           NTSCRT_REQUIRE_GPU: "1"   # a missing Metal device fails the GPU tests instead of skipping them
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -LE golden
 
       - name: Package OFX bundle (universal)
         shell: bash
@@ -476,8 +494,8 @@ jobs:
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Scope CurrentUser -Force }
           # Excluded rules: Write-Host is the scripts' console UI (coloured "==>" lines), not pipeline
           # output; PSReviewUnusedParameter flags script parameters that are only read inside
-          # functions (a known false positive); ShouldProcess (-WhatIf) doesn't apply to these
-          # one-shot scripts' internal New-* helpers.
+          # functions (a known false positive; install.ps1); ShouldProcess (-WhatIf) doesn't
+          # apply to these one-shot scripts' internal New-* helpers.
           $exclude = 'PSAvoidUsingWriteHost', 'PSReviewUnusedParameter', 'PSUseShouldProcessForStateChangingFunctions'
           $r = @(git ls-files '*.ps1' | ForEach-Object {
             Invoke-ScriptAnalyzer -Path $_ -Severity Warning, Error -ExcludeRule $exclude

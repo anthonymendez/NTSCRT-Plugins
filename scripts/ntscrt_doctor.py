@@ -408,7 +408,9 @@ def collect_logs(r):
             "Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2; StartTime=(Get-Date).AddDays(-7)} "
             "-ErrorAction SilentlyContinue | ? { $_.Message -match 'Resolve|NTSCRT' } | Select -First 20 TimeCreated,Id,ProviderName,Message | Format-List"))
     # installer logs
-    for p in ([Path("/tmp/ntscrt-install.log")] if MAC else []) + list(Path(tempfile.gettempdir()).glob("ntscrt*.log")):
+    # the macOS .pkg postinstall writes /Library/Logs/NTSCRT/install.log (installer/macos/scripts/postinstall)
+    mac_logs = sorted(Path("/Library/Logs/NTSCRT").glob("*.log")) if MAC else []
+    for p in mac_logs + list(Path(tempfile.gettempdir()).glob("ntscrt*.log")):
         r.copy(p, "installer-" + p.name)
     if MAC:
         r.copy("/var/log/install.log", "macos-install.log.filtered.txt", filter_re=r"ntscrt")

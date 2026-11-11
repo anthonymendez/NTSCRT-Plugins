@@ -1,0 +1,24 @@
+{
+  "downscale_height": 240,
+  "height": 480,
+  "id": "testpattern-crt-royale-down320area",
+  "librashader_commit": "76462c03",
+  "shader_params": {
+    "convergence_offset_x_g": 0.0
+  },
+  "smoke_args": [
+    "TestAssets/testpattern.png",
+    "Vendor/slang-shaders/crt/crt-royale.slangp",
+    "golden-refs/testpattern-crt-royale-down320area.png",
+    "Vendor/librashader/librashader.dylib",
+    "640",
+    "480",
+    "320",
+    "240",
+    "area",
+    "--frame",
+    "1"
+  ],
+  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "width": 640
+}

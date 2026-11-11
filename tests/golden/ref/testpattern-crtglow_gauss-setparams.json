@@ -1,0 +1,33 @@
+{
+  "downscale_height": null,
+  "height": 480,
+  "id": "testpattern-crtglow_gauss-setparams",
+  "librashader_commit": "76462c03",
+  "shader_params": {
+    "BLOOM_STRENGTH": 0.1,
+    "BOOST": 1.3,
+    "CURVATURE": 1.0,
+    "GLOW_ROLLOFF": 2.4,
+    "INPUT_GAMMA": 2.3
+  },
+  "smoke_args": [
+    "TestAssets/testpattern.png",
+    "Vendor/slang-shaders/crt/crtglow_gauss.slangp",
+    "golden-refs/testpattern-crtglow_gauss-setparams.png",
+    "Vendor/librashader/librashader.dylib",
+    "640",
+    "480",
+    "--frame",
+    "1",
+    "--set",
+    "BOOST=1.3",
+    "--set",
+    "GLOW_ROLLOFF=2.4",
+    "--set",
+    "BLOOM_STRENGTH=0.1",
+    "--set",
+    "CURVATURE=1.0"
+  ],
+  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "width": 640
+}

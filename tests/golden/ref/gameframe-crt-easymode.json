@@ -1,0 +1,21 @@
+{
+  "downscale_height": null,
+  "height": 240,
+  "id": "gameframe-crt-easymode",
+  "librashader_commit": "76462c03",
+  "shader_params": {
+    "SHARPNESS_H": 0.5
+  },
+  "smoke_args": [
+    "TestAssets/game-frame.png",
+    "Vendor/slang-shaders/crt/crt-easymode.slangp",
+    "golden-refs/gameframe-crt-easymode.png",
+    "Vendor/librashader/librashader.dylib",
+    "320",
+    "240",
+    "--frame",
+    "1"
+  ],
+  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "width": 320
+}

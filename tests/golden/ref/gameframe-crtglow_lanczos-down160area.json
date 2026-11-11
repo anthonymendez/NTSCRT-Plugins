@@ -1,0 +1,33 @@
+{
+  "downscale_height": 120,
+  "height": 240,
+  "id": "gameframe-crtglow_lanczos-down160area",
+  "librashader_commit": "76462c03",
+  "shader_params": {
+    "BLOOM_STRENGTH": 0.1,
+    "BOOST": 1.1,
+    "GLOW_ROLLOFF": 2.4,
+    "INPUT_GAMMA": 2.3
+  },
+  "smoke_args": [
+    "TestAssets/game-frame.png",
+    "Vendor/slang-shaders/crt/crtglow_lanczos.slangp",
+    "golden-refs/gameframe-crtglow_lanczos-down160area.png",
+    "Vendor/librashader/librashader.dylib",
+    "320",
+    "240",
+    "160",
+    "120",
+    "area",
+    "--frame",
+    "1",
+    "--set",
+    "BOOST=1.1",
+    "--set",
+    "GLOW_ROLLOFF=2.4",
+    "--set",
+    "BLOOM_STRENGTH=0.1"
+  ],
+  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "width": 320
+}
