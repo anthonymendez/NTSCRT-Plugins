@@ -140,6 +140,7 @@ struct CrtStage::Impl {
     std::map<std::string, CachedChain> chains;  // by preset path
     std::shared_ptr<gpu::Texture> rect_tex, big_tex, rt_tex, scratch, bypass_big;
     bool clear_history = false;
+    bool ran_temporal = false;  // a preset with feedback / history ran since construction or flush()
     // Presets that failed to load / run, by the look's preset string: not
     // retried every frame (flush() forgets them).
     struct Failure {
@@ -254,6 +255,7 @@ struct CrtStage::Impl {
                const FrameContext &ctx) {
         CachedChain &c = chain_for(rel);
         ChainBox &box = *c.box;
+        if (c.history) ran_temporal = true;
         // A shared chain has one user at a time: its parameters and its frames
         // go together (the chain's frame() takes this lock as well).
         std::lock_guard<std::recursive_mutex> lock(dev->context_mutex());
@@ -345,6 +347,7 @@ void CrtStage::render(const gpu::Texture &in, gpu::Texture &out, const FrameCont
 
 void CrtStage::flush() {
     impl_->clear_history = true;
+    impl_->ran_temporal = false;
     impl_->failed.clear();
     for (auto &[k, c] : impl_->chains) c.last_frame = -1000;
 }
@@ -352,5 +355,6 @@ void CrtStage::flush() {
 int CrtStage::fallback_status() const { return impl_->fb_status; }
 const std::string &CrtStage::fallback_reason() const { return impl_->fb_reason; }
 size_t CrtStage::chain_load_attempts() const { return impl_->attempts; }
+bool CrtStage::ran_temporal_preset() const { return impl_->ran_temporal; }
 
 }  // namespace ntscrt

@@ -98,6 +98,13 @@ written but not yet built.
   JSON is parsed once (the host sends the same text for every frame of an unanimated look), the history of
   other frames' looks is bounded, and upload / output / Glitch textures are reused across frames. Output is
   unchanged.
+- **Screen Loop seeks:** the loop keeps checkpoints of what it has rendered (every 30 frames and at each window
+  start, within 256 MB of GPU memory per effect, `NTSCRT_SCREENLOOP_CHECKPOINT_MB`), so a jump back, or to a
+  frame near one rendered before, resumes from the closest one instead of re-running the loop from its window
+  start: in Resolve, jumping between frames 100-141 of a clip now takes ~0.1-0.5 s instead of ~4-6 s. The loop's
+  NTSC pass for earlier frames also runs on worker threads while the next frames are prepared, so a first jump
+  far into a clip is ~1.5x faster (1080p, frame 600: ~6.7 s instead of ~10.3 s; UHD ~26 s instead of ~41 s).
+  Every frame renders byte-identically to before.
 - The install scripts and installers check the downloaded zip against the release's `SHA256SUMS` and
   refuse to install if it is missing or doesn't match (`-From` / `--from` with your own zip skips the check).
   v0.3.0 and v0.4.0 predate `SHA256SUMS` and install with a warning, without verification. `-Version` / `--version` / `NTSCRT_VERSION` accept only `latest` or
@@ -160,6 +167,10 @@ written but not yet built.
   settings.
 
 ### Developer
+- `test_howl_seek`: Screen Loop through the C ABI on the GPU, cold seeks, scrubbing and playing on after a seek
+  checked byte-identical to playing from frame 0 (checkpoints on and off); engine tests for checkpoints and
+  pipelined passes; `bench_screenloop` (playback and seek timings, run by hand); the Resolve `speed` test lists
+  a Screen Loop instance's render times across jumps.
 - Golden image tests now compare something: 11 references rendered by upstream NTSCRT's own `crt-smoke`
   (golden workflow, macOS; the CRT shaders, downscale methods and ntsc-rs presets) and 52 self-reference
   baselines from the plug-ins' core (Digital with both codecs, Glitch over time, every Screen Loop preset,

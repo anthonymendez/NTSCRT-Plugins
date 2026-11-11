@@ -41,6 +41,19 @@ struct HowlHooks {
     // Howlaround allocates at a fixed whole multiple of the chain size
     // (same aspect, so no letterbox). shader_frame is the CRT frame count.
     std::function<void(const gpu::Texture &chain, gpu::Texture &tv, const HowlPass &pass)> render_tv;
+
+    // Optional: chain_input in two halves, so that one pass's CPU work (NTSC)
+    // runs while the loop exposes the next frame's camera. The first half is
+    // called with the camera picture (it may read it back at once) and
+    // returns the second, which waits for the CPU work, does the rest and
+    // returns the chain input (the same picture chain_input gives). Passes are
+    // begun and finished in frame order, at most two begun and not finished;
+    // every one is finished before Howlaround::camera returns. Null: chain_input.
+    std::function<std::function<std::shared_ptr<gpu::Texture>()>(const std::shared_ptr<gpu::Texture> &camera,
+                                                                 const HowlPass &pass)> chain_input_begin;
+    // Optional: true when render_tv's pictures depend on the frames drawn
+    // before (a temporal CRT preset): the loop then keeps no checkpoints.
+    std::function<bool()> tv_keeps_state;
 };
 
 }  // namespace ntscrt

@@ -24,6 +24,7 @@ Setting one for Resolve:
 | Variable | Values | What it does |
 |---|---|---|
 | `NTSCRT_SOURCE_CACHE_MB` | megabytes (default `512`) | Memory budget of each effect's cache of source frames (the earlier frames Digital video and Screen Loop re-read). The least recently used frames are dropped beyond it; at least 8 frames are kept whatever the budget, and never more than 65. 512 MB is about 60 frames at 1080p and 15 at UHD. |
+| `NTSCRT_SCREENLOOP_CHECKPOINT_MB` | megabytes (default `256`), `0` = none | GPU memory each effect may keep for Screen Loop checkpoints: snapshots of the loop every 30 frames (and at each window start) that a jump back resumes from instead of re-running the loop from its window start. About 15-22 MB each at the default Downscale width (a 1280x720 TV picture per frame of Delay); the least recently used go first. |
 | `NTSCRT_OUTPUT_8BIT` | `1` | 16-bit and float projects get the CRT shader's result at 8 bits, as 0.4.0 did, instead of half-float. |
 | `NTSCRT_SHARED_DEVICE` | `0` | Each effect creates its own GPU device and compiled kernels instead of sharing one per process. |
 | `NTSCRT_SHARED_CHAINS` | `0` | Each effect compiles its own CRT shader chain instead of sharing one per GPU device and preset (Windows; on macOS chains are never shared). |

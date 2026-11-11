@@ -144,6 +144,19 @@ migrated). NTSCRT-Plugins extensions, all optional:
   Pure function of look/feedback/fps/frame/seed. Implementation in the new `core/src/frames_needed.cpp` (one line
   added to `core/CMakeLists.txt`) and `digital::first_source_frame` (new `core/stages/digital/frames_needed.h`,
   defined in `digital.cpp` next to the renderer it mirrors).
+- 2026-11-11, agent J (Screen Loop seeks), `core/stages/howlaround/howl_hooks.h`: `HowlHooks` gains two optional
+  members. `chain_input_begin(camera, pass)` is chain_input in two halves: it may read the camera back at once and
+  returns the second half, which waits for the CPU work (NTSC, on a worker) and does the rest; Howlaround begins
+  and finishes passes in frame order with at most two begun and unfinished, all finished before `camera()` returns,
+  so the loop's history passes overlap NTSC with the next cameras (same pictures). `tv_keeps_state()` says the
+  loop's CRT copy ran a temporal preset: no checkpoints then. `core/stages/stages.h`:
+  `bool CrtStage::ran_temporal_preset() const` (a preset with feedback / history ran since construction or
+  flush()). The façade keeps a second pair of `NtscStage`s for the loop's worker passes. `howl_engine.h`: the
+  engine keeps checkpoints of its runs (every 30 frames and at each window start, LRU within
+  `NTSCRT_SCREENLOOP_CHECKPOINT_MB`, default 256, 0 = none) and resumes a seek from the closest one at or before
+  the frame instead of re-running the window; flushed with the loop's history (`NTSCRT_CACHE_SCREENLOOP`). A run
+  that met a missing past source takes no checkpoints after it; the engine assumes the host can fetch every
+  past frame it rendered (as the main input).
 - 2026-11-11, agent I (shared host params), `docs/params.md`: the param model both hosts follow is now one library,
   `hostparams/` (`ntscrt::host`, target `ntscrt_hostparams`; `ntscrt_host/params.h`, `ntscrt_host/file_log.h`),
   replacing `ofx/ofx_params.*` (deleted) and the logic in `fxplug/model/param_model.*` (now FxPlug ids, layout,

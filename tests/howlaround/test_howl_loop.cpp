@@ -292,8 +292,8 @@ Pic moving(int64_t f) {
         }
     return std::make_shared<const ImageF>(ImageF::from_bgra8(bgra.data(), w, h));
 }
-Settings busy() {
-    return Settings({{"zoom", 0.8}, {"delay", 3}, {"shake", 0.7}, {"seed", 4}, {"focus", 0.5},
+Settings busy(double zoom = 0.8) {
+    return Settings({{"zoom", zoom}, {"delay", 3}, {"shake", 0.7}, {"seed", 4}, {"focus", 0.5},
                      {"auto_exposure", 0.6}, {"counter", 1}, {"drift_x", 0.2}, {"hue_drift", 10}});
 }
 }  // namespace
@@ -355,8 +355,148 @@ TEST_CASE("windows: anchors, continuation and re-render without re-running") {
     render(e, ops, 35, moving(35));  // skip ahead within the window: continue
     CHECK(e.resets() == 1);
     CHECK(e.tv_passes() == passes + 5);  // frames 30..34
-    render(e, ops, 10, moving(10));  // back far: re-run from the window start
-    CHECK(e.resets() == 2);
+    render(e, ops, 10, moving(10));  // back far: from the checkpoint at the window start (after its run-up)
+    CHECK(e.resets() == 1);
+    CHECK(e.restores() == 1);
+    CHECK(e.tv_passes() == passes + 5 + 10);  // frames 0..9
+
+    // Without checkpoints: the window is run again, run-up and all.
+    Engine<CpuOps> off(config(busy(), 64, 48, 10, 2.3, 50));
+    off.set_checkpoints(false);
+    for (int64_t f = 0; f < 30; ++f) render(off, ops, f, moving(f));
+    render(off, ops, 10, moving(10));
+    CHECK(off.resets() == 2);
+    CHECK(off.restores() == 0);
+    CHECK(off.checkpoints() == 0);
+}
+
+namespace {
+// CpuOps whose TV passes are begun and finished later (howl_engine.h
+// pipelining), checking the engine keeps to the protocol.
+struct AsyncCpuOps : CpuOps {
+    struct Pending {
+        Pic cam;
+        HowlPass pass;
+        int64_t id;
+    };
+    int limit = 2;
+    int64_t begun = 0, ended = 0, max_open = 0;
+    bool in_order = true;
+    int max_inflight() const { return limit; }
+    Pending tv_begin(const Pic &cam, const HowlPass &p) {
+        max_open = std::max(max_open, ++begun - ended);
+        return {cam, p, begun - 1};
+    }
+    Pic tv_end(Pending &&q) {
+        in_order = in_order && q.id == ended;
+        ++ended;
+        return tv_pass(q.cam, q.pass);
+    }
+    static size_t bytes(const Pic &p) { return size_t(p->width) * p->height * 16; }
+};
+}  // namespace
+
+TEST_CASE("checkpoints and pipelined passes render what playing in order renders") {
+    const int64_t frames = 30;
+    Settings s = busy(0.5);  // delay 3: passes can overlap; fewer copies: a shorter run-up
+    for (int64_t window : {5}) {  // window starts 0, 5, 10, 15, 20, 25
+        auto cfg = config(s, 64, 48, 10, 2.3, window);
+        std::vector<Pic> seq;
+        {
+            CpuOps ops;
+            ops.source = moving;
+            Engine<CpuOps> e(cfg);
+            e.set_checkpoints(false);
+            for (int64_t f = 0; f < frames; ++f) seq.push_back(render(e, ops, f, moving(f)));
+        }
+        std::vector<int64_t> order;
+        for (int64_t f = 0; f < frames; ++f) order.push_back(f);
+        std::mt19937 rng(77 + int(window));
+        std::shuffle(order.begin(), order.end(), rng);
+        // Scrubbing: back and forth near each other, then consecutive frames after a seek.
+        order.insert(order.end(), {20, 17, 21, 22, 23, 12, 13, 25, 24, 23, 29, 28, 2, 0, 1, 26, 25, 24});
+        struct Case {
+            bool async;
+            int64_t every;
+            size_t budget;
+        };
+        const size_t all = size_t(1) << 30, two = size_t(128) * 96 * 16 * 3 * 2;  // all, or 2 checkpoints
+        for (Case k : {Case{false, 0, all}, Case{true, 0, all}, Case{false, 1, all}, Case{true, 4, all},
+                       Case{true, 1, two}, Case{false, 4, two}}) {
+            CAPTURE(window);
+            CAPTURE(k.async);
+            CAPTURE(k.every);
+            CAPTURE(k.budget);
+            EngineConfig c = cfg;
+            c.checkpoint_every = k.every;
+            c.checkpoint_budget = k.budget;
+            AsyncCpuOps ops;
+            ops.source = moving;
+            ops.limit = k.async ? 2 : 0;
+            Engine<AsyncCpuOps> e(c);
+            for (int64_t f : order) {
+                CAPTURE(f);
+                Pic cam = e.camera(ops, f, moving(f));
+                if (e.wants_tv(f)) e.store_tv(f, ops.tv_pass(cam, e.normal_pass(f)));
+                CHECK(*cam == *seq[size_t(f)]);
+            }
+            CHECK(ops.in_order);
+            CHECK(ops.begun == ops.ended);
+            CHECK(ops.max_open <= 2);
+            if (k.async) CHECK(ops.begun > 0);
+            CHECK(e.checkpoint_bytes() <= k.budget);
+            if (k.every == 0) CHECK(e.restores() == 0);
+            else if (k.budget == all) CHECK(e.restores() > 0);
+        }
+    }
+}
+
+TEST_CASE("missing past sources: checkpoints and pipelining change no frame") {
+    // Stand-ins make the history depend on the access order (as it always
+    // has); whatever the order, checkpoints and pipelined passes don't change
+    // what the plain engine renders. (The frames missing as past sources are
+    // never asked for themselves: the engine takes a frame the host renders
+    // to be one it can also fetch.)
+    auto source = [](int64_t f) -> Pic { return f % 4 == 3 ? nullptr : moving(f); };
+    std::vector<int64_t> order;
+    for (int64_t f = 0; f < 30; ++f)
+        if (f % 4 != 3) order.push_back(f);
+    std::mt19937 rng(5);
+    std::shuffle(order.begin(), order.end(), rng);
+    order.insert(order.end(), {20, 21, 22, 24, 25, 9, 10, 4, 5, 6, 8});
+    auto run = [&](int64_t every, int limit) {
+        auto c = config(busy(), 64, 48, 10, 2.3, 6);
+        c.checkpoint_every = every;
+        AsyncCpuOps ops;
+        ops.source = source;
+        ops.limit = limit;
+        Engine<AsyncCpuOps> e(c);
+        std::vector<Pic> out;
+        for (int64_t f : order) {
+            Pic cam = e.camera(ops, f, moving(f));
+            if (e.wants_tv(f)) e.store_tv(f, ops.tv_pass(cam, e.normal_pass(f)));
+            out.push_back(cam);
+        }
+        return out;
+    };
+    const auto plain = run(0, 0), with = run(2, 2);
+    for (size_t i = 0; i < order.size(); ++i) {
+        CAPTURE(order[i]);
+        CHECK(*with[i] == *plain[i]);
+    }
+}
+
+TEST_CASE("no checkpoint from a history that stood in the asked frame for a missing window start") {
+    auto source = [](int64_t f) -> Pic { return f == 6 ? nullptr : moving(f); };
+    CpuOps ops;
+    ops.source = source;
+    auto cfg = config(busy(), 64, 48, 10, 2.3, 6);
+    cfg.checkpoint_every = 2;
+    Engine<CpuOps> e(cfg);
+    e.camera(ops, 13, moving(13));  // anchor 6, whose source is missing: run-up on frame 13
+    CHECK(e.checkpoints() == 0);
+    e.camera(ops, 2, moving(2));  // anchor 0: fine
+    CHECK(e.checkpoints() > 0);
 }
 
 TEST_CASE("missing past source frames hold the last one available") {

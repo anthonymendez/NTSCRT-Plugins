@@ -194,9 +194,11 @@ Building from source instead: see [Build from source](#build-from-source) below,
   **Save preset…** saves the look at the playhead, not the animation.
 - **Seeks can take a moment** with Digital video or Screen Loop on: they depend on earlier frames, so after
   a jump the plug-in renders those first (Digital video back to its last keyframe, Screen Loop over its
-  length). After a Glitch edit, the Glitch simulation runs again from the clip's first frame.
+  length; a jump back near frames it already rendered resumes from the loop's checkpoint at most 30 frames
+  earlier). After a Glitch edit, the Glitch simulation runs again from the clip's first frame.
 - **Memory:** each effect keeps up to 512 MB of recent source frames (`NTSCRT_SOURCE_CACHE_MB` changes it,
-  see [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)), which adds up with many instances.
+  see [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)), and with Screen Loop on up to 256 MB of GPU memory for the
+  loop's checkpoints (`NTSCRT_SCREENLOOP_CHECKPOINT_MB`), which adds up with many instances.
 - **8 bits before the CRT shader, no HDR:** every stage before the CRT shader works at 8 bits per channel, and
   values above 1.0 (HDR, super-whites) are clipped. On 16-bit / float timelines only the CRT shader's output is
   half-float; with the CRT shader off, or without a GPU, the output is 8-bit, so heavy grading on top can show
