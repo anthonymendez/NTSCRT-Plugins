@@ -470,6 +470,7 @@ jobs:
           shellcheck --severity=warning "${files[@]}"
 
       - name: PSScriptAnalyzer
+        if: success() || failure()   # run even when shellcheck found something
         shell: pwsh
         run: |
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) { Install-Module PSScriptAnalyzer -Scope CurrentUser -Force }

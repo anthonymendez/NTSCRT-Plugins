@@ -10,7 +10,7 @@
 set -euo pipefail
 
 : "${FXPLUG_SDK_URL:?FXPLUG_SDK_URL is not set}"
-: "${FXPLUG_SDK_SHA256:?FXPLUG_SDK_SHA256 is not set: add the SDK download's SHA-256 as a repository secret}"
+: "${FXPLUG_SDK_SHA256:?FXPLUG_SDK_SHA256 is not set: add the SHA-256 of the SDK download as a repository secret}"
 work="${RUNNER_TEMP:-/tmp}/fxplug-sdk"
 rm -rf "$work"; mkdir -p "$work"
 dl="$work/download"

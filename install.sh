@@ -156,17 +156,17 @@ download() {  # download <asset> -> prints path of the zip (not yet verified: se
 # SHA256SUMS, no line for the asset, or a different hash stops the install. Run it in the
 # main shell (not inside $(...)) so die exits the script.
 verify() {
-  zip="$1"; asset="$2"; sums="$WORK/SHA256SUMS"
+  v_zip="$1"; v_asset="$2"; sums="$WORK/SHA256SUMS"
   help="Nothing was installed. If you trust the file anyway, download it yourself and use --from <zip>."
   if [ ! -f "$sums" ]; then
-    fetch_asset SHA256SUMS >/dev/null ||
-      die "couldn't download SHA256SUMS for $VERSION (releases before v0.4.1 don't have one), so $asset can't be verified. $help"
+    (fetch_asset SHA256SUMS >/dev/null) ||   # subshell: fetch_asset sets globals
+      die "couldn't download SHA256SUMS for $VERSION (releases before v0.4.1 don't have one), so $v_asset can't be verified. $help"
   fi
-  want="$(awk -v n="$asset" '{ f = $2; sub(/^\*/, "", f); if (f == n && length($1) == 64) { print tolower($1); exit } }' "$sums")"
-  [ -n "$want" ] || die "SHA256SUMS of $VERSION doesn't list $asset, so it can't be verified. $help"
-  have="$(shasum -a 256 "$zip" | awk '{ print tolower($1) }')"
-  [ "$have" = "$want" ] || die "checksum mismatch for $asset: expected $want, got $have. The download is corrupt or was tampered with. $help"
-  say "Checksum OK: $asset (SHA-256 $have)"
+  want="$(awk -v n="$v_asset" '{ f = $2; sub(/^\*/, "", f); if (f == n && length($1) == 64) { print tolower($1); exit } }' "$sums")"
+  [ -n "$want" ] || die "SHA256SUMS of $VERSION doesn't list $v_asset, so it can't be verified. $help"
+  have="$(shasum -a 256 "$v_zip" | awk '{ print tolower($1) }')"
+  [ "$have" = "$want" ] || die "checksum mismatch for $v_asset: expected $want, got $have. The download is corrupt or was tampered with. $help"
+  say "Checksum OK: $v_asset (SHA-256 $have)"
 }
 
 # has_real_signature <bundle>: signed with a real identity (not ad-hoc / unsigned) and intact.
