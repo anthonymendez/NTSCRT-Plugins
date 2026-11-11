@@ -43,6 +43,8 @@ struct Param {
     // linearly (held before the first / after the last), getNumKeys counts them.
     std::map<double, std::vector<double>> keys;
     long reads_at_time = 0;  // paramGetValueAtTime calls
+    int key_sets = 0;        // paramSetValueAtTime calls (each adds / replaces a key)
+    int key_clears = 0;      // paramDeleteAllKeys calls
 };
 
 struct ParamSet {

@@ -31,6 +31,20 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   (`gh attestation verify <file> -R anthonymendez/NTSCRT-Plugins`).
 - Release candidates: `vX.Y.Z-rc.N` tags are published as GitHub prereleases, which the installers'
   default (`latest`) skips; testers install one with `-Version` / `--version vX.Y.Z-rc.N`.
+- **Animated presets:** choosing *Glitch pop*, *15 second glitches* and the other bundled looks with upstream
+  timeline keys now plays their animation: the keys become host keyframes (one per frame on each moving control,
+  two per change on toggles and menus), the timeline's duration from the clip's first frame at the clip's frame
+  rate, looping to the clip's end (at most 3600 frames), evaluated as the NTSCRT app does (easing, step snapping,
+  held toggles). `core/params/timeline.h` holds the shared evaluation; the FxPlug model gains `preset_keys`.
+- **Digital video formats** (Webcam (2005), Video call, MiniDV, Early web video, CD-ROM (Video 1), Datamosh) in the
+  Preset menu as *Digital video/…*, as in upstream 0.20: they switch Digital video on and set its controls and the
+  Downscale width, leaving the rest of the look alone. They follow the 0.5.0 looks in the menu (released presets
+  keep their index).
+- `ntscrt-cli --timeline`: plays a look's timeline keys per frame, as the plug-ins key them.
+- Tests: timeline evaluation against upstream's rules and a direct evaluation, preset keyframes in the OFX and
+  FxPlug models and through the mock OpenFX host, choice applies, preset file round trip; the Resolve suite's
+  new `animated` test compares an animated preset against `ntscrt-cli --timeline` and checks Horizontal
+  resolution and a Digital video format.
 - Resolve test suite: the `speed` test also reports the plug-in's time for a frame after a seek, a CRT edit, a
   Glitch edit and with keyframed Glitch values.
 - Core: `ntscrt_source_frames_needed` tells a host which earlier source frames a render can fetch (Digital video
@@ -66,6 +80,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   and Aliasing looks different (upstream's new sampling).
 - Bundled presets keep their place in the Preset menu (saved projects store the index); new ones are added
   after the released ones.
+- Choosing a look preset clears the keyframes of the controls it sets (it replaces the look; undo restores
+  them). Before, a keyframed control got a key at the playhead and kept its other keys.
 - The install scripts and installers check the downloaded zip against the release's `SHA256SUMS` and
   refuse to install if it is missing or doesn't match (`-From` / `--from` with your own zip skips the check).
   `-Version` / `--version` / `NTSCRT_VERSION` accept only `latest` or `vX.Y.Z[-rc.N]`.
@@ -81,6 +97,14 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   unchanged.
 
 ### Fixed
+- **Downscale → Horizontal resolution** sets the Width again (schema `applies`), and editing the Width by hand
+  switches it to *Custom*, as in the NTSCRT app. The Digital video formats' labels (*MiniDV (720px)*, …) are
+  appended to its options.
+- Saved presets are upstream's JSON: they carry `"version": 2` and the ntsc-rs settings version, and Glitch /
+  Screen Loop toggles are stored as 1/0. **Save preset…** now also saves the Screen Loop settings (under
+  `"screen_loop"`, which Load applies, plus `<name> (Screen Loop).json` while the loop is on).
+- Final Cut (model, unreleased): a look built over a version 1 preset no longer says version 1 (the core
+  converted Digital video Quality twice).
 - Final Cut plug-in (not released yet, never run in Final Cut): Screen Loop presets turn the loop on (they
   rendered nothing); earlier source frames are requested only for Digital video and Screen Loop, as many as they
   read (Glitch alone asked for 8 per frame); each effect instance has its own renderers and caches (two clips
@@ -88,7 +112,9 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   built once per edit (was up to 16 parameter sweeps per frame); degraded frames (CRT shader skipped, a source
   frame missing) count as rendered and are logged once; an edit drops only the caches it affects; the frame's other
   tiles reuse its render; `MayRemapTime` is now YES (it reads frames before the output time) and
-  `PixelTransformSupport` says Scale.
+  `PixelTransformSupport` says Scale. Like the OpenFX plug-in it now turns animated presets into
+  keyframes, lists the Digital video formats in the Preset menu, applies choice `applies` (Horizontal
+  resolution) and lets keyable menus take keyframes; saved looks carry the Screen Loop settings.
 - macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't
   installed; it now removes both plug-ins and forgets the .pkg installer's receipt.
 - Faster seeks and edits in Resolve with Glitch on (the default): when no parameter is keyframed the plug-in no

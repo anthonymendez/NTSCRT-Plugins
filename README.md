@@ -123,11 +123,15 @@ installed version shows in the effect's **Presets → Version** field. A specifi
 
 ### Using it
 
-- **Preset** menu: pick a look (Clean VHS, Medium VHS, V Hold glitch, Webcam…). It sets every control, and you can
-  then tweak and keyframe any of them.
+- **Preset** menu: pick a look (Clean VHS, Medium VHS, V Hold glitch, Webcam…). It sets every control (and
+  replaces their keyframes), and you can then tweak and keyframe any of them. Animated looks (*Glitch pop*,
+  *15 second glitches*, …) arrive as keyframes that play the NTSCRT app's animation from the clip's first frame,
+  looping until its end. The **Digital video/…** entries (Webcam (2005), MiniDV, CD-ROM…) are upstream's formats:
+  they switch Digital video on and set its controls and the Downscale width, leaving the rest of the look alone.
 - **Screen Loop preset**: video feedback (a camcorder filming its own TV).
 - **Load preset… / Save preset…**: preset files are the same JSON as the NTSCRT app, and the NTSC section is
-  compatible with ntsc-rs presets.
+  compatible with ntsc-rs presets. Saved files also carry the Screen Loop settings (and, while Screen Loop is
+  on, a second file `<name> (Screen Loop).json` for the NTSCRT app).
 - Apply it to the clip at its **native resolution**. On a low-res clip in a high-res timeline, the analog artifacts get
   scaled up with the picture.
 - **Titles and clips that don't fill the frame**: *Transparency → Transparent areas* picks how the effect treats
@@ -157,9 +161,11 @@ Building from source instead: see [Build from source](#build-from-source) below,
 
 ## Known issues and limitations
 
-- **Animated presets play as one frame.** Presets such as *15 second glitches* or *Glitch pop* animate in the
-  NTSCRT app; here they apply the look of their first frame. Keyframe the controls yourself to animate them.
-- **Downscale → Horizontal resolution** doesn't change the width yet; set **Width** in the same group directly.
+- **Animated presets are keyframed, not linked.** Choosing *Glitch pop*, *15 second glitches* and the other
+  animated looks writes their animation as keyframes (one per frame on each moving control), repeated from the
+  clip's first frame to its end (at most 3600 frames; the last values hold after that). Changing the clip's
+  length or frame rate later doesn't re-time them: choose the preset again. **Save preset…** saves the look
+  at the playhead, not the animation.
 - **Edits and seeks can be slow** with the Glitch, Digital video or Screen Loop stages on: they depend on
   earlier frames, so the plug-in re-renders those after a jump or a parameter change.
 - **Memory:** the plug-in keeps recent source frames per effect instance, which adds up on 4K timelines with

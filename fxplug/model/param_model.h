@@ -12,6 +12,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "../../core/params/timeline.h"
+
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -50,6 +52,7 @@ enum class Kind { Bool, Int, Float, Choice, Color };
 struct Option {
     json value;
     std::string label;
+    json applies;  // schema "applies": path -> value written when this option is chosen (null = none)
 };
 
 struct Param {
@@ -61,6 +64,7 @@ struct Param {
     bool animatable = true;
     bool in_presets = true;  // schema "preset": false = presets never set or reset it
     bool feedback = false;   // path was "fb:/..." -> writes into feedback_json
+    bool encode_number = false;  // bool written as 1/0 (schema "encode": "number")
     std::string pointer;     // RFC 6901 pointer (without "fb:")
     std::string enabled_if;  // pointer; may start with "fb:"
     std::string visible_path;
@@ -73,6 +77,26 @@ struct Group {
     std::string id, label, parent;
     uint32_t host_id = 0;
 };
+
+// One entry of the look Preset menu: a bundled look, or a Digital video format
+// (upstream 0.20 lists the formats in its Preset menu, "Digital video" section).
+struct MenuPreset {
+    std::string name;    // "Clean VHS", "Digital video/MiniDV"
+    bool format = false;  // data = the format's "applies" map (apply with applies_host_values)
+    json data;            // look preset JSON
+};
+
+// An animated preset (upstream "timeline" keys) as host keyframes.
+struct PresetKeys {
+    int64_t pass = 0;    // frames one timeline pass spans at the host rate (0 = not animated)
+    int64_t frames = 0;  // frames keyed from the effect's first frame
+    // host id -> (frame offset from the effect's first frame, host value). A single
+    // (0, v) entry = holds still: set v without keyframes. Bool / choice params get keys
+    // where the value changes (old value the frame before, new one on it), the others one on every frame.
+    std::map<uint32_t, std::vector<std::pair<int64_t, json>>> keys;
+    bool animated() const { return pass > 0; }
+};
+constexpr int64_t kMaxKeyedFrames = 3600;  // longest stretch keyed (the last value then holds)
 
 struct UiItem {
     enum Type { StartGroup, EndGroup, Control } type;
@@ -87,6 +111,9 @@ public:
     std::vector<Group> groups;
     std::vector<Param> params;
     std::vector<UiItem> layout;  // creation order: groups nested by "parent", params in schema order
+    json constants = json::object();       // schema "constants" ("/version", "fb:/kind", ...): written into every look
+    json digital_formats = json::array();  // schema "digital_formats"
+    ntscrt::timeline::Rules timeline;      // how timeline keys interpolate
 
     const Param *find_host(uint32_t host_id) const;
     const Param *find(const std::string &id) const;
@@ -106,6 +133,26 @@ public:
     // Host values for all look (feedback=false) or feedback (true) params from a preset file:
     // value at the param's path if present, else the schema default.
     std::map<uint32_t, json> host_values_from_preset(const json &preset, bool feedback) const;
+
+    // Look Preset menu: the bundled looks of ntscrt_bundled_presets_json (an array of
+    // {name, kind, json}; Screen Loop ones skipped) in that order, then the Digital video formats.
+    std::vector<MenuPreset> look_menu(const json &bundled) const;
+    // Host values a Digital video format's (or a choice option's) "applies" map writes;
+    // object values (/digital/values) spread over the params below that path.
+    std::map<uint32_t, json> applies_host_values(const json &applies) const;
+    // Host values choosing option `host_choice` (index) of choice p writes (e.g. Horizontal
+    // resolution -> Width). Empty when the option sets nothing.
+    std::map<uint32_t, json> option_host_values(const Param &p, const json &host_choice) const;
+    // After the user edits `edited` by hand: the host value (option index) choice `c` should
+    // drop to ("Custom") because its chosen option set `edited` to something else; else nullopt.
+    std::optional<json> demoted_choice(const Param &c, const json &c_host, const Param &edited,
+                                       const json &edited_host) const;
+    // Keyframes for an animated look preset: fps = the host's frame rate, available =
+    // frames from the effect's first frame to its last (<= 0 = unknown: one pass).
+    // The host clears the keyframes of every look param first (presets replace the look).
+    PresetKeys preset_keys(const json &preset, double fps, int64_t available) const;
+    // The look the timeline gives frame n of the effect (the preset upgraded, keys applied).
+    json preset_look_at_frame(const json &preset, int64_t n, double fps) const;
 
     // UI state for enabled_if / visible_if, evaluated on built look / feedback.
     static bool truthy(const json &v);

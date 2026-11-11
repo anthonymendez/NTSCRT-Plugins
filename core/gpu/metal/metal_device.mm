@@ -269,8 +269,13 @@ public:
         cb_ = nil;
         [cb commit];
         [cb waitUntilCompleted];
-        if (cb.status == MTLCommandBufferStatusError) throw std::runtime_error("Metal command buffer failed: " + ns(cb.error));
+        if (cb.status == MTLCommandBufferStatusError) {
+            lost_ = true;  // a hang / GPU reset leaves the queue unusable: the owner makes a new device
+            throw std::runtime_error("Metal command buffer failed: " + ns(cb.error));
+        }
     }
+
+    bool lost() const override { return lost_; }
 
     void *native_device() const override { return (__bridge void *)dev_; }
     void *native_context() override { return (__bridge void *)cmd(); }
@@ -329,6 +334,7 @@ private:
     id<MTLSamplerState> linear_, point_;
     id<MTLCommandBuffer> cb_ = nil;
     id<MTLCommandBuffer> external_ = nil;
+    bool lost_ = false;  // a command buffer failed (GPU hang / reset)
     std::unordered_map<std::string, id<MTLLibrary>> libs_;
     std::unordered_map<std::string, std::unique_ptr<MtlKernel>> kernels_;
 };
