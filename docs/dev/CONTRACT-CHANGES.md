@@ -128,7 +128,8 @@ migrated). NTSCRT-Plugins extensions, all optional:
   `native_context()` itself (librashader) holds `context_mutex()` for the sequence. `last_create_error()` is per
   thread. `download()` waits for earlier work itself (documented; callers no longer `finish()` first). The façade
   uses `shared()` whenever the host gave no device. `core/src/testing.h`: `Stats::gpu_device`.
-  CRT chains of presets without history are shared per (device, preset) across CrtStages
+  CRT chains of presets without history are shared per (device, preset) across CrtStages on D3D11 only (librashader's
+  Metal runtime writes uniforms into one non-renamed MTLBuffer at encode time, so Metal chains stay per stage)
   (`NTSCRT_SHARED_CHAINS=0` turns that off); `core/stages/digital/parallel.h`: `shutdown_threads()`,
   `threads_running()`, called by `ntscrt_destroy` for the last instance.
 - 2026-11-11, agent G (bit depth): the façade picks the CRT output texture format per host picture: RGBA16F for

@@ -105,7 +105,8 @@ struct CachedChain {
     // one chain per (device, preset) then serves every CrtStage on that
     // device, so a second instance neither recompiles the preset (~140 ms
     // for glow_gauss at 1080p) nor holds its own copy (~70 MB CPU, ~20 MB
-    // GPU). Temporal presets (feedback / history) stay per stage.
+    // GPU). Temporal presets (feedback / history) stay per stage, and on
+    // Metal every chain does (see chain_for).
     std::shared_ptr<ChainBox> box;
     bool history = false;
     int64_t last_frame = -1000;
@@ -174,7 +175,14 @@ struct CrtStage::Impl {
             b->chain = lib->create_chain(*dev, u8str(p));
             return b;
         };
-        if (!c.history && share_chains()) {
+        // D3D11 only: librashader's D3D11 runtime writes each pass's uniforms
+        // with Map(WRITE_DISCARD), which the driver renames, so frames from
+        // different users can be queued back to back. Its Metal runtime writes
+        // them into one shared-storage MTLBuffer at encode time: a second
+        // user's frame encoded before the first ran on the GPU would overwrite
+        // the first one's uniforms (seen on macOS CI as wrong pictures with
+        // concurrent instances). On Metal every stage keeps its own chain.
+        if (!c.history && share_chains() && dev->backend() == gpu::Backend::D3D11) {
             // Held while creating: concurrent first frames build a preset once.
             ChainRegistry &r = registry();
             std::lock_guard<std::mutex> lock(r.m);
