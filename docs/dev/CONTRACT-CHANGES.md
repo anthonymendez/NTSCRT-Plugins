@@ -121,3 +121,13 @@ migrated). NTSCRT-Plugins extensions, all optional:
   `CrtStage::fallback_status()`, `fallback_reason()`, `chain_load_attempts()`. `core/src/pixel_convert.h`: an
   empty alpha vector means fully opaque. Look history: `FrameContext::look_at` references stay valid for at
   least 256 further lookups in the same render (stages read them on the spot).
+- 2026-11-11, agent G (shared device), `core/gpu/gpu.h`: `static std::shared_ptr<Device> Device::shared(Backend)`
+  (process-wide own device per backend, weak-referenced so it dies with its last user; a lost one is replaced on the
+  next call; `NTSCRT_SHARED_DEVICE=0` = a device per call) and `std::recursive_mutex &Device::context_mutex()`.
+  Every Device method is now thread-safe (atomic on the context / command buffer); code that drives
+  `native_context()` itself (librashader) holds `context_mutex()` for the sequence. `last_create_error()` is per
+  thread. `download()` waits for earlier work itself (documented; callers no longer `finish()` first). The façade
+  uses `shared()` whenever the host gave no device. `core/src/testing.h`: `Stats::gpu_device`.
+  CRT chains of presets without history are shared per (device, preset) across CrtStages
+  (`NTSCRT_SHARED_CHAINS=0` turns that off); `core/stages/digital/parallel.h`: `shutdown_threads()`,
+  `threads_running()`, called by `ntscrt_destroy` for the last instance.

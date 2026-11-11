@@ -135,7 +135,10 @@ struct ntscrt_instance {
     std::string resource_dir;
     ntscrt_gpu_backend backend = NTSCRT_GPU_AUTO;
     void *native_device = nullptr, *native_queue = nullptr;  // the host's, when shared
-    std::unique_ptr<gpu::Device> dev;
+    // Our own device is the process-wide shared one (gpu::Device::shared):
+    // kernels compile once per process, and one D3D11 device / Metal queue
+    // serves every instance. A host device (native_device) is this instance's.
+    std::shared_ptr<gpu::Device> dev;
     DigitalStage digital;
     NtscStage ntsc;
     std::unique_ptr<Downscaler> downscale;
@@ -182,7 +185,9 @@ void drop_gpu(ntscrt_instance *inst) {
 // Creates the device and the GPU stages; false (and why) when there's no GPU.
 bool init_gpu(ntscrt_instance *inst, std::string &err) {
     try {
-        inst->dev = gpu::Device::create(pick_backend(inst->backend), inst->native_device, inst->native_queue);
+        const gpu::Backend b = pick_backend(inst->backend);
+        if (inst->native_device) inst->dev = gpu::Device::create(b, inst->native_device, inst->native_queue);
+        else inst->dev = gpu::Device::shared(b);
     } catch (const std::exception &e) {
         err = e.what();
     }
@@ -239,6 +244,7 @@ Stats stats(ntscrt_instance *inst) {
     s.look_parses = inst->looks.parses;
     s.device_resets = inst->device_resets;
     s.has_gpu = inst->dev != nullptr;
+    s.gpu_device = inst->dev ? inst->dev->native_device() : nullptr;
     return s;
 }
 void set_source_budget(ntscrt_instance *inst, size_t bytes) {
@@ -273,7 +279,7 @@ ntscrt_status ntscrt_create(const ntscrt_create_info *info, ntscrt_instance **ou
 
 void ntscrt_destroy(ntscrt_instance *inst) {
     if (!inst) return;
-    delete inst;
+    delete inst;  // drops its reference to the shared device (freed with the last one)
     // The last instance: join the Digital stage's worker threads now, from
     // ordinary code, rather than ever in a static destructor (DLL unload).
     if (live_instances().fetch_sub(1) == 1) digital::shutdown_threads();
@@ -445,8 +451,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
     auto download = [&](const gpu::Texture &t) {
         ImageBGRA8 im;
         im.resize(t.desc().width, t.desc().height);
-        dev.finish();
-        dev.download(t, im.px.data(), ptrdiff_t(im.width) * 4);
+        dev.download(t, im.px.data(), ptrdiff_t(im.width) * 4);  // waits for the work before it
         return im;
     };
 
@@ -495,7 +500,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
     auto out = acquire({out_w, out_h, gpu::Format::BGRA8, true, true});
     inst->crt->render(*chain, *out, ctx);
     chain.reset();
-    dev.finish();
+    // No finish() here: emit's download (or the Metal path's own finish) waits.
     emit(out, img, raw_w, raw_h, aligned_alpha, mode);
     inst->device_resets = 0;  // a good GPU frame
 
@@ -594,7 +599,6 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         auto f32 = dev.create_texture({sw, sh, gpu::Format::RGBA32F, true, false});
         dev.copy(*src, *f32);
         std::vector<float> px(size_t(sw) * sh * 4);
-        dev.finish();
         dev.download(*f32, px.data(), ptrdiff_t(sw) * 16);
         ntscrt_image im{sw, sh, ptrdiff_t(sw) * 16, NTSCRT_RGBA32F, px.data()};
         to_bgra8(im, raw, &alpha, mode, premult);

@@ -15,6 +15,7 @@ struct Stats {
     size_t look_parses = 0;    // look JSON strings parsed (identical strings are parsed once)
     int device_resets = 0;     // GPU devices recreated after a loss (since the last good frame)
     bool has_gpu = false;
+    void *gpu_device = nullptr;  // native device (ID3D11Device* / id<MTLDevice>): shared ones compare equal
 };
 Stats stats(ntscrt_instance *inst);
 

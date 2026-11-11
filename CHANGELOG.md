@@ -70,6 +70,11 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 - Less work per frame: opaque sources (most video) no longer get a per-pixel alpha buffer, the pixel-format
   conversion loops are specialised per format, and an uncropped picture is moved instead of copied. Output is
   unchanged.
+- Several NTSCRT effects in one project share one GPU device, one set of compiled GPU kernels and, for the
+  CRT presets without frame history (all but crtsim), one compiled shader chain. With 8 instances at 1080p
+  (glow_gauss): instances are created in ~0 ms instead of ~21 ms each, the first frames take ~0.9 s instead of
+  1.6 s in total, and the process uses ~390 MB instead of ~1140 MB of memory and ~190 MB instead of ~410 MB of
+  GPU memory. Rendering waits for the GPU on an event instead of spinning a CPU core.
 
 ### Fixed
 - macOS: `install.sh --uninstall` left the Resolve plug-in installed when DaVinci Resolve itself wasn't

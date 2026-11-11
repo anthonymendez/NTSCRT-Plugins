@@ -15,7 +15,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include <cstdlib>
 #include <map>
+#include <mutex>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -90,12 +92,44 @@ bool uses_history(const fs::path &slangp) {
     return false;
 }
 
-struct CachedChain {
+// One librashader chain and the parameter values it holds now.
+struct ChainBox {
     std::unique_ptr<crt::Chain> chain;
     std::map<std::string, float> applied;
+    bool broken = false;  // a frame failed on it: users drop it, nobody new gets it
+};
+
+struct CachedChain {
+    // Presets without history (6 of the 7 bundled) keep no state between
+    // frames beyond their parameters, which apply_params sets every frame:
+    // one chain per (device, preset) then serves every CrtStage on that
+    // device, so a second instance neither recompiles the preset (~140 ms
+    // for glow_gauss at 1080p) nor holds its own copy (~70 MB CPU, ~20 MB
+    // GPU). Temporal presets (feedback / history) stay per stage.
+    std::shared_ptr<ChainBox> box;
     bool history = false;
     int64_t last_frame = -1000;
 };
+
+bool share_chains() {
+    static const bool on = [] {
+        const char *e = std::getenv("NTSCRT_SHARED_CHAINS");
+        return !(e && *e == '0');
+    }();
+    return on;
+}
+
+// Process-wide shared chains, by (device, preset). Weak: a chain goes with
+// its last user (before its device, which every user also holds). Never
+// destroyed itself, so nothing runs at static destruction.
+struct ChainRegistry {
+    std::mutex m;
+    std::map<std::pair<const gpu::Device *, std::string>, std::weak_ptr<ChainBox>> chains;
+};
+ChainRegistry &registry() {
+    static ChainRegistry *r = new ChainRegistry;
+    return *r;
+}
 
 }  // namespace
 
@@ -124,7 +158,8 @@ struct CrtStage::Impl {
 
     CachedChain &chain_for(const std::string &rel) {
         auto it = chains.find(rel);
-        if (it != chains.end()) return it->second;
+        if (it != chains.end() && !(it->second.box && it->second.box->broken)) return it->second;
+        if (it != chains.end()) chains.erase(it);  // broken by another user: get a new one
         ++attempts;
         std::string err;
         crt::Library *lib = crt::Library::load(resource_dir, err);
@@ -133,12 +168,31 @@ struct CrtStage::Impl {
         std::error_code ec;
         if (!fs::exists(p, ec)) throw MissingResource("shader preset missing: " + u8str(p));
         CachedChain c;
-        c.chain = lib->create_chain(*dev, u8str(p));
         c.history = uses_history(p);
+        auto make = [&] {
+            auto b = std::make_shared<ChainBox>();
+            b->chain = lib->create_chain(*dev, u8str(p));
+            return b;
+        };
+        if (!c.history && share_chains()) {
+            // Held while creating: concurrent first frames build a preset once.
+            ChainRegistry &r = registry();
+            std::lock_guard<std::mutex> lock(r.m);
+            for (auto e = r.chains.begin(); e != r.chains.end();)  // forget dead ones
+                e = e->second.expired() ? r.chains.erase(e) : std::next(e);
+            std::weak_ptr<ChainBox> &slot = r.chains[{dev, u8str(p)}];
+            c.box = slot.lock();
+            if (!c.box || c.box->broken) {
+                c.box = make();
+                slot = c.box;
+            }
+        } else {
+            c.box = make();
+        }
         return chains.emplace(rel, std::move(c)).first->second;
     }
 
-    void apply_params(CachedChain &c, const std::string &rel, const json &look_params) {
+    void apply_params(ChainBox &c, const std::string &rel, const json &look_params) {
         std::map<std::string, float> want;
         for (const auto &p : c.chain->params()) want[p.name] = p.initial;
         auto h = house_defaults().find(rel);
@@ -177,7 +231,11 @@ struct CrtStage::Impl {
                 if (dev->lost()) throw;
                 f = failed.emplace(id, Failure{NTSCRT_ERR_GPU, e.what()}).first;
             }
-            if (!rel.empty()) chains.erase(rel);  // half-built or broken: rebuilt after flush()
+            if (!rel.empty()) {  // half-built or broken: rebuilt after flush()
+                auto c = chains.find(rel);
+                if (c != chains.end() && c->second.box) c->second.box->broken = true;
+                chains.erase(rel);
+            }
         }
         fb_status = f->second.status;
         fb_reason = "CRT shader '" + id + "' unavailable, showing the picture without it: " + f->second.msg;
@@ -187,7 +245,11 @@ struct CrtStage::Impl {
     void shade(const gpu::Texture &in, gpu::Texture &target, const std::string &rel, const json &sh,
                const FrameContext &ctx) {
         CachedChain &c = chain_for(rel);
-        apply_params(c, rel, sh.contains("params") ? sh["params"] : json());
+        ChainBox &box = *c.box;
+        // A shared chain has one user at a time: its parameters and its frames
+        // go together (the chain's frame() takes this lock as well).
+        std::lock_guard<std::recursive_mutex> lock(dev->context_mutex());
+        apply_params(box, rel, sh.contains("params") ? sh["params"] : json());
         const auto frame_count = uint64_t(std::max<int64_t>(0, shader_frame(ctx)));
         const int tw = target.desc().width, th = target.desc().height;
         const int iw = in.desc().width, ih = in.desc().height;
@@ -210,10 +272,10 @@ struct CrtStage::Impl {
             // Non-sequential access to a temporal preset: prime the feedback
             // with this frame's input so the result doesn't depend on
             // whatever frame was rendered before.
-            c.chain->frame(in, *dst, frame_count ? frame_count - 1 : 0, true);
+            box.chain->frame(in, *dst, frame_count ? frame_count - 1 : 0, true);
             clear = false;
         }
-        c.chain->frame(in, *dst, frame_count, clear);
+        box.chain->frame(in, *dst, frame_count, clear);
         c.last_frame = int64_t(frame_count);
         if (integrate) downscale_encode(*dev, *dst, target, DownscaleMethod::Area, scratch);
         else if (dst != &target) dev->copy(*dst, target);

@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
 #include <wrl/client.h>
@@ -17,6 +18,7 @@
 #include <cstring>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -104,6 +106,8 @@ public:
     ComPtr<ID3D11ComputeShader> cs;
 };
 
+using Lock = std::lock_guard<std::recursive_mutex>;
+
 class D3D11Device final : public Device {
 public:
     D3D11Device(ComPtr<ID3D11Device> dev, bool warp) : dev_(std::move(dev)), warp_(warp) {
@@ -116,8 +120,16 @@ public:
         check(dev_->CreateSamplerState(&sd, &linear_), "CreateSamplerState");
         sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
         check(dev_->CreateSamplerState(&sd, &point_), "CreateSamplerState");
-        D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0};
-        check(dev_->CreateQuery(&qd, &event_), "CreateQuery");
+        give_query(take_query());
+        // D3D11.4 fence for finish(), when the runtime and driver have it.
+        ComPtr<ID3D11Device5> dev5;
+        ComPtr<ID3D11DeviceContext4> ctx4;
+        if (SUCCEEDED(dev_.As(&dev5)) && SUCCEEDED(ctx_.As(&ctx4)) &&
+            SUCCEEDED(dev5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_))) &&
+            !std::getenv("NTSCRT_D3D11_NO_FENCE"))
+            ctx4_ = ctx4;
+        else
+            fence_.Reset();
     }
 
     bool warp() const { return warp_; }
@@ -160,6 +172,7 @@ public:
 
     void upload(Texture &t, const void *data, ptrdiff_t row_bytes) override {
         auto &dt = as(t);
+        Lock lock(context_mutex());
         const int w = dt.d.width, h = dt.d.height, bpp = bytes_per_pixel(dt.d.format);
         const size_t tight = size_t(w) * bpp;
         if (row_bytes > 0 && !dt.swap_rb()) {
@@ -176,14 +189,32 @@ public:
         ctx_->UpdateSubresource(dt.tex.Get(), 0, nullptr, tmp.data(), UINT(tight), 0);
     }
 
+    // Copies into a staging texture of its own, waits for that copy (and
+    // everything before it) without holding the context lock, so threads
+    // sharing the device keep submitting meanwhile, then maps it.
     void download(const Texture &t, void *data, ptrdiff_t row_bytes) override {
         auto &dt = as(t);
         const int w = dt.d.width, h = dt.d.height, bpp = bytes_per_pixel(dt.d.format);
         const size_t tight = size_t(w) * bpp;
-        ID3D11Texture2D *staging = staging_for(dt);
-        ctx_->CopyResource(staging, dt.tex.Get());
+        Staging st = take_staging(dt);
+        ID3D11Texture2D *staging = st.tex.Get();
+        {
+            Lock lock(context_mutex());
+            ctx_->CopyResource(staging, dt.tex.Get());
+        }
+        try {
+            finish();
+        } catch (...) {
+            give_staging(std::move(st));
+            throw;
+        }
+        Lock lock(context_mutex());
         D3D11_MAPPED_SUBRESOURCE m{};
-        check(ctx_->Map(staging, 0, D3D11_MAP_READ, 0, &m), "Map(staging)");
+        HRESULT hr = ctx_->Map(staging, 0, D3D11_MAP_READ, 0, &m);
+        if (FAILED(hr)) {
+            give_staging(std::move(st));
+            check(hr, "Map(staging)");
+        }
         auto *dst = static_cast<uint8_t *>(data);
         ptrdiff_t stride = row_bytes ? row_bytes : ptrdiff_t(tight);
         for (int y = 0; y < h; ++y) {
@@ -193,11 +224,13 @@ public:
                 for (size_t i = 0; i < tight; i += 4) std::swap(row[i], row[i + 2]);
         }
         ctx_->Unmap(staging, 0);
+        give_staging(std::move(st));
     }
 
     void upload(Buffer &b, const void *data, size_t bytes, size_t offset) override {
         auto &db = static_cast<D3DBuffer &>(b);
         if (offset + bytes > db.bytes) throw std::runtime_error("buffer upload out of range");
+        Lock lock(context_mutex());
         if (!db.buf) {
             std::memcpy(db.shadow.data() + offset, data, bytes);
             return;
@@ -206,8 +239,10 @@ public:
         ctx_->UpdateSubresource(db.buf.Get(), 0, &box, data, 0, 0);
     }
 
+    // Compiled once per device: with a shared device, once per process.
     Kernel *kernel(std::string_view name) override {
         std::string key(name);
+        std::lock_guard<std::mutex> lock(kern_mu_);
         auto it = kernels_.find(key);
         if (it != kernels_.end()) return it->second.get();
         const ShaderFile *file = nullptr;
@@ -263,6 +298,7 @@ public:
                 uavs[8 + i] = db.uav.Get();
             }
 
+        Lock lock(context_mutex());  // the constant buffer and the bind-dispatch-unbind sequence
         ID3D11Buffer *cb = nullptr;
         if (b.constants && b.constants_size) {
             size_t need = std::max<size_t>(b.constants_size, e.cb_size);
@@ -304,6 +340,7 @@ public:
         auto &s = as(src);
         auto &d = as(dst);
         if (s.phys == d.phys) {
+            Lock lock(context_mutex());
             if (s.d.width == d.d.width && s.d.height == d.d.height) {
                 ctx_->CopyResource(d.tex.Get(), s.tex.Get());
             } else {
@@ -322,15 +359,57 @@ public:
         dispatch(kernel("gpu_builtin/copy"), b, int(p.w), int(p.h), 1);
     }
 
+    // Waits for everything submitted so far. With D3D11.4 fences: signal a
+    // fence value of its own and block on an event until the GPU reaches it
+    // (threads sharing the device each wait for their own point). Otherwise
+    // an event query of its own, polled with backoff (yield, then sleep).
+    // The context lock is held only to submit / poll, never while waiting.
     void finish() override {
-        ctx_->End(event_.Get());
-        ctx_->Flush();
-        BOOL done = FALSE;
-        while (ctx_->GetData(event_.Get(), &done, sizeof done, 0) == S_FALSE || !done) {
+        if (fence_) {
+            uint64_t v;
+            {
+                Lock lock(context_mutex());
+                v = ++fence_value_;
+                ctx4_->Signal(fence_.Get(), v);
+                ctx_->Flush();
+            }
+            if (fence_->GetCompletedValue() < v) {
+                HANDLE ev = wait_event();
+                check(fence_->SetEventOnCompletion(v, ev), "ID3D11Fence::SetEventOnCompletion");
+                // (re-checked: a registration left from an earlier, abandoned
+                // wait may set the event early)
+                while (fence_->GetCompletedValue() < v && dev_->GetDeviceRemovedReason() == S_OK)
+                    WaitForSingleObject(ev, 200);
+            }
             if (dev_->GetDeviceRemovedReason() != S_OK)
                 throw std::runtime_error(hr_msg("D3D11 device removed", dev_->GetDeviceRemovedReason()));
-            SwitchToThread();
+            return;
         }
+        ComPtr<ID3D11Query> q = take_query();
+        {
+            Lock lock(context_mutex());
+            ctx_->End(q.Get());
+            ctx_->Flush();
+        }
+        for (int polls = 0;; ++polls) {
+            BOOL done = FALSE;
+            HRESULT hr;
+            {
+                Lock lock(context_mutex());
+                // (not DONOTFLUSH: some drivers then never finish the query
+                // while other threads keep submitting)
+                hr = ctx_->GetData(q.Get(), &done, sizeof done, 0);
+            }
+            if (hr == S_OK && done) break;
+            if (FAILED(hr) || dev_->GetDeviceRemovedReason() != S_OK) {
+                HRESULT why = dev_->GetDeviceRemovedReason();
+                throw std::runtime_error(hr_msg("D3D11 device removed", why != S_OK ? why : hr));
+            }
+            if (polls < 64) SwitchToThread();
+            else if (polls < 256) Sleep(0);
+            else Sleep(1);
+        }
+        give_query(std::move(q));
     }
 
     bool lost() const override { return dev_->GetDeviceRemovedReason() != S_OK; }
@@ -397,6 +476,7 @@ private:
 public:
     // (Re)create a structured buffer with `stride`, keeping its contents.
     void ensure_stride(D3DBuffer &b, uint32_t stride) {
+        Lock lock(context_mutex());
         if (b.buf && b.stride == stride) return;
         size_t elems = (std::max<size_t>(b.bytes, 1) + stride - 1) / stride;
         D3D11_BUFFER_DESC bd{};
@@ -437,11 +517,42 @@ public:
 
 private:
 
-    ID3D11Texture2D *staging_for(const D3DTexture &t) {
+    ComPtr<ID3D11Query> take_query() {
+        {
+            std::lock_guard<std::mutex> lock(query_mu_);
+            if (!queries_.empty()) {
+                ComPtr<ID3D11Query> q = std::move(queries_.back());
+                queries_.pop_back();
+                return q;
+            }
+        }
+        D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0};
+        ComPtr<ID3D11Query> q;
+        check(dev_->CreateQuery(&qd, &q), "CreateQuery");
+        return q;
+    }
+    void give_query(ComPtr<ID3D11Query> q) {
+        std::lock_guard<std::mutex> lock(query_mu_);
+        if (queries_.size() < 16) queries_.push_back(std::move(q));
+    }
+
+    // Staging textures are checked out for one download (another thread's
+    // download may not reuse one between its copy and its map).
+    struct Staging {
+        std::tuple<int, int, int> key;
+        ComPtr<ID3D11Texture2D> tex;
+    };
+    Staging take_staging(const D3DTexture &t) {
         auto key = std::make_tuple(t.d.width, t.d.height, int(t.phys));
-        auto it = staging_.find(key);
-        if (it != staging_.end()) return it->second.Get();
-        if (staging_.size() > 8) staging_.clear();
+        {
+            std::lock_guard<std::mutex> lock(staging_mu_);
+            auto it = staging_.find(key);
+            if (it != staging_.end()) {
+                Staging s{key, std::move(it->second)};
+                staging_.erase(it);
+                return s;
+            }
+        }
         D3D11_TEXTURE2D_DESC td{};
         td.Width = UINT(t.d.width);
         td.Height = UINT(t.d.height);
@@ -451,9 +562,14 @@ private:
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_STAGING;
         td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        ComPtr<ID3D11Texture2D> s;
-        check(dev_->CreateTexture2D(&td, nullptr, &s), "CreateTexture2D(staging)");
-        return (staging_[key] = s).Get();
+        Staging s{key, nullptr};
+        check(dev_->CreateTexture2D(&td, nullptr, &s.tex), "CreateTexture2D(staging)");
+        return s;
+    }
+    void give_staging(Staging s) {
+        std::lock_guard<std::mutex> lock(staging_mu_);
+        if (staging_.size() >= 16) staging_.clear();  // sizes keep changing: start over
+        staging_.emplace(s.key, std::move(s.tex));
     }
 
     static pD3DCompile compile() {
@@ -469,12 +585,28 @@ private:
     ComPtr<ID3D11Device> dev_;
     ComPtr<ID3D11DeviceContext> ctx_;
     ComPtr<ID3D11SamplerState> linear_, point_;
-    ComPtr<ID3D11Query> event_;
+    ComPtr<ID3D11DeviceContext4> ctx4_;
+    ComPtr<ID3D11Fence> fence_;
+    uint64_t fence_value_ = 0;  // last signalled (context lock)
+    // One auto-reset event per waiting thread, kept for the thread's life.
+    static HANDLE wait_event() {
+        struct Ev {
+            HANDLE h = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            ~Ev() { if (h) CloseHandle(h); }
+        };
+        thread_local Ev e;
+        if (!e.h) throw std::runtime_error("CreateEvent failed");
+        return e.h;
+    }
+    std::mutex query_mu_;
+    std::vector<ComPtr<ID3D11Query>> queries_;  // idle event queries for finish()
+    std::mutex kern_mu_;                         // kernels_
     ComPtr<ID3D11Buffer> cb_;
     size_t cb_size_ = 0;
     bool warp_ = false;
     std::unordered_map<std::string, std::unique_ptr<D3DKernel>> kernels_;
-    std::map<std::tuple<int, int, int>, ComPtr<ID3D11Texture2D>> staging_;
+    std::mutex staging_mu_;
+    std::multimap<std::tuple<int, int, int>, ComPtr<ID3D11Texture2D>> staging_;  // idle ones
     ID3D11ShaderResourceView *null_srvs_[16] = {};
     ID3D11UnorderedAccessView *null_uavs_[16] = {};
 };
