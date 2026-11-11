@@ -397,6 +397,54 @@
     {
      "value": "Custom",
      "label": "Custom"
+    },
+    {
+     "value": "Webcam (2005) (320px)",
+     "label": "Webcam (2005) (320px)",
+     "applies": {
+      "/downscale/width": 320
+     },
+     "hint": "Set by the Digital video format Webcam (2005)."
+    },
+    {
+     "value": "Video call (320px)",
+     "label": "Video call (320px)",
+     "applies": {
+      "/downscale/width": 320
+     },
+     "hint": "Set by the Digital video format Video call."
+    },
+    {
+     "value": "MiniDV (720px)",
+     "label": "MiniDV (720px)",
+     "applies": {
+      "/downscale/width": 720
+     },
+     "hint": "Set by the Digital video format MiniDV."
+    },
+    {
+     "value": "Early web video (320px)",
+     "label": "Early web video (320px)",
+     "applies": {
+      "/downscale/width": 320
+     },
+     "hint": "Set by the Digital video format Early web video."
+    },
+    {
+     "value": "CD-ROM (Video 1) (240px)",
+     "label": "CD-ROM (Video 1) (240px)",
+     "applies": {
+      "/downscale/width": 240
+     },
+     "hint": "Set by the Digital video format CD-ROM (Video 1)."
+    },
+    {
+     "value": "Datamosh (480px)",
+     "label": "Datamosh (480px)",
+     "applies": {
+      "/downscale/width": 480
+     },
+     "hint": "Set by the Digital video format Datamosh."
     }
    ],
    "path": "/downscale/preset",

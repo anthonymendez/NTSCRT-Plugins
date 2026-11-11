@@ -843,6 +843,15 @@ def main():
         gen_crop(S, up)
         gen_downscale(S, up)
         n_digital, n_formats = gen_digital(S, up, extra)
+        # A Digital video format names the Downscale preset after itself ("MiniDV
+        # (720px)", upstream applyDigitalFormat): offer those labels too, appended
+        # after "Custom" (options are append-only), so a look with one keeps it.
+        ds = next(p for p in S.params if p["id"] == "downscale.preset")
+        for f in extra.get("digital_formats", []):
+            label = f["applies"]["/downscale/preset"]
+            if all(o["value"] != label for o in ds["options"]):
+                ds["options"].append({"value": label, "label": label, "applies": {"/downscale/width": f["width"]},
+                                      "hint": f"Set by the Digital video format {f['name']}."})
         gen_ntsc(S, up, dump)
         n_glitch = gen_glitch(S, up)
         crt = gen_crt(S, up, src)
