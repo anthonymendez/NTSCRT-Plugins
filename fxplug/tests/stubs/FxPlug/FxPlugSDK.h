@@ -18,6 +18,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceObjC.h>  // the IOSurface class (FxImageTile.ioSurface)
 #import <Metal/Metal.h>
 
 NS_ASSUME_NONNULL_BEGIN

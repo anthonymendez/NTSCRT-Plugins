@@ -967,7 +967,7 @@ static std::optional<RenderState> ParseState(NSData *d) {
     return RenderState::parse(std::string((const char *)d.bytes, d.length));
 }
 
-- (BOOL)scheduleInputs:(NSArray *_Nullable *_Nullable)inputImageRequests
+- (BOOL)scheduleInputs:(NSArray<FxImageTileRequest *> *_Nullable *_Nullable)inputImageRequests
        withPluginState:(NSData *)pluginState
                 atTime:(CMTime)renderTime
                  error:(NSError **)error {
