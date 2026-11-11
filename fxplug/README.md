@@ -170,6 +170,14 @@ exactly this. This project avoids every likely cause we know of:
   times are independent and that `startTimeForEffect:` is relative to the clip's
   native start, but not which base `renderTime` uses; with *Debug Logging* on the
   log prints the raw times (`debug state ...`) to check this.
+- Animated presets (upstream `timeline` keys) become keyframes: every look parameter's keyframes
+  are removed (`removeAllKeyframesForParameter:andChannel:`), then for each key the code adds a
+  keyframe (`addKeyframe:toParameter:andChannel:`, which carries no value) and sets the value at
+  that time with `set…Value:toParameter:atTime:`, from `startTimeForEffect:` one frame
+  (`timelineFps…`) apart for `durationTimeForEffect:`. That a set at a keyframe's time updates
+  that keyframe, and that `startTimeForEffect:` is in the base `atTime:` expects, are assumptions.
+  The Preset menu also lists the Digital video formats; Horizontal resolution and the other
+  choices with `applies` write their values, and a hand edit demotes them to *Custom*.
 - One plug-in object per effect instance: per-instance render history relies on it
   (Apple documents `addParametersWithError:` and `properties:` per instance, not the
   object's lifetime).

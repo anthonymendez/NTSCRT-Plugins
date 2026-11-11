@@ -76,7 +76,8 @@ void LogLine(const std::string &msg, bool also_nslog = true) {
 
 struct Shared {
     Model model;
-    std::vector<Preset> looks, loops;  // bundled look / Screen Loop presets
+    std::vector<MenuPreset> menu;  // look Preset menu (Model::look_menu: bundled looks, then Digital formats)
+    std::vector<Preset> loops;     // bundled Screen Loop presets
     std::string resource_dir;
 };
 
@@ -114,11 +115,11 @@ const Shared &GetShared() {
         if (ntscrt_create(&ci, &meta) == NTSCRT_OK && meta) {
             json arr = json::parse(ntscrt_bundled_presets_json(meta), nullptr, false);
             if (arr.is_array()) {
-                for (auto &p : arr) {
-                    Preset pr{p.value("name", std::string("?")), p.value("json", json::object())};
-                    (p.value("kind", std::string("look")) == "feedback" ? sh->loops : sh->looks).push_back(std::move(pr));
-                }
+                for (auto &p : arr)
+                    if (p.value("kind", std::string("look")) == "feedback")
+                        sh->loops.push_back({p.value("name", std::string("?")), p.value("json", json::object())});
             }
+            sh->menu = sh->model.look_menu(arr.is_array() ? arr : json::array());
             ntscrt_destroy(meta);
         }
         return sh;
@@ -403,7 +404,7 @@ NSError *MakeError(NSInteger code, NSString *msg) {
     ok &= [api startParameterSubGroup:@"NTSCRT" parameterID:kTopGroup parameterFlags:PF(kFxParameterFlag_DEFAULT)];
     ok &= [api startParameterSubGroup:@"Preset & timing" parameterID:kExtrasGroup parameterFlags:PF(kFxParameterFlag_DEFAULT)];
     NSMutableArray *looks = [NSMutableArray arrayWithObject:@"(Custom)"];
-    for (const auto &p : sh.looks) [looks addObject:@(p.name.c_str())];
+    for (const auto &p : sh.menu) [looks addObject:@(p.name.c_str())];
     ok &= [api addPopupMenuWithName:@"Preset" parameterID:kPresetMenu defaultValue:0 menuEntries:looks parameterFlags:fixed];
     ok &= [api addPushButtonWithName:@"Load Preset…" parameterID:kLoadPreset selector:@selector(loadPresetPressed) parameterFlags:PF(kFxParameterFlag_DEFAULT)];
     ok &= [api addPushButtonWithName:@"Save Preset…" parameterID:kSavePreset selector:@selector(savePresetPressed) parameterFlags:PF(kFxParameterFlag_DEFAULT)];
@@ -452,7 +453,7 @@ NSError *MakeError(NSInteger code, NSString *msg) {
             NSMutableArray *entries = [NSMutableArray array];
             for (const auto &o : p.options) [entries addObject:@(o.label.c_str())];
             ok &= [api addPopupMenuWithName:name parameterID:p.host_id defaultValue:UInt32(d.get<int64_t>())
-                                menuEntries:entries parameterFlags:PF(bits | uint32_t(kFxParameterFlag_NOT_ANIMATABLE))];
+                                menuEntries:entries parameterFlags:flags];  // keyable when the schema says so
             break;
         }
         case Kind::Color:
@@ -566,8 +567,11 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     const Model &m = GetShared().model;
     _applying = YES;
     [set setStringParameterValue:@(preset.dump().c_str()) toParameter:feedback ? kBaseFeedback : kBaseLook];
-    for (const auto &[id, v] : m.host_values_from_preset(preset, feedback)) {
-        if (const Param *p = m.find_host(id)) SetHostValue(set, *p, v, t);
+    if (feedback) {
+        for (const auto &[id, v] : m.host_values_from_preset(preset, true))
+            if (const Param *p = m.find_host(id)) SetHostValue(set, *p, v, t);
+    } else {
+        [self applyLookPreset:preset atTime:t];
     }
     if (feedback) {
         // Bundled Screen Loop files have no "enabled" (upstream only saves loops that are on), so
@@ -580,6 +584,125 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     _applying = NO;
     _state->generation.fetch_add(1);
     _state->flush(feedback ? NTSCRT_CACHE_SCREENLOOP : (NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE));
+}
+
+// The effect's timing: host frame rate, one frame, its first frame and length in frames
+// (0 = unknown), from FxTimingAPI_v4. Keyframe times use startTimeForEffect's base, which is
+// assumed to be the one set*Value:atTime: takes (unverified, see README).
+- (void)effectFps:(double *)fps frame:(CMTime *)frameDur start:(CMTime *)start frames:(int64_t *)frames {
+    *fps = 30.0;
+    *frameDur = CMTimeMake(1, 30);
+    *start = kCMTimeZero;
+    *frames = 0;
+    id<FxTimingAPI_v4> timing = [_apiManager apiForProtocol:@protocol(FxTimingAPI_v4)];
+    if (!timing) return;
+    const NSUInteger num = [timing timelineFpsNumeratorForEffect:self], den = [timing timelineFpsDenominatorForEffect:self];
+    if (num > 0 && den > 0) {
+        *fps = double(num) / double(den);
+        *frameDur = CMTimeMake(int64_t(den), int32_t(num));
+    }
+    [timing startTimeForEffect:start];
+    CMTime dur = kCMTimeZero;
+    [timing durationTimeForEffect:&dur];
+    if (CMTIME_IS_NUMERIC(dur) && CMTimeGetSeconds(dur) > 0)
+        *frames = int64_t(std::llround(CMTimeGetSeconds(dur) * *fps));
+}
+
+// A look preset replaces the look: every look parameter presets set loses its keyframes; an
+// animated preset (upstream timeline keys, Model::preset_keys) then gets host keyframes from the
+// effect's first frame, one pass after another until the effect ends (at most kMaxKeyedFrames).
+// FxKeyframeAPI_v3's addKeyframe carries no value: a keyframe is added at the time, then the
+// value is set there. Called under _applying.
+- (void)applyLookPreset:(const json &)preset atTime:(CMTime)t {
+    id<FxParameterSettingAPI_v5> set = [_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
+    id<FxKeyframeAPI_v3> keys = [_apiManager apiForProtocol:@protocol(FxKeyframeAPI_v3)];
+    const Model &m = GetShared().model;
+    auto channels = [&](const Param &p) -> NSUInteger {
+        NSUInteger c = p.kind == Kind::Color ? 3 : 1;
+        if (keys) {
+            NSUInteger n = 0;
+            if ([keys channelCount:&n forParameter:p.host_id] == nil && n > 0) c = n;
+        }
+        return c;
+    };
+    if (keys) {
+        for (const Param &p : m.params) {
+            if (p.feedback || !p.in_presets || !p.animatable) continue;
+            for (NSUInteger c = 0, n = channels(p); c < n; ++c) [keys removeAllKeyframesForParameter:p.host_id andChannel:c];
+        }
+    }
+    double fps = 30;
+    CMTime fd = CMTimeMake(1, 30), start = kCMTimeZero;
+    int64_t frames = 0;
+    [self effectFps:&fps frame:&fd start:&start frames:&frames];
+    const PresetKeys pk = m.preset_keys(preset, fps, frames);
+    if (!pk.animated() || !keys) {
+        for (const auto &[id, v] : m.host_values_from_preset(preset, false))
+            if (const Param *p = m.find_host(id)) SetHostValue(set, *p, v, t);
+        if (pk.animated()) LogLine("animated preset applied without keyframes: FxKeyframeAPI_v3 unavailable");
+        return;
+    }
+    size_t keyed = 0;
+    for (const auto &[id, entries] : pk.keys) {
+        const Param *p = m.find_host(id);
+        if (!p || entries.empty()) continue;
+        if (entries.size() == 1) {  // holds still: a value, no keyframes
+            SetHostValue(set, *p, entries.front().second, t);
+            continue;
+        }
+        const bool stepped = p->kind == Kind::Bool || p->kind == Kind::Choice;
+        const NSUInteger nch = channels(*p);
+        for (const auto &[n, v] : entries) {
+            const CMTime tk = CMTimeAdd(start, CMTimeMultiply(fd, int32_t(n)));
+            FxKeyframe k{};
+            k.version = kFxKeyframe_CurrentVersion;
+            k.time = tk;
+            k.segmentStyle = stepped ? kFxKeyframeSegmentStyle_Constant : kFxKeyframeSegmentStyle_Linear;
+            for (NSUInteger c = 0; c < nch; ++c) [keys addKeyframe:&k toParameter:p->host_id andChannel:c];
+            SetHostValue(set, *p, v, tk);
+            ++keyed;
+        }
+    }
+    std::ostringstream o;
+    o << "animated preset: " << pk.pass << " frames per pass, " << pk.frames << " frames keyed, " << keyed << " keyframes";
+    LogLine(o.str(), false);
+}
+
+// Writes host values (a Digital video format, a choice option's "applies") at time t.
+- (void)applyHostValues:(const std::map<uint32_t, json> &)vals atTime:(CMTime)t {
+    if (vals.empty()) return;
+    id<FxParameterSettingAPI_v5> set = [_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
+    if (!set) return;
+    const Model &m = GetShared().model;
+    const BOOL was = _applying;
+    _applying = YES;
+    for (const auto &[id, v] : vals)
+        if (const Param *p = m.find_host(id)) SetHostValue(set, *p, v, t);
+    _applying = was;
+    _state->generation.fetch_add(1);
+    _state->flush(NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
+}
+
+// A user edit of schema parameter `pid`: a choice option with "applies" writes its values
+// (Horizontal resolution sets the Width); a hand edit of a value a chosen option set demotes
+// that choice to the option that sets nothing ("Custom"). Mirrors the OpenFX plug-in.
+- (void)applyChoiceEffectsOf:(UInt32)pid atTime:(CMTime)t {
+    id<FxParameterRetrievalAPI_v6> get = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
+    if (!get) return;
+    const Model &m = GetShared().model;
+    const Param *edited = m.find_host(pid);
+    if (!edited) return;
+    const json ev = GetHostValue(get, m, *edited, t);
+    if (edited->kind == Kind::Choice) [self applyHostValues:m.option_host_values(*edited, ev) atTime:t];
+    std::map<uint32_t, json> demote;
+    for (const Param &c : m.params) {
+        if (&c == edited || c.kind != Kind::Choice) continue;
+        bool has = false;
+        for (const auto &o : c.options) has |= !o.applies.is_null();
+        if (!has) continue;
+        if (auto d = m.demoted_choice(c, GetHostValue(get, m, c, t), *edited, ev)) demote[c.host_id] = *d;
+    }
+    [self applyHostValues:demote atTime:t];
 }
 
 // Does host parameter `pid` have keyframes (FxKeyframeAPI_v3, channel 0)? Unknown = yes.
@@ -598,7 +721,7 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     if (!keys) return ~uint64_t(0);
     uint64_t sig = 0;
     for (const Param &p : GetShared().model.params) {
-        if (!p.animatable || p.kind == Kind::Choice) continue;  // popups are created NOT_ANIMATABLE
+        if (!p.animatable) continue;  // created NOT_ANIMATABLE
         NSUInteger n = 0;
         if ([keys keyframeCount:&n forParameter:p.host_id andChannel:0] != nil) return ~uint64_t(0);
         if (n) sig = (sig ^ (uint64_t(p.host_id) << 32 | uint32_t(n))) * 0x100000001B3ull + 1;
@@ -629,10 +752,16 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     const Shared &sh = GetShared();
     if (get && paramID == kPresetMenu) {
         int idx = GetInt(get, kPresetMenu, time, 0);
-        if (idx >= 1 && size_t(idx) <= sh.looks.size()) [self applyPreset:sh.looks[size_t(idx - 1)].data feedback:false atTime:time];
+        if (idx >= 1 && size_t(idx) <= sh.menu.size()) {
+            const MenuPreset &mp = sh.menu[size_t(idx - 1)];
+            if (mp.format) [self applyHostValues:sh.model.applies_host_values(mp.data) atTime:time];  // base look unchanged
+            else [self applyPreset:mp.data feedback:false atTime:time];
+        }
     } else if (get && paramID == kScreenLoopMenu) {
         int idx = GetInt(get, kScreenLoopMenu, time, 0);
         if (idx >= 2 && size_t(idx - 2) < sh.loops.size()) [self applyPreset:sh.loops[size_t(idx - 2)].data feedback:true atTime:time];
+    } else if (sh.model.find_host(paramID)) {
+        [self applyChoiceEffectsOf:paramID atTime:time];
     }
     [self updateParameterStatesAtTime:time];
     return YES;
@@ -660,10 +789,14 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
         [action startAction:strongSelf];
         CMTime t = [action currentTime];
         [strongSelf applyPreset:j feedback:fb atTime:t];
+        const bool with_loop = !fb && j.contains("screen_loop") && j["screen_loop"].is_object() &&
+                               j["screen_loop"].value("kind", std::string()) == "ntscrt-video-feedback";
+        if (with_loop) [strongSelf applyPreset:j["screen_loop"] feedback:true atTime:t];
         id<FxParameterSettingAPI_v5> set = [strongSelf->_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
         strongSelf->_applying = YES;
         if (fb) [set setIntValue:1 toParameter:kScreenLoopMenu atTime:t];  // "(Custom)" = on, base from file
         else [set setIntValue:0 toParameter:kPresetMenu atTime:t];          // "(Custom)"
+        if (with_loop) [set setIntValue:1 toParameter:kScreenLoopMenu atTime:t];
         strongSelf->_applying = NO;
         [strongSelf updateParameterStatesAtTime:t];
         [action endAction:strongSelf];
@@ -676,7 +809,9 @@ static Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     if (!action || !get) return;
     // Host called us: the parameter APIs are valid right now.
     Built b = BuildAt(get, [action currentTime]);
-    std::string look = b.look.dump(2);
+    json saved = b.look;
+    if (b.feedback) saved["screen_loop"] = *b.feedback;  // Load applies it (upstream ignores the key)
+    std::string look = saved.dump(2);
     std::string loop = b.feedback ? b.feedback->dump(2) : std::string();
     dispatch_async(dispatch_get_main_queue(), ^{
         NSSavePanel *panel = [NSSavePanel savePanel];

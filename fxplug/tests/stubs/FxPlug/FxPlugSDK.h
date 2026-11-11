@@ -195,9 +195,23 @@ extern NSString *FxPlugErrorDomain;
 - (NSUInteger)timelineFpsDenominatorForEffect:(id<FxTileableEffect>)effect;
 @end
 
+typedef NS_ENUM(NSUInteger, FxKeyframeSegmentStyle) {  // values: placeholders
+    kFxKeyframeSegmentStyle_Constant = 0,
+    kFxKeyframeSegmentStyle_Linear = 1,
+};
+#define kFxKeyframe_CurrentVersion 3  // value: placeholder
+typedef struct FxKeyframe {
+    NSUInteger version;
+    CMTime time;
+    FxKeyframeSegmentStyle segmentStyle;
+    double inTangentX, inTangentY, outTangentX, outTangentY;
+} FxKeyframe;
+
 @protocol FxKeyframeAPI_v3 <NSObject>
 - (nullable NSError *)keyframeCount:(NSUInteger *)count forParameter:(NSUInteger)parameterID andChannel:(NSUInteger)channelIndex;
 - (nullable NSError *)channelCount:(NSUInteger *)count forParameter:(NSUInteger)parameterID;
+- (nullable NSError *)addKeyframe:(const FxKeyframe *)keyframe toParameter:(NSUInteger)parameterID andChannel:(NSUInteger)channelIndex;
+- (nullable NSError *)removeAllKeyframesForParameter:(NSUInteger)parameterID andChannel:(NSUInteger)channelIndex;
 @end
 
 // ---- the XPC service principal ------------------------------------------------------------------
