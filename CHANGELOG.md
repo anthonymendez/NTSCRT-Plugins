@@ -142,6 +142,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   unwritten.
 - The plug-in no longer risks hanging when the host unloads it: the Digital video worker threads are
   stopped when the last NTSCRT instance is deleted, never during unload.
+- A NaN alpha in a 16-bit float or 32-bit float source now counts as transparent instead of coming back as an
+  infinite alpha (and infinite colour when premultiplied).
 
 ## [0.4.0] - 2026-11-10
 

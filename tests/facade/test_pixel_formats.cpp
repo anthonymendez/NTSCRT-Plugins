@@ -159,11 +159,9 @@ TEST_CASE("RGBA16F: NaN, infinities, negatives and > 1 come out finite and in ra
     check_specials(false);  // NaN in colour, every special but NaN in alpha
 }
 
-// Known bug (core/src/pixel_convert.cpp): to_bgra8 keeps a NaN source alpha
-// (std::clamp passes NaN through) and float_to_half turns it into +/-inf, so a
-// NaN alpha from the host comes back as an infinite alpha (and infinite colour
-// when premultiplied). may_fail until the conversion maps NaN alpha to 0.
-TEST_CASE("RGBA16F: a NaN alpha comes out finite" * doctest::may_fail()) {
+// to_bgra8 maps a NaN source alpha to 0 (transparent): it used to keep it
+// (std::clamp passes NaN through), which came back as an infinite alpha.
+TEST_CASE("RGBA16F: a NaN alpha comes out finite") {
     check_specials(true);
 }
 

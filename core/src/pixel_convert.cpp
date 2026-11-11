@@ -17,6 +17,8 @@ inline uint32_t round_unit(float v, float max) {
     if (v >= 1.f) return uint32_t(max);
     return uint32_t(double(v * max) + 0.5);
 }
+// Source alpha to 0..1; NaN counts as transparent (std::clamp lets NaN through).
+inline float unit_alpha(float a) { return a > 0.f ? (a < 1.f ? a : 1.f) : 0.f; }
 inline uint8_t q8(float v) { return uint8_t(round_unit(v, 255.0f)); }
 inline uint16_t q16(float v) { return uint16_t(round_unit(v, 65535.0f)); }
 
@@ -123,7 +125,7 @@ void to_bgra8(const ntscrt_image &src, ImageBGRA8 &out, std::vector<float> *alph
             for (int x = 0; x < src.width; ++x) {
                 float v[4];
                 read_px<F>(row, x, v);
-                const float a = std::clamp(v[3], 0.f, 1.f);
+                const float a = unit_alpha(v[3]);
                 if (mode == AlphaMode::Clip) {
                     // straight colour: what the element looks like on its own
                     if (src_premult && a > kTransparent && a < 1.f)
@@ -151,7 +153,7 @@ void to_bgra8(const ntscrt_image &src, ImageBGRA8 &out, std::vector<float> *alph
             for (int x = 0; x < src.width; ++x) {
                 float v[4];
                 read_px<F>(row, x, v);
-                dst[x] = std::clamp(v[3], 0.f, 1.f);
+                dst[x] = unit_alpha(v[3]);
             }
         });
     });

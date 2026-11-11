@@ -5,7 +5,9 @@
 #include <doctest/doctest.h>
 #include <ntscrt/ntscrt.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -74,14 +76,28 @@ std::vector<uint8_t> render(ntscrt_instance *inst, Clip &clip, int64_t frame, co
     ntscrt_image dst{clip.w, clip.h, ptrdiff_t(clip.w) * 4, NTSCRT_RGBA8, px.data()};
     ntscrt_status st = ntscrt_render_cpu(inst, &a, &src, &dst);
     if (st_out) *st_out = st;
-    else CHECK_MESSAGE(st == NTSCRT_OK, "frame " << frame << " look " << look << ": " << ntscrt_last_error(inst));
+    else CHECK_MESSAGE(st == NTSCRT_OK, "frame " << frame << " look " << look << ": " << std::string(ntscrt_last_error(inst)));
     return px;
 }
 
 // Looks for the instances: shared glow chain with different params, the
 // temporal crtsim (own chain per instance), the bypass, and a Digital look.
+// GitHub's macOS runners: Apple's paravirtual GPU hangs on crt-sim
+// (kIOGPUCommandBufferCallbackErrorHang), even on a lone instance in one
+// thread, and then ignores every later submission from the process
+// (SubmissionsIgnored). Seen in CI; same policy as tests/crt and tests/ofx:
+// only there is crt-sim left out. Everywhere else the test is strict.
+bool ci_virtual_gpu() {
+#ifdef __APPLE__
+    const char *gha = std::getenv("GITHUB_ACTIONS");
+    return gha && std::string(gha) == "true";
+#else
+    return false;
+#endif
+}
+
 std::vector<std::string> looks() {
-    return {
+    std::vector<std::string> l = {
         R"({"shader":{"enabled":true,"preset":"glow_gauss"}})",
         R"({"shader":{"enabled":true,"preset":"glow_gauss","params":{"BOOST":1.4,"CURVATURE":1.0}}})",
         R"({"shader":{"enabled":true,"preset":"sim"}})",
@@ -89,6 +105,12 @@ std::vector<std::string> looks() {
         R"({"shader":{"enabled":false}})",
         R"({"shader":{"enabled":true,"preset":"glow_gauss","params":{"BOOST":0.8}},"digital":{"enabled":true}})",
     };
+    if (ci_virtual_gpu()) {
+        MESSAGE("WARNING: macOS CI runner: crt-sim left out (it hangs the virtual GPU)");
+        l.erase(std::remove_if(l.begin(), l.end(), [](const std::string &s) { return s.find("\"sim\"") != std::string::npos; }),
+                l.end());
+    }
+    return l;
 }
 
 bool has_gpu(ntscrt_instance *inst) { return testing::stats(inst).has_gpu; }
