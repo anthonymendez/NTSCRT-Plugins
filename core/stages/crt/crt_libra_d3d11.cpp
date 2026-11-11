@@ -5,6 +5,9 @@
 #define LIBRA_RUNTIME_D3D11
 #include <librashader.h>
 
+#include <wrl/client.h>
+
+#include <mutex>
 #include <stdexcept>
 
 #include "../../gpu/d3d11/d3d11_interop.h"
@@ -22,18 +25,43 @@ public:
         set_param_ =
             reinterpret_cast<PFN_libra_d3d11_filter_chain_set_param>(lib.sym("libra_d3d11_filter_chain_set_param"));
         free_ = reinterpret_cast<PFN_libra_d3d11_filter_chain_free>(lib.sym("libra_d3d11_filter_chain_free"));
+        auto create_deferred = reinterpret_cast<PFN_libra_d3d11_filter_chain_create_deferred>(
+            lib.sym("libra_d3d11_filter_chain_create_deferred"));
         if (!create_ || !frame_ || !set_param_ || !free_)
             throw std::runtime_error("librashader at " + lib.path + " lacks the D3D11 runtime");
         void *preset = lib.open_preset(preset_path, params_);
         libra_shader_preset_t p = static_cast<libra_shader_preset_t>(preset);
         auto *device = static_cast<ID3D11Device *>(dev.native_device());
-        if (libra_error_t e = create_(&p, device, nullptr, &chain_)) {
-            lib.free_preset(p);
-            throw std::runtime_error("librashader d3d11_filter_chain_create(" + preset_path + "): " + lib.take_error(e));
+        // Compiling a preset takes long (up to a second): record its GPU-side
+        // setup (lookup textures) on a deferred context so threads sharing the
+        // device keep rendering meanwhile; only the replay takes the lock.
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> deferred;
+        if (create_deferred && SUCCEEDED(device->CreateDeferredContext(0, &deferred))) {
+            if (libra_error_t e = create_deferred(&p, device, deferred.Get(), nullptr, &chain_)) {
+                lib.free_preset(p);
+                throw std::runtime_error("librashader d3d11_filter_chain_create_deferred(" + preset_path +
+                                         "): " + lib.take_error(e));
+            }
+            Microsoft::WRL::ComPtr<ID3D11CommandList> list;
+            HRESULT hr = deferred->FinishCommandList(FALSE, &list);
+            if (FAILED(hr)) {
+                free_(&chain_);
+                throw std::runtime_error("librashader: FinishCommandList failed");
+            }
+            std::lock_guard<std::recursive_mutex> lock(dev.context_mutex());
+            static_cast<ID3D11DeviceContext *>(dev.native_context())->ExecuteCommandList(list.Get(), FALSE);
+        } else {
+            std::lock_guard<std::recursive_mutex> lock(dev.context_mutex());
+            if (libra_error_t e = create_(&p, device, nullptr, &chain_)) {
+                lib.free_preset(p);
+                throw std::runtime_error("librashader d3d11_filter_chain_create(" + preset_path +
+                                         "): " + lib.take_error(e));
+            }
         }
         // create consumes the preset on success.
     }
     ~D3D11Chain() override {
+        std::lock_guard<std::recursive_mutex> lock(dev_.context_mutex());
         if (chain_) free_(&chain_);
     }
 
@@ -49,6 +77,7 @@ public:
         opt.total_subframes = 1;
         opt.current_subframe = 1;
         opt.frames_per_second = 1.f;
+        std::lock_guard<std::recursive_mutex> lock(dev_.context_mutex());  // librashader drives the context
         auto *ctx = static_cast<ID3D11DeviceContext *>(dev_.native_context());
         if (libra_error_t e = frame_(&chain_, ctx, size_t(frame_count), srv, rtv, &vp, nullptr,
                                      clear_history ? &opt : nullptr))

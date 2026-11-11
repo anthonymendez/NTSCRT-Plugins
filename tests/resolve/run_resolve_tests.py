@@ -19,6 +19,7 @@ Tests (see README.md next to this file):
             ntscrt-cli --timeline (the preset's keys played per frame) and not the frozen look;
             Horizontal resolution and a Digital video format set what they apply
   depth     8-bit int / 16-bit int / 16-bit float / 32-bit float sources give the same result
+  precision float projects keep the CRT output finer than 8 bits (a graded ramp isn't banded)
   sizes     odd and portrait sizes render at the right size
   speed     ms per frame at 1920x1080 for every CRT preset (informational)
   debug     "Debug logging" logs every frame (and doesn't change the picture); "Open logs folder"
@@ -128,6 +129,47 @@ def read_png(path):
             rgba[c::4] = px8
         rgba[3::4] = b"\xff" * n
     return Image(w, h, rgba)
+
+
+def read_png_channel16(path, c):
+    """Channel `c` of a 16-bit RGB / RGBA PNG at full precision (0..65535)."""
+    data = Path(path).read_bytes()
+    pos, idat, ihdr = 8, [], None
+    while pos < len(data):
+        (ln,) = struct.unpack(">I", data[pos:pos + 4])
+        typ, body = data[pos + 4:pos + 8], data[pos + 8:pos + 8 + ln]
+        pos += 12 + ln
+        if typ == b"IHDR":
+            ihdr = struct.unpack(">IIBBBBB", body)
+        elif typ == b"IDAT":
+            idat.append(body)
+    w, h, bd, ct, _, _, interlace = ihdr
+    if bd != 16 or ct not in (2, 6) or interlace:
+        raise ValueError(f"{path}: not a 16-bit RGB(A) PNG (type {ct}, depth {bd})")
+    bpp = (3 if ct == 2 else 4) * 2
+    stride = w * bpp
+    raw = zlib.decompress(b"".join(idat))
+    prev, out, i = bytearray(stride), [], 0
+    for _ in range(h):
+        f, line = raw[i], bytearray(raw[i + 1:i + 1 + stride])
+        i += 1 + stride
+        for x in range(stride):
+            a = line[x - bpp] if x >= bpp else 0
+            b = prev[x]
+            cc = prev[x - bpp] if x >= bpp else 0
+            if f == 1:
+                line[x] = (line[x] + a) & 255
+            elif f == 2:
+                line[x] = (line[x] + b) & 255
+            elif f == 3:
+                line[x] = (line[x] + ((a + b) >> 1)) & 255
+            elif f == 4:
+                p = a + b - cc
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - cc)
+                line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else cc)) & 255
+        out.extend((line[k] << 8) | line[k + 1] for k in range(c * 2, stride, bpp))
+        prev = line
+    return out
 
 
 def write_png(path, img):
@@ -403,7 +445,7 @@ class Suite:
         comp = retry(lambda: item.GetFusionCompByIndex(1), "get the Fusion composition")
         return Fu(self, comp, tl), item
 
-    def render_timeline(self, tl, frames, tag):
+    def render_timeline(self, tl, frames, tag, codec="RGB8"):
         """Render frames of `tl` (offsets from its start) to PNG through the render queue.
         frames: list (one job per frame, in that order) or inclusive (a, b) tuple (one job).
         Returns {frame: path}, files renamed to <tag>-<frame:04d>.png."""
@@ -413,7 +455,7 @@ class Suite:
         out = {}
         for a, b in ranges:
             custom = f"{tag}-r{a}-"
-            retry(lambda: self.p.SetCurrentRenderFormatAndCodec("png", "RGB8"), "set the render format")
+            retry(lambda: self.p.SetCurrentRenderFormatAndCodec("png", codec), "set the render format")
             retry(lambda: self.p.SetRenderSettings({
                 "SelectAllFrames": False, "MarkIn": start + a, "MarkOut": start + b, "TargetDir": str(self.out),
                 "CustomName": custom, "FormatWidth": W, "FormatHeight": H}), "set render settings")
@@ -793,6 +835,41 @@ class Suite:
                 problems.append(f"{label} differs from float32 (mean {s['mean']})")
         self.record("depth", "fail" if problems else "pass", m, "; ".join(problems))
 
+    def t_precision(self):
+        """Float projects keep the CRT shader's output finer than 8 bits. A ramp through Glow (Gauss) at
+        180 lines (so the scanline profile varies smoothly) is delivered as a 16-bit PNG: from an int8
+        project every value is k*257 (an 8-bit level), from float32 / float16 projects most aren't."""
+        codecs = self.p.GetRenderCodecs("png") or {}
+        codec = next((c for c in codecs.values() if "16" in str(c)), None)
+        if not codec:
+            return self.record("precision", "skip", {"png_codecs": codecs}, "no 16-bit PNG render codec")
+        fu, _ = self.new_comp("precision")
+        ramp = fu.add("Background", UseFrameFormatSettings=0, Width=W, Height=H, Type="Horizontal",
+                      TopLeftRed=0.0, TopLeftGreen=0.0, TopLeftBlue=0.0,
+                      TopRightRed=1.0, TopRightGreen=1.0, TopRightBlue=1.0)
+        fx = self.ntscrt(fu, ramp, ntsc_enabled=0, glitch_enabled=0, downscale_width=320,
+                         crt_preset=self.crt_presets().index("glow_gauss"))
+        fu.media_out.Input = fx.Output
+        m, problems = {"codec": codec}, []
+        for depth, label in ((4, "float32"), (3, "float16"), (1, "int8")):
+            ramp.SetInput("Depth", depth)
+            path = self.render_timeline(fu.tl, [2], f"precision-{label}", codec=codec)[2]
+            g = read_png_channel16(path, 1)
+            lit = [v for v in g if 2 * 257 <= v <= 253 * 257]  # away from black and white
+            off = sum(1 for v in lit if v % 257 != 0)
+            m[label] = {"lit": len(lit), "off_8bit_levels": round(off / max(1, len(lit)), 3),
+                        "levels": len(set(lit))}
+        if m["int8"]["lit"] < W * H // 4:
+            problems.append(f"test setup: the ramp is mostly black or white ({m['int8']})")
+        if m["int8"]["off_8bit_levels"] > 0.02:
+            problems.append(f"test setup: the int8 reference isn't on 8-bit levels ({m['int8']})")
+        for label in ("float32", "float16"):
+            if m[label]["off_8bit_levels"] < 0.5:
+                problems.append(f"{label}: output is still on 8-bit levels ({m[label]})")
+            if m[label]["levels"] < 3 * m["int8"]["levels"]:
+                problems.append(f"{label}: {m[label]['levels']} levels vs {m['int8']['levels']} in int8")
+        self.record("precision", "fail" if problems else "pass", m, "; ".join(problems))
+
     def t_sizes(self):
         """Odd and portrait source sizes inside Fusion. The plug-in renders them at their own size;
         the timeline then fits the result into the 640x360 frame, so this checks the render works and
@@ -973,7 +1050,7 @@ class Suite:
         try:
             for name, fn in (("version", self.t_version), ("alpha", self.t_alpha), ("edit", self.t_edit),
                              ("order", self.t_order), ("cli", self.t_cli),
-                             ("animated", self.t_animated), ("depth", self.t_depth),
+                             ("animated", self.t_animated), ("depth", self.t_depth), ("precision", self.t_precision),
                              ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug)):
                 self.run(name, fn)
         finally:
@@ -1000,7 +1077,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", help="CMake build dir (finds ntscrt-cli and the bundle's resources)")
     ap.add_argument("--out", default=None, help="output folder (default: a new temp folder)")
-    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,animated,depth,sizes,speed,debug)")
+    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,animated,depth,precision,sizes,speed,debug)")
     ap.add_argument("--quick", action="store_true", help="fewer frames")
     ap.add_argument("--keep-project", action="store_true", help="stay in the test project afterwards")
     ap.add_argument("--headless", action="store_true",

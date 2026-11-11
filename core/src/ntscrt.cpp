@@ -4,6 +4,7 @@
 #include <ntscrt/ntscrt.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <unordered_map>
 
 #include "../stages/digital/fields.h"
+#include "../stages/digital/parallel.h"
 #include "../stages/stages.h"
 #include "embedded_schema.h"
 #include "pixel_convert.h"
@@ -133,7 +135,10 @@ struct ntscrt_instance {
     std::string resource_dir;
     ntscrt_gpu_backend backend = NTSCRT_GPU_AUTO;
     void *native_device = nullptr, *native_queue = nullptr;  // the host's, when shared
-    std::unique_ptr<gpu::Device> dev;
+    // Our own device is the process-wide shared one (gpu::Device::shared):
+    // kernels compile once per process, and one D3D11 device / Metal queue
+    // serves every instance. A host device (native_device) is this instance's.
+    std::shared_ptr<gpu::Device> dev;
     DigitalStage digital;
     NtscStage ntsc;
     std::unique_ptr<Downscaler> downscale;
@@ -142,6 +147,10 @@ struct ntscrt_instance {
     std::unique_ptr<CrtStage> howl_crt;  // Screen Loop's own CRT chain (upstream HowlaroundFeedback)
     std::unique_ptr<Howlaround> howl;
     std::vector<std::shared_ptr<gpu::Texture>> tex_pool;  // upload / output textures, reused across frames
+    // GPU results read back for the host, kept between frames (no 8-33 MB
+    // allocation and clear per frame): BGRA8, or RGBA16F for 16-bit / float hosts.
+    ImageBGRA8 result8;
+    std::vector<uint16_t> result16;
     std::string last_error;
     std::string gpu_gone;  // set when the GPU was lost and couldn't be replaced: CPU stages from then on
     int device_resets = 0;  // devices recreated since the last good GPU frame
@@ -180,7 +189,9 @@ void drop_gpu(ntscrt_instance *inst) {
 // Creates the device and the GPU stages; false (and why) when there's no GPU.
 bool init_gpu(ntscrt_instance *inst, std::string &err) {
     try {
-        inst->dev = gpu::Device::create(pick_backend(inst->backend), inst->native_device, inst->native_queue);
+        const gpu::Backend b = pick_backend(inst->backend);
+        if (inst->native_device) inst->dev = gpu::Device::create(b, inst->native_device, inst->native_queue);
+        else inst->dev = gpu::Device::shared(b);
     } catch (const std::exception &e) {
         err = e.what();
     }
@@ -194,6 +205,11 @@ bool init_gpu(ntscrt_instance *inst, std::string &err) {
     inst->howl_crt = std::make_unique<CrtStage>(*inst->dev, inst->resource_dir);
     inst->howl = std::make_unique<Howlaround>(*inst->dev);
     return true;
+}
+
+std::atomic<int> &live_instances() {
+    static std::atomic<int> n{0};
+    return n;
 }
 
 bool device_lost(const ntscrt_instance *inst) {
@@ -232,6 +248,7 @@ Stats stats(ntscrt_instance *inst) {
     s.look_parses = inst->looks.parses;
     s.device_resets = inst->device_resets;
     s.has_gpu = inst->dev != nullptr;
+    s.gpu_device = inst->dev ? inst->dev->native_device() : nullptr;
     return s;
 }
 void set_source_budget(ntscrt_instance *inst, size_t bytes) {
@@ -260,10 +277,17 @@ ntscrt_status ntscrt_create(const ntscrt_create_info *info, ntscrt_instance **ou
     std::string err;
     if (!init_gpu(inst.get(), err)) inst->last_error = err;
     *out = inst.release();
+    live_instances().fetch_add(1);
     return NTSCRT_OK;
 }
 
-void ntscrt_destroy(ntscrt_instance *inst) { delete inst; }
+void ntscrt_destroy(ntscrt_instance *inst) {
+    if (!inst) return;
+    delete inst;  // drops its reference to the shared device (freed with the last one)
+    // The last instance: join the Digital stage's worker threads now, from
+    // ordinary code, rather than ever in a static destructor (DLL unload).
+    if (live_instances().fetch_sub(1) == 1) digital::shutdown_threads();
+}
 
 const char *ntscrt_last_error(ntscrt_instance *inst) { return inst ? inst->last_error.c_str() : ""; }
 
@@ -325,9 +349,31 @@ using EmitFn = std::function<void(const std::shared_ptr<gpu::Texture> &out_gpu, 
 // kMax further lookups (the stages only read it on the spot).
 constexpr size_t kLookHistMax = 256;
 
+// The CRT shader runs for this look (CrtStage: look["shader"]["enabled"], default on).
+bool crt_shader_on(const json &look) {
+    auto sh = look.find("shader");
+    if (sh == look.end() || !sh->is_object()) return true;
+    auto en = sh->find("enabled");
+    return en == sh->end() || !en->is_boolean() || en->get<bool>();
+}
+
+// The CRT output format for a host picture: RGBA16F for 16-bit and float
+// hosts (the shader's last pass, supersampling and placement keep their
+// precision instead of being quantized to 1/255), BGRA8 for 8-bit ones.
+// Everything before the CRT stage stays 8-bit: that's where the look is defined.
+gpu::Format output_format(bool high_precision_host) {
+    static const bool force8 = [] {
+        const char *e = std::getenv("NTSCRT_OUTPUT_8BIT");
+        return e && *e && *e != '0';
+    }();
+    return high_precision_host && !force8 ? gpu::Format::RGBA16F : gpu::Format::BGRA8;
+}
+
+// out_fmt: output_format() for the host picture; used when the CRT shader is
+// on (its bypass is an 8-bit picture anyway, kept exactly as before).
 ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
                           const std::shared_ptr<const json> &look_p, const json &feedback, int out_w, int out_h,
-                          const SourceFn &get_src, const EmitFn &emit) {
+                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit) {
     const json &look = *look_p;
     const std::string_view look_text = args->look_json ? args->look_json : "{}";
     const AlphaMode mode = alpha_mode(look);
@@ -431,8 +477,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
     auto download = [&](const gpu::Texture &t) {
         ImageBGRA8 im;
         im.resize(t.desc().width, t.desc().height);
-        dev.finish();
-        dev.download(t, im.px.data(), ptrdiff_t(im.width) * 4);
+        dev.download(t, im.px.data(), ptrdiff_t(im.width) * 4);  // waits for the work before it
         return im;
     };
 
@@ -478,10 +523,11 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         chain = inst->downscale->run(upload(img), ctx);
         if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
     }
-    auto out = acquire({out_w, out_h, gpu::Format::BGRA8, true, true});
+    const gpu::Format fmt = crt_shader_on(look) ? out_fmt : gpu::Format::BGRA8;
+    auto out = acquire({out_w, out_h, fmt, true, true});
     inst->crt->render(*chain, *out, ctx);
     chain.reset();
-    dev.finish();
+    // No finish() here: emit's download (or the Metal path's own finish) waits.
     emit(out, img, raw_w, raw_h, aligned_alpha, mode);
     inst->device_resets = 0;  // a good GPU frame
 
@@ -494,7 +540,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
 }
 
 ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args, int out_w, int out_h,
-                          const SourceFn &get_src, const EmitFn &emit) {
+                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit) {
     inst->last_error.clear();
     std::shared_ptr<const json> look = inst->looks.get(args->look_json ? args->look_json : "{}");
     if (!look) return fail(inst, NTSCRT_ERR_BAD_PARAMS, "look_json is not valid JSON");
@@ -506,7 +552,7 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
     bool recreated = false;
     for (;;) {
         try {
-            return render_once(inst, args, look, feedback, out_w, out_h, get_src, emit);
+            return render_once(inst, args, look, feedback, out_w, out_h, out_fmt, get_src, emit);
         } catch (const std::exception &e) {
             if (!device_lost(inst)) return fail(inst, NTSCRT_ERR_INTERNAL, e.what());
             // The device is gone (driver reset, GPU removed): try a new one once,
@@ -532,8 +578,9 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
                                 ntscrt_image *dst) {
     if (!inst || !args || !src || !dst || !src->data || !dst->data) return NTSCRT_ERR_INVALID_ARG;
     const bool premult = args->source_premultiplied != 0;
+    const bool high = dst->format == NTSCRT_RGBA16 || dst->format == NTSCRT_RGBA16F || dst->format == NTSCRT_RGBA32F;
     return render_impl(
-        inst, args, dst->width, dst->height,
+        inst, args, dst->width, dst->height, output_format(high),
         [&](ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode) {
             to_bgra8(*src, raw, &alpha, mode, premult);
         },
@@ -543,12 +590,19 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
                 from_bgra8(cpu_img, alpha, *dst, mode, premult);
                 return;
             }
-            ImageBGRA8 result;
+            const bool same = dst->width == raw_w && dst->height == raw_h;
+            if (out->desc().format == gpu::Format::RGBA16F) {
+                std::vector<uint16_t> &px = inst->result16;
+                px.resize(size_t(dst->width) * dst->height * 4);  // fully overwritten by the download
+                inst->dev->download(*out, px.data(), ptrdiff_t(dst->width) * 8);
+                from_rgba16f(px.data(), dst->width, dst->height, same ? alpha : nullptr, *dst, mode, premult);
+                return;
+            }
+            ImageBGRA8 &result = inst->result8;
             result.width = dst->width;
             result.height = dst->height;
             result.px.resize(size_t(dst->width) * dst->height * 4);  // fully overwritten by the download
             inst->dev->download(*out, result.px.data(), ptrdiff_t(dst->width) * 4);
-            bool same = result.width == raw_w && result.height == raw_h;
             from_bgra8(result, same ? alpha : nullptr, *dst, mode, premult);
         });
 }
@@ -580,7 +634,6 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         auto f32 = dev.create_texture({sw, sh, gpu::Format::RGBA32F, true, false});
         dev.copy(*src, *f32);
         std::vector<float> px(size_t(sw) * sh * 4);
-        dev.finish();
         dev.download(*f32, px.data(), ptrdiff_t(sw) * 16);
         ntscrt_image im{sw, sh, ptrdiff_t(sw) * 16, NTSCRT_RGBA32F, px.data()};
         to_bgra8(im, raw, &alpha, mode, premult);
@@ -618,7 +671,9 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         if (command_buffer) dev.set_external_command_buffer(nullptr);
         else dev.finish();
     };
-    return render_impl(inst, args, dw, dh, get_src, emit);
+    const gpu::Format df = dst->desc().format;
+    return render_impl(inst, args, dw, dh, output_format(df == gpu::Format::RGBA16F || df == gpu::Format::RGBA32F),
+                       get_src, emit);
 }
 
 }  // extern "C"

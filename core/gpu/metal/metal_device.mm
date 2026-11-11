@@ -8,6 +8,8 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -121,6 +123,7 @@ public:
 
     void upload(Texture &t, const void *data, ptrdiff_t row_bytes) override {
         auto &mt = as(t);
+        Lock lock(context_mutex());
         const int w = mt.d.width, h = mt.d.height;
         const size_t tight = size_t(w) * bytes_per_pixel(mt.d.format);
         id<MTLBuffer> staging = [dev_ newBufferWithLength:tight * h options:MTLResourceStorageModeShared];
@@ -142,11 +145,12 @@ public:
     }
 
     void download(const Texture &t, void *data, ptrdiff_t row_bytes) override {
-        if (external_) throw std::runtime_error("Metal: download while a host command buffer is adopted");
         auto &mt = as(t);
         const int w = mt.d.width, h = mt.d.height;
         const size_t tight = size_t(w) * bytes_per_pixel(mt.d.format);
         id<MTLBuffer> staging = [dev_ newBufferWithLength:tight * h options:MTLResourceStorageModeShared];
+        std::unique_lock<std::recursive_mutex> lock(context_mutex());
+        if (external_) throw std::runtime_error("Metal: download while a host command buffer is adopted");
         id<MTLBlitCommandEncoder> blit = [cmd() blitCommandEncoder];
         [blit copyFromTexture:mt.tex
                          sourceSlice:0
@@ -158,7 +162,9 @@ public:
               destinationBytesPerRow:tight
             destinationBytesPerImage:tight * h];
         [blit endEncoding];
-        finish();
+        id<MTLCommandBuffer> cb = take_current();
+        lock.unlock();  // other threads encode into a new buffer meanwhile
+        wait(cb);
         const auto *src = static_cast<const uint8_t *>([staging contents]);
         auto *dst = static_cast<uint8_t *>(data);
         ptrdiff_t stride = row_bytes ? row_bytes : ptrdiff_t(tight);
@@ -170,13 +176,16 @@ public:
         if (offset + bytes > mb.bytes) throw std::runtime_error("buffer upload out of range");
         if (!bytes) return;
         id<MTLBuffer> staging = [dev_ newBufferWithBytes:data length:bytes options:MTLResourceStorageModeShared];
+        Lock lock(context_mutex());
         id<MTLBlitCommandEncoder> blit = [cmd() blitCommandEncoder];
         [blit copyFromBuffer:staging sourceOffset:0 toBuffer:mb.buf destinationOffset:offset size:bytes];
         [blit endEncoding];
     }
 
+    // Compiled once per device: with a shared device, once per process.
     Kernel *kernel(std::string_view name) override {
         std::string key(name);
+        std::lock_guard<std::mutex> klock(kern_mu_);
         auto it = kernels_.find(key);
         if (it != kernels_.end()) return it->second.get();
         const ShaderFile *file = nullptr;
@@ -205,6 +214,7 @@ public:
         if (wx <= 0 || wy <= 0 || wz <= 0) return;
         if (b.textures.size() > 8 || b.buffers.size() > 8 || b.out_textures.size() > 8 || b.out_buffers.size() > 8)
             throw std::runtime_error("dispatch: at most 8 bindings per class");
+        Lock lock(context_mutex());
         id<MTLComputeCommandEncoder> enc = [cmd() computeCommandEncoder];
         [enc setComputePipelineState:k->pso];
         // Indices: see cmake/Shaders.cmake (derived from the D3D registers).
@@ -240,6 +250,7 @@ public:
         auto &d = as(dst);
         const int w = std::min(s.d.width, d.d.width), h = std::min(s.d.height, d.d.height);
         if (s.d.format == d.d.format) {
+            Lock lock(context_mutex());
             id<MTLBlitCommandEncoder> blit = [cmd() blitCommandEncoder];
             [blit copyFromTexture:s.tex
                       sourceSlice:0
@@ -262,25 +273,29 @@ public:
         dispatch(kernel("gpu_builtin/copy"), b, w, h, 1);
     }
 
+    // Commits the current buffer (it may hold other threads' work too: one
+    // queue, so their order is kept) and waits for it without the lock.
     void finish() override {
-        if (external_) return;  // the host commits its own command buffer
-        if (!cb_) return;
-        id<MTLCommandBuffer> cb = cb_;
-        cb_ = nil;
-        [cb commit];
-        [cb waitUntilCompleted];
-        if (cb.status == MTLCommandBufferStatusError) {
-            lost_ = true;  // a hang / GPU reset leaves the queue unusable: the owner makes a new device
-            throw std::runtime_error("Metal command buffer failed: " + ns(cb.error));
+        id<MTLCommandBuffer> cb = nil;
+        {
+            Lock lock(context_mutex());
+            if (external_) return;  // the host commits its own command buffer
+            cb = take_current();
         }
+        wait(cb);
     }
 
     bool lost() const override { return lost_; }
 
     void *native_device() const override { return (__bridge void *)dev_; }
-    void *native_context() override { return (__bridge void *)cmd(); }
+    // Callers hold context_mutex() while they encode into it.
+    void *native_context() override {
+        Lock lock(context_mutex());
+        return (__bridge void *)cmd();
+    }
 
     void set_external_command_buffer(void *c) override {
+        Lock lock(context_mutex());
         if (c && cb_) {  // keep our earlier work ahead of the host's buffer
             [cb_ commit];
             cb_ = nil;
@@ -309,6 +324,25 @@ private:
         return const_cast<MtlTexture &>(*p);
     }
 
+    using Lock = std::lock_guard<std::recursive_mutex>;
+
+    // Under context_mutex(): the current own buffer, committed (nil if none).
+    id<MTLCommandBuffer> take_current() {
+        id<MTLCommandBuffer> cb = cb_;
+        cb_ = nil;
+        if (cb) [cb commit];
+        return cb;
+    }
+    void wait(id<MTLCommandBuffer> cb) {
+        if (!cb) return;
+        [cb waitUntilCompleted];
+        if (cb.status == MTLCommandBufferStatusError) {
+            lost_ = true;  // a hang / GPU reset leaves the queue unusable: the owner makes a new device
+            throw std::runtime_error("Metal command buffer failed: " + ns(cb.error));
+        }
+    }
+
+    // Under context_mutex().
     id<MTLCommandBuffer> cmd() {
         if (external_) return external_;
         if (!cb_) {
@@ -334,9 +368,10 @@ private:
     id<MTLSamplerState> linear_, point_;
     id<MTLCommandBuffer> cb_ = nil;
     id<MTLCommandBuffer> external_ = nil;
-    bool lost_ = false;  // a command buffer failed (GPU hang / reset)
+    std::atomic<bool> lost_{false};  // a command buffer failed (GPU hang / reset); any thread sets it
     std::unordered_map<std::string, id<MTLLibrary>> libs_;
     std::unordered_map<std::string, std::unique_ptr<MtlKernel>> kernels_;
+    std::mutex kern_mu_;  // libs_, kernels_
 };
 
 }  // namespace

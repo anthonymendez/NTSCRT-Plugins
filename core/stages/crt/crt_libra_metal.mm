@@ -5,6 +5,7 @@
 #define LIBRA_RUNTIME_METAL
 #include <librashader.h>
 
+#include <mutex>
 #include <stdexcept>
 
 #include "../../gpu/metal/metal_interop.h"
@@ -33,12 +34,16 @@ public:
         }
     }
     ~MetalChain() override {
+        std::lock_guard<std::recursive_mutex> lock(dev_.context_mutex());
         if (chain_) free_(&chain_);
     }
 
     void frame(const gpu::Texture &in, gpu::Texture &out, uint64_t frame_count, bool clear_history) override {
         id<MTLTexture> src = (__bridge id<MTLTexture>)in.native();
         id<MTLTexture> dst = (__bridge id<MTLTexture>)out.native();
+        // librashader encodes into the device's current command buffer: hold
+        // the device's lock until it's done (other threads may share it).
+        std::lock_guard<std::recursive_mutex> lock(dev_.context_mutex());
         id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)dev_.native_context();
         libra_viewport_t vp{0.f, 0.f, uint32_t(out.desc().width), uint32_t(out.desc().height)};
         frame_mtl_opt_t opt{};

@@ -39,6 +39,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <vector>
 
@@ -86,14 +87,28 @@ public:
     // Never throws: returns nullptr when the backend can't start (no GPU,
     // wrong platform); last_create_error() then says why.
     static std::unique_ptr<Device> create(Backend backend, void *native_device, void *native_queue);
+    // The process-wide own device of `backend` (no host device), shared by
+    // every caller and freed with its last user. A lost device is replaced
+    // by a new one on the next call (users of the old one keep it until they
+    // call again). nullptr + last_create_error() as for create().
+    // NTSCRT_SHARED_DEVICE=0 in the environment: a new device per call.
+    static std::shared_ptr<Device> shared(Backend backend);
+    // Why the calling thread's last create() / shared() returned nullptr.
     static const char *last_create_error();
     virtual ~Device() = default;
+
+    // Several threads may use one device (shared()): every method below is
+    // safe to call concurrently, each one atomic on the device's context /
+    // command buffer. Code that drives native_context() itself (librashader)
+    // holds this lock for the whole sequence. Recursive.
+    std::recursive_mutex &context_mutex() const { return ctx_mu_; }
 
     virtual Backend backend() const = 0;
     virtual std::shared_ptr<Texture> create_texture(const TextureDesc &d) = 0;
     virtual std::shared_ptr<Buffer> create_buffer(size_t bytes, const void *init = nullptr) = 0;
 
     virtual void upload(Texture &t, const void *data, ptrdiff_t row_bytes) = 0;
+    // Waits for the work queued before it by itself: no finish() needed first.
     virtual void download(const Texture &t, void *data, ptrdiff_t row_bytes) = 0;
     virtual void upload(Buffer &b, const void *data, size_t bytes, size_t offset = 0) = 0;
 
@@ -117,6 +132,9 @@ public:
     virtual void set_external_command_buffer(void *cmd) { (void)cmd; }
     // Wrap a host texture without copying (Metal FxPlug path).
     virtual std::shared_ptr<Texture> wrap_native_texture(void *native) = 0;
+
+private:
+    mutable std::recursive_mutex ctx_mu_;
 };
 
 }  // namespace ntscrt::gpu

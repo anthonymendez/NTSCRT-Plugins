@@ -121,6 +121,22 @@ migrated). NTSCRT-Plugins extensions, all optional:
   `CrtStage::fallback_status()`, `fallback_reason()`, `chain_load_attempts()`. `core/src/pixel_convert.h`: an
   empty alpha vector means fully opaque. Look history: `FrameContext::look_at` references stay valid for at
   least 256 further lookups in the same render (stages read them on the spot).
+- 2026-11-11, agent G (shared device), `core/gpu/gpu.h`: `static std::shared_ptr<Device> Device::shared(Backend)`
+  (process-wide own device per backend, weak-referenced so it dies with its last user; a lost one is replaced on the
+  next call; `NTSCRT_SHARED_DEVICE=0` = a device per call) and `std::recursive_mutex &Device::context_mutex()`.
+  Every Device method is now thread-safe (atomic on the context / command buffer); code that drives
+  `native_context()` itself (librashader) holds `context_mutex()` for the sequence. `last_create_error()` is per
+  thread. `download()` waits for earlier work itself (documented; callers no longer `finish()` first). The façade
+  uses `shared()` whenever the host gave no device. `core/src/testing.h`: `Stats::gpu_device`.
+  CRT chains of presets without history are shared per (device, preset) across CrtStages on D3D11 only (librashader's
+  Metal runtime writes uniforms into one non-renamed MTLBuffer at encode time, so Metal chains stay per stage)
+  (`NTSCRT_SHARED_CHAINS=0` turns that off); `core/stages/digital/parallel.h`: `shutdown_threads()`,
+  `threads_running()`, called by `ntscrt_destroy` for the last instance.
+- 2026-11-11, agent G (bit depth): the façade picks the CRT output texture format per host picture: RGBA16F for
+  `NTSCRT_RGBA16` / `RGBA16F` / `RGBA32F` destinations (and RGBA16F/32F Metal textures) when the look's CRT shader is
+  on, BGRA8 otherwise (8-bit hosts and the bypass are unchanged; `NTSCRT_OUTPUT_8BIT=1` forces BGRA8). The CRT
+  stage's supersample target follows its output's format. `core/src/pixel_convert.h`: `from_rgba16f()`.
+  `facade/alpha_merge` saturates RGB (a no-op for 8-bit input).
 - 2026-11-11, agent H (host protocol), `ntscrt.h`: appended `ntscrt_source_frames_needed(args, &first)` (ABI
   version unchanged: additive). Reason: hosts that declare an effect's inputs up front (OpenFX getFramesNeeded,
   FxPlug scheduleInputs) need the source frames the temporal stages can fetch, which only the core knows (Digital

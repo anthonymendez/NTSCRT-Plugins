@@ -1,5 +1,6 @@
 // device.cpp — backend selection and the embedded-shader registry.
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -18,9 +19,16 @@ std::mutex &files_mutex() {
     static std::mutex m;
     return m;
 }
+// Per thread: create() may run on several threads at once (one per host
+// instance), and each caller reads the reason right after its own call.
 std::string &create_error() {
-    static std::string e;
+    thread_local std::string e;
     return e;
+}
+
+bool sharing_enabled() {
+    const char *e = std::getenv("NTSCRT_SHARED_DEVICE");
+    return !(e && *e == '0');
 }
 }  // namespace
 
@@ -63,6 +71,23 @@ std::unique_ptr<Device> Device::create(Backend backend, void *native_device, voi
     }
     create_error() = d ? std::string() : err;
     if (!d) std::fprintf(stderr, "ntscrt: no GPU device: %s\n", err.c_str());
+    return d;
+}
+
+std::shared_ptr<Device> Device::shared(Backend backend) {
+    if (!sharing_enabled()) return create(backend, nullptr, nullptr);
+    // Weak references: the device dies with its last user (ntscrt_destroy),
+    // never in a static destructor (under the loader lock on DLL unload).
+    static std::mutex m;
+    static std::weak_ptr<Device> devices[2];
+    std::lock_guard<std::mutex> lock(m);
+    std::weak_ptr<Device> &slot = devices[backend == Backend::D3D11 ? 0 : 1];
+    if (auto d = slot.lock(); d && !d->lost()) {
+        create_error().clear();
+        return d;
+    }
+    std::shared_ptr<Device> d = create(backend, nullptr, nullptr);
+    if (d) slot = d;
     return d;
 }
 

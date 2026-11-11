@@ -106,6 +106,18 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 - Less work per frame: opaque sources (most video) no longer get a per-pixel alpha buffer, the pixel-format
   conversion loops are specialised per format, and an uncropped picture is moved instead of copied. Output is
   unchanged.
+- Several NTSCRT effects in one project share one GPU device, one set of compiled GPU kernels and, for the
+  CRT presets without frame history (all but crtsim), one compiled shader chain (Windows; on macOS each effect keeps its own). With 8 instances at 1080p
+  (glow_gauss): instances are created in ~0 ms instead of ~21 ms each, the first frames take ~0.9 s instead of
+  1.6 s in total, and the process uses ~390 MB instead of ~1140 MB of memory and ~190 MB instead of ~410 MB of
+  GPU memory. Rendering waits for the GPU on an event instead of spinning a CPU core.
+- 16-bit and 32-bit float projects get the CRT shader's result at half-float precision instead of 8 bits: a
+  smooth gradient through Glow (Gauss) comes out with ~2350 levels instead of ~250, so it no longer bands when it's
+  graded afterwards. 8-bit projects, and looks with the CRT shader off, render exactly as before.
+- Faster frames, mostly on large pictures: converting the host picture to and from the internal format runs on
+  all CPU cores and no longer calls a slow rounding function per channel (the result is bit-identical), and the
+  read-back buffer is kept between frames. A UHD frame with the CRT shader off now takes ~15 ms instead of ~250-330 ms
+  in the converter benchmark; a 1080p Glow (Gauss) frame ~20 ms instead of ~60 ms.
 
 ### Fixed
 - The golden workflow builds upstream's `crt-smoke` again (a build-time workaround for a Swift type-checker
@@ -147,6 +159,10 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   again, instead of failing every frame from then on; if that fails it keeps rendering with the CPU stages and
   says so. Without a GPU, a cropped picture now fills the whole frame (letterboxed) instead of leaving part of it
   unwritten.
+- The plug-in no longer risks hanging when the host unloads it: the Digital video worker threads are
+  stopped when the last NTSCRT instance is deleted, never during unload.
+- A NaN alpha in a 16-bit float or 32-bit float source now counts as transparent instead of coming back as an
+  infinite alpha (and infinite colour when premultiplied).
 
 ## [0.4.0] - 2026-11-10
 

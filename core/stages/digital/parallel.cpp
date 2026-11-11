@@ -1,5 +1,23 @@
 // parallel.cpp — persistent std::thread pool behind digital::parallel_for.
+//
+// Lifetime: the pool is created on first use and joined by shutdown_threads()
+// (the façade calls it when its last instance goes) or when replaced by
+// set_thread_count(). It is never joined from a static destructor: on DLL
+// unload that runs under the Windows loader lock, where joining a thread
+// deadlocks. While workers exist they pin the module holding this code, so the
+// plug-in can't be unloaded under them; a pool still alive at process exit is
+// simply left (the OS has ended its threads by then).
 #include "parallel.h"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -44,11 +62,45 @@ struct Job {
     }
 };
 
+// Keeps the module holding this code loaded (one reference) while it lives.
+class ModulePin {
+public:
+    ModulePin() {
+#ifdef _WIN32
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                           reinterpret_cast<LPCWSTR>(&anchor), &h_);
+#else
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<void *>(&anchor), &info) && info.dli_fname)
+            h_ = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+#endif
+    }
+    ~ModulePin() {
+#ifdef _WIN32
+        if (h_) FreeLibrary(h_);
+#else
+        if (h_) dlclose(h_);
+#endif
+    }
+    ModulePin(const ModulePin &) = delete;
+    ModulePin &operator=(const ModulePin &) = delete;
+
+private:
+    static void anchor() {}
+#ifdef _WIN32
+    HMODULE h_ = nullptr;
+#else
+    void *h_ = nullptr;
+#endif
+};
+
 class Pool {
 public:
     explicit Pool(int threads) {
         for (int i = 0; i < threads - 1; ++i) workers_.emplace_back([this] { loop(); });
     }
+    // Joins the workers: only from ordinary code (shutdown_threads,
+    // set_thread_count, the last parallel_for holding a replaced pool).
     ~Pool() {
         {
             std::lock_guard<std::mutex> lk(m_);
@@ -94,6 +146,7 @@ private:
         }
     }
 
+    ModulePin pin_;  // first: released after the workers are joined
     std::vector<std::thread> workers_;
     std::deque<Job *> jobs_;
     std::mutex m_;
@@ -101,8 +154,9 @@ private:
     bool stop_ = false;
 };
 
-std::mutex g_pool_m;
-std::shared_ptr<Pool> g_pool;
+// Never destroyed (see the top): no static destructor joins the workers.
+std::mutex &g_pool_m = *new std::mutex;
+std::shared_ptr<Pool> &g_pool = *new std::shared_ptr<Pool>;
 int g_requested = 0;
 
 int resolve(int n) {
@@ -129,6 +183,21 @@ void set_thread_count(int n) {
 }
 
 int thread_count() { return pool()->size(); }
+
+void shutdown_threads() {
+    std::shared_ptr<Pool> old;
+    {
+        std::lock_guard<std::mutex> lk(g_pool_m);
+        old = std::move(g_pool);
+    }
+    // `old` joins here, unless a parallel_for still runs on it: then its
+    // last holder does when it returns.
+}
+
+bool threads_running() {
+    std::lock_guard<std::mutex> lk(g_pool_m);
+    return g_pool != nullptr;
+}
 
 namespace detail {
 void parallel_for_impl(int n, RangeFn fn, void *ctx) {

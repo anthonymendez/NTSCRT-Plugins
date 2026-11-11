@@ -50,4 +50,9 @@ inline void merge_alpha(float c[4], float a, AlphaMode mode, bool premult) {
 // aligned with the result (crop on): treated as 1 in Clip mode, 0 in Spill mode.
 void from_bgra8(const ImageBGRA8 &in, const std::vector<float> *alpha, ntscrt_image &dst,
                 AlphaMode mode = AlphaMode::Clip, bool premult = false);
+// Same from a w x h RGBA16F picture (the CRT stage's output for 16-bit and
+// float hosts: no 8-bit step). RGB is clamped to 0..1 (NaN = 0), the range
+// the look is defined in, as an 8-bit target would store it.
+void from_rgba16f(const uint16_t *px, int w, int h, const std::vector<float> *alpha, ntscrt_image &dst,
+                  AlphaMode mode = AlphaMode::Clip, bool premult = false);
 }  // namespace ntscrt
