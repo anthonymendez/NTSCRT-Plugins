@@ -16,6 +16,7 @@ Tests (see README.md next to this file):
   cli       plug-in output == ntscrt-cli on the same frames (default look + every CRT preset +
             the bundled Digital video looks, chosen from the plug-in's Preset menu)
   depth     8-bit int / 16-bit int / 16-bit float / 32-bit float sources give the same result
+  precision float projects keep the CRT output finer than 8 bits (a graded ramp isn't banded)
   sizes     odd and portrait sizes render at the right size
   speed     ms per frame at 1920x1080 for every CRT preset (informational)
   debug     "Debug logging" logs every frame (and doesn't change the picture); "Open logs folder"
@@ -706,6 +707,38 @@ class Suite:
                 problems.append(f"{label} differs from float32 (mean {s['mean']})")
         self.record("depth", "fail" if problems else "pass", m, "; ".join(problems))
 
+    def t_precision(self):
+        """Float projects keep the CRT shader's output finer than 8 bits: a dark ramp through Glow (Gauss),
+        then a x16 gain (a strong grade). An 8-bit result graded that way only holds multiples of 16 (bands);
+        at half-float precision most pixels fall in between. The int8 project is the 8-bit reference."""
+        fu, _ = self.new_comp("precision")
+        ramp = fu.add("Background", UseFrameFormatSettings=0, Width=W, Height=H, Type="Horizontal",
+                      TopLeftRed=0.0, TopLeftGreen=0.0, TopLeftBlue=0.0,
+                      TopRightRed=1 / 16, TopRightGreen=1 / 16, TopRightBlue=1 / 16)
+        fx = self.ntscrt(fu, ramp, ntsc_enabled=0, glitch_enabled=0,
+                         crt_preset=self.crt_presets().index("glow_gauss"))
+        grade = fu.add("BrightnessContrast", Input=fx, Gain=16.0)
+        m, problems = {}, []
+        for depth, label in ((4, "float32"), (3, "float16"), (1, "int8")):
+            for t in (ramp, grade):
+                t.SetInput("Depth", depth)
+            img = read_png(fu.render({"grade": grade}, [2], f"precision-{label}")["grade"][2])
+            g = img.channel(1)
+            lit = [v for v in g if 8 <= v <= 247]  # away from black and clipped white
+            between = sum(1 for v in lit if min(v % 16, 16 - v % 16) > 1)
+            m[label] = {"lit": len(lit), "between_multiples_of_16": round(between / max(1, len(lit)), 3),
+                        "levels": len(set(lit))}
+        if m["int8"]["lit"] < W * H // 8:
+            problems.append("test setup: the graded ramp is mostly black or white")
+        if m["int8"]["between_multiples_of_16"] > 0.15:
+            problems.append(f"test setup: the int8 reference isn't banded ({m['int8']})")
+        for label in ("float32", "float16"):
+            if m[label]["between_multiples_of_16"] < 0.5:
+                problems.append(f"{label}: graded output is still 8-bit banded ({m[label]})")
+            if m[label]["levels"] < 2 * m["int8"]["levels"]:
+                problems.append(f"{label}: {m[label]['levels']} levels vs {m['int8']['levels']} in int8")
+        self.record("precision", "fail" if problems else "pass", m, "; ".join(problems))
+
     def t_sizes(self):
         """Odd and portrait source sizes inside Fusion. The plug-in renders them at their own size;
         the timeline then fits the result into the 640x360 frame, so this checks the render works and
@@ -886,7 +919,7 @@ class Suite:
         try:
             for name, fn in (("version", self.t_version), ("alpha", self.t_alpha), ("edit", self.t_edit),
                              ("order", self.t_order), ("cli", self.t_cli), ("depth", self.t_depth),
-                             ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug)):
+                             ("precision", self.t_precision), ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug)):
                 self.run(name, fn)
         finally:
             self.close()
@@ -912,7 +945,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", help="CMake build dir (finds ntscrt-cli and the bundle's resources)")
     ap.add_argument("--out", default=None, help="output folder (default: a new temp folder)")
-    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,depth,sizes,speed,debug)")
+    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,depth,precision,sizes,speed,debug)")
     ap.add_argument("--quick", action="store_true", help="fewer frames")
     ap.add_argument("--keep-project", action="store_true", help="stay in the test project afterwards")
     ap.add_argument("--headless", action="store_true",
