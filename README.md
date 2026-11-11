@@ -18,6 +18,8 @@ Free and open source under the [MIT licence](#licence). Synced with upstream NTS
 (DaVinci Resolve running headless) with `scripts/make_previews_resolve.py`; `scripts/make_previews.ps1`
 makes the same animations through `ntscrt-cli` when Resolve isn't available.*
 
+**[Presets gallery](docs/PRESETS-GALLERY.md)**: an animated GIF of every bundled preset, Digital video format, Screen Loop preset and CRT shader.
+
 ## Install
 
 | App | Supported |
