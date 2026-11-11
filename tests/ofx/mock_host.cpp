@@ -34,7 +34,12 @@ static LONG WINAPI report_crash(EXCEPTION_POINTERS *e) {
     std::fflush(stderr);
     return EXCEPTION_CONTINUE_SEARCH;
 }
-static const bool g_crash_handler = (SetUnhandledExceptionFilter(report_crash), true);
+// Unbuffered output too, so a crash doesn't swallow what the run printed before it.
+static LONG WINAPI first_chance(EXCEPTION_POINTERS *e) {
+    if (e && e->ExceptionRecord && e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) report_crash(e);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static const bool g_crash_handler = (SetUnhandledExceptionFilter(report_crash), AddVectoredExceptionHandler(1, first_chance), std::setvbuf(stdout, nullptr, _IONBF, 0), true);
 #endif
 
 namespace mock {
@@ -543,11 +548,10 @@ Host::Host() {
 }
 
 Host::~Host() {
-#ifdef _WIN32
-    if (lib_) FreeLibrary(static_cast<HMODULE>(lib_));
-#else
-    if (lib_) dlclose(lib_);
-#endif
+    // The plug-in stays loaded (lib_ is not freed), as in real hosts, which load a plug-in once
+    // per process: worker threads its libraries leave parked (thread pools) would otherwise wake
+    // up in unloaded code and crash a later test at random (seen ~1 run in 30 on Windows).
+    lib_ = nullptr;
     if (g_host == this) g_host = nullptr;
 }
 
