@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -741,6 +742,18 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             }
             if (ok) {
                 pt.note += " ntsc_route=gpu";
+                char b[64];
+                std::snprintf(b, sizeof b, " ntsc_tables_ms=%.3f", inst->ntsc_plan.table_ms);
+                pt.note += b;
+                // NTSCRT_PROFILE=1: the GPU time of each pass (NtscGpu::pass_times)
+                const auto &times = inst->ntsc_gpu->pass_times();
+                if (!times.empty()) {
+                    pt.note += " ntsc_gpu=";
+                    for (size_t i = 0; i < times.size(); ++i) {
+                        std::snprintf(b, sizeof b, "%s%s:%.3f", i ? "," : "", times[i].first.c_str(), times[i].second);
+                        pt.note += b;
+                    }
+                }
             } else {
                 pt.note += " ntsc_route=cpu (" + why + ")";
             }

@@ -17,10 +17,12 @@
 // renders), "clean_crt" = the bundled "Clean CRT" preset (NTSC off),
 // "ntsc_off" = the default look with the NTSC signal unticked. Also "spill"
 // (ntsc_off, Transparency: Let effect spill) and "crop" (ntsc_off, 4:3 crop).
-// "ntsc_gpu_passes" = the default look with the NTSC stages the GPU port doesn't
-// have yet turned off (docs/dev/NTSC-GPU.md): run it with and without
-// NTSCRT_NTSC_GPU=1 to compare ntsc-rs with the GPU port (the "ntsc" column is
-// the NTSC stage's share of cpu_stg; "gpu%" the frames that took the GPU route).
+// "ntsc_gpu_passes" = the default look with the NTSC stages phase 1 of the GPU
+// port lacked turned off (docs/dev/NTSC-GPU.md); "preset:<name>" = the bundled
+// preset presets/<name>.json (e.g. "preset:Mild VHS"; not the Screen Loop ones).
+// Run with and without NTSCRT_NTSC_GPU=1 to compare ntsc-rs with the GPU port
+// (the "ntsc" column is the NTSC stage's share of cpu_stg; "gpu%" the frames
+// that took the GPU route).
 // Frames are rendered back to back (fps only sets the frame rate the look's
 // timing uses). One JSON line per case (prefix "JSON "), then a table.
 #include <ntscrt/ntscrt.h>
@@ -47,6 +49,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -230,11 +233,12 @@ int main(int argc, char **argv) {
                 "luma_noise": false, "chroma_noise": false, "chroma_delay_horizontal": 0,
                 "chroma_delay_vertical": 0, "vhs_edge_wave_enabled": false})");
             for (auto it = off.begin(); it != off.end(); ++it) b.look["ntsc"]["settings"][it.key()] = it.value();
-        } else if (n == "clean_crt") {
-            const std::string text = read_file(resources + "/presets/Clean CRT.json");
+        } else if (n == "clean_crt" || n.rfind("preset:", 0) == 0) {
+            const std::string file = n == "clean_crt" ? std::string("Clean CRT") : n.substr(7);
+            const std::string text = read_file(resources + "/presets/" + file + ".json");
             json preset = json::parse(text, nullptr, false);
             if (preset.is_discarded()) {
-                std::fprintf(stderr, "cannot read %s/presets/Clean CRT.json\n", resources.c_str());
+                std::fprintf(stderr, "cannot read %s/presets/%s.json\n", resources.c_str(), file.c_str());
                 return 2;
             }
             b = look_from(&preset);
@@ -281,6 +285,8 @@ int main(int argc, char **argv) {
                 std::vector<double> total;
                 std::vector<ntscrt::testing::PhaseTimes> ph;
                 int failures = 0, gpu_route = 0;
+                std::vector<double> tables_ms;
+                std::map<std::string, std::vector<double>> stage_ms;
                 std::string err;
                 const int64_t first = next_frame;
                 for (int f = 0; f < warmup + frames; ++f) {
@@ -305,13 +311,30 @@ int main(int argc, char **argv) {
                     if (f >= warmup) {
                         total.push_back(t);
                         ph.push_back(ntscrt::testing::last_phases(inst));
-                        gpu_route += std::strstr(ntscrt_last_timings(inst), "ntsc_route=gpu") != nullptr;
+                        const char *tm = ntscrt_last_timings(inst);
+                        gpu_route += std::strstr(tm, "ntsc_route=gpu") != nullptr;
+                        // GPU NTSC: the CPU time of its plan + tables, and (NTSCRT_PROFILE=1)
+                        // the GPU time per pass, summed per stage name.
+                        if (const char *q = std::strstr(tm, " ntsc_tables_ms=")) tables_ms.push_back(std::atof(q + 16));
+                        if (const char *q = std::strstr(tm, " ntsc_gpu=")) {
+                            std::string list(q + 10);
+                            list = list.substr(0, list.find(' '));
+                            std::map<std::string, double> frame;
+                            for (const std::string &item : split(list)) {
+                                const size_t c = item.rfind(':');
+                                if (c != std::string::npos) frame[item.substr(0, c)] += std::atof(item.c_str() + c + 1);
+                            }
+                            for (const auto &kv : frame) stage_ms[kv.first].push_back(kv.second);
+                        }
                     }
                 }
                 next_frame += warmup + frames + 1000;
                 if (!dump.empty()) {
+                    std::string file_name = lk.name;  // "preset:Mild VHS" -> "preset_Mild_VHS"
+                    for (char &c : file_name)
+                        if (c == ':' || c == ' ' || c == '/' || c == '\\') c = '_';
                     const std::string path = dump + "/" + std::to_string(w) + "x" + std::to_string(h) + "_" + fn +
-                                             "_" + lk.name + ".raw";
+                                             "_" + file_name + ".raw";
                     std::ofstream o(path, std::ios::binary);
                     o.write(reinterpret_cast<const char *>(dst_buf.data()), std::streamsize(dst_buf.size()));
                 }
@@ -358,6 +381,12 @@ int main(int argc, char **argv) {
                 pj["ntsc"] = std::round(r.ntsc * 1000) / 1000;
                 j["phases_median_ms"] = pj;
                 j["ntsc_gpu_frames"] = gpu_route;
+                if (!tables_ms.empty()) j["ntsc_tables_median_ms"] = std::round(pct(tables_ms, 0.5) * 1000) / 1000;
+                if (!stage_ms.empty()) {
+                    json sj = json::object();
+                    for (auto &kv : stage_ms) sj[kv.first] = std::round(pct(kv.second, 0.5) * 1000) / 1000;
+                    j["ntsc_gpu_stage_median_ms"] = sj;
+                }
                 if (failures) j["error"] = err;
                 std::printf("JSON %s\n", j.dump().c_str());
                 std::fflush(stdout);
