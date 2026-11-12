@@ -86,6 +86,13 @@ written but not yet built.
   more with NTSC on. Macs, Windows' software renderer and a GPU that fails the plug-in's exactness check keep
   ntsc-rs; `NTSCRT_NTSC_GPU=0` brings ntsc-rs back anywhere (docs/ENVIRONMENT.md). The plug-in's log says once
   per effect which one it uses and why (`NTSC route: ...`).
+- **Digital video looks are much faster** (Windows, Direct3D 11 GPU): shrinking the picture to the camera's size
+  and scaling the codec's picture back up now run on the GPU, with the same pictures byte for byte; the camera
+  and the codec still run on the CPU, on the small picture only. In Resolve on an RTX 5090 a 300-frame UHD render
+  of *Webcam (low quality)* takes 2.9 s instead of 7.4 s (the effect's own time per frame 3 ms instead of 17; the
+  clip without the effect takes 2.9 s), and with NVIDIA GPU frames the full picture no longer goes through the
+  CPU. Macs, Windows' software renderer, frames whose NTSC signal runs on ntsc-rs and `NTSCRT_DIGITAL_GPU=0` keep
+  the CPU version (docs/ENVIRONMENT.md); the log says which (`Digital video route: ...`).
 
 ### Changed
 - **Glitch** and **Digital video** (with Datamosh) past the first minute of an effect look slightly different
@@ -255,6 +262,18 @@ written but not yet built.
   settings.
 
 ### Developer
+- Digital video's full-size steps on the GPU (docs/dev/DIGITAL-GPU.md): `Renderer::scale` (Lanczos, aliasing, One
+  field) and `Renderer::upscale` as Slang kernels (`core/stages/digital/gpu/`), byte-identical to the CPU code
+  (precise float arithmetic checked by a probe, double-precision `*_x` kernels otherwise; the Lanczos taps,
+  aliasing coordinates, `/ 9` and upscale maps as CPU-made tables), `Renderer::code` for the CPU part between them;
+  `NTSCRT_DIGITAL_GPU` decided like `NTSCRT_NTSC_GPU` (the rule shared: `core/gpu/gpu_route.h`, `GpuRoute` in the
+  façade), per-frame fallback on GPU errors; ` digital_route=` and the step times ` digital_ms=` in the timings
+  (also on the CPU route, from the new step clock). Tests: `test_digital_gpu` (kernels on the GPU and WARP, plain
+  and double; pipeline parity for every format, look and setting, seeks, Datamosh, crop, render scale, 8-bit /
+  half / float), Digital cases in `test_host_gpu` and `test_howl_seek`; `bench_transfer --looks digital:<format>`;
+  `run_resolve_tests.py --parity-digital`, `NTSCRT_DIGITAL_GPU=0` in the parity CPU sessions with a route check,
+  `--bench-looks webcam-lq,cheap-camcorder`. port-map.json / UPSTREAM-SYNC.md: `DigitalVideoRenderer.swift`'s
+  scale and upscale have a second target.
 - `run_resolve_tests.py --parity` / `--parity-quick` (`tests/resolve/parity.py`, docs/TESTING.md): every bundled
   preset, every stage on its own, every NTSC setting and the other stages' options rendered in headless Resolve in
   one session per configuration (CPU reference, GPU default, `NTSCRT_OFX_GPU=0`, `NTSCRT_NTSC_GPU=0`, the

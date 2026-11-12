@@ -1260,8 +1260,7 @@ class Suite:
     # More looks --bench-looks can name: bundled presets with NTSC on; Digital video looks.
     BENCH_EXTRA_LOOKS = {"mild-vhs": ("Mild VHS", ""), "tracking-noise": ("Tracking Noise up", ""),
                          "high-chroma": ("High Chroma static", ""),
-                         "webcam-lq": ("Webcam (low quality)", ""), "cheap-camcorder": ("Cheap camcorder", ""),
-                         "minidv": ("Digital video/MiniDV", "")}
+                         "webcam-lq": ("Webcam (low quality)", ""), "cheap-camcorder": ("Cheap camcorder", "")}
     BENCH_SIZES = {"uhd": (3840, 2160), "1080p": (1920, 1080)}
 
     def t_bench(self):
@@ -1688,7 +1687,7 @@ def main():
     ap.add_argument("--bench-repeat", type=int, default=1, help="bench: render jobs per look and size")
     ap.add_argument("--bench-looks", default="default,clean-crt,ntsc-off",
                     help="bench: comma-separated looks: default, clean-crt, ntsc-off, mild-vhs, tracking-noise, high-chroma, "
-                         "webcam-lq, cheap-camcorder, minidv (Digital video)")
+                         "webcam-lq, cheap-camcorder (Digital video looks)")
     ap.add_argument("--bench-label", default="", help="bench: label copied into each JSON line (e.g. the build)")
     ap.add_argument("--gpu-ab", action="store_true",
                     help="with --headless: render the gpupath frames with NTSCRT_OFX_GPU=0 (CPU path) and with the GPU "
