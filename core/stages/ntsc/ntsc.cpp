@@ -248,6 +248,24 @@ void NtscStage::gpu_plan(const FrameContext &ctx, int width, int height, NtscGpu
     if (width <= 0 || height <= 0) throw std::runtime_error("ntsc gpu: empty picture");
     const auto t0 = std::chrono::steady_clock::now();
     const float scale = impl_->apply(ctx);
+    NtscGpuPlan::Key key;
+    key.frame = ntsc_frame(ctx);
+    key.seed_offset = Impl::seed_offset(ctx);
+    key.width = width;
+    key.height = height;
+    key.scale = scale;
+    key.stage_mask = stage_mask;
+    key.forced_cpu = forced_cpu_stages();
+    key.settings = impl_->applied;
+    if (out.key_valid && key == out.key) {
+        // The same frame again: the plan is this one; its tables too once made.
+        out.cached = true;
+        out.table_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (tables && out.supported() && !out.tables_ready) gpu_tables(out);
+        return;
+    }
+    out.cached = false;
+    out.key_valid = false;
     out.tables_ready = false;
     out.scale = scale;
     out.frame = ntsc_frame(ctx);
@@ -268,7 +286,9 @@ void NtscStage::gpu_plan(const FrameContext &ctx, int width, int height, NtscGpu
         if (rc != 0) throw std::runtime_error("ntsc gpu: plan failed (" + std::to_string(rc) + ")");
         out.passes.resize(out.info.num_passes);
         out.rows.resize(out.info.plane_rows);
-        out.info.unsupported |= out.info.enabled & forced_cpu_stages();
+        out.info.unsupported |= out.info.enabled & key.forced_cpu;
+        out.key = std::move(key);
+        out.key_valid = true;
         out.table_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (tables && out.supported()) gpu_tables(out);
         return;
@@ -278,6 +298,7 @@ void NtscStage::gpu_plan(const FrameContext &ctx, int width, int height, NtscGpu
 
 // The per-row tables and speckle lists of the plan's passes (gpu_plan.rs).
 void NtscStage::gpu_tables(NtscGpuPlan &out) const {
+    if (out.tables_ready) return;  // made already (the plan's one-entry cache)
     const auto t0 = std::chrono::steady_clock::now();
     const uint32_t w = uint32_t(out.width), h = uint32_t(out.height);
     const int64_t frame = out.frame;

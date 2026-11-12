@@ -1,8 +1,8 @@
-// ntsc_gpu.h — the GPU port of the ntsc-rs effect (phases 1-3 of 4; design:
-// docs/dev/NTSC-GPU.md). The Rust path (NtscStage::process) stays the
-// reference and the fallback: a frame runs here only when every pass its
-// settings turn on is implemented (NtscGpuPlan::supported) and the route is
-// enabled (ntsc_gpu_route: NTSCRT_NTSC_GPU=1, D3D11, not a software device).
+// ntsc_gpu.h — the GPU port of the ntsc-rs effect (design: docs/dev/NTSC-GPU.md).
+// The Rust path (NtscStage::process) stays the reference and the fallback: a
+// frame runs here only when every pass its settings turn on is implemented
+// (NtscGpuPlan::supported) and the route is on (ntsc_gpu_route: by default on
+// D3D11 hardware devices that do ntsc-rs's fused multiply-adds exactly).
 #pragma once
 
 #include <ntscrs_capi.h>
@@ -44,6 +44,26 @@ struct NtscGpuPlan {
     int64_t frame = 0;
     int32_t seed_offset = 0;
     int width = 0, height = 0;
+    // One-entry cache (NtscStage::gpu_plan): what this plan and its tables were
+    // made for. The same settings, frame, seed, size, scale and stage mask
+    // again (a paused timeline, an Inspector edit of a non-NTSC param) keep
+    // them instead of building them again; `cached` says the last call did.
+    struct Key {
+        std::string settings;  // ntsc-rs's effective settings JSON
+        int64_t frame = 0;
+        int32_t seed_offset = 0;
+        int width = 0, height = 0;
+        float scale = 0;
+        uint32_t stage_mask = 0, forced_cpu = 0;
+        bool operator==(const Key &o) const {
+            return frame == o.frame && seed_offset == o.seed_offset && width == o.width && height == o.height &&
+                   scale == o.scale && stage_mask == o.stage_mask && forced_cpu == o.forced_cpu &&
+                   settings == o.settings;
+        }
+    };
+    Key key;
+    bool key_valid = false;
+    bool cached = false;
     bool supported() const { return info.unsupported == 0; }
     // "composite_noise,head_switching" etc.: the stages that keep this frame on the CPU.
     std::string unsupported_names() const;
@@ -73,15 +93,33 @@ static_assert(sizeof(NtscGpuFilter) == 64 && sizeof(NtscGpuPass) == 224, "shim l
 static_assert(sizeof(NtscGpuRow) == 32 && sizeof(NtscGpuOutRow) == 8, "row tables (gpu_plan.rs)");
 static_assert(sizeof(NtscGpuPlanInfo) == 72, "plan info (gpu_plan.rs)");
 
-// Whether frames may take the GPU route on `dev` at all. Off unless
-// NTSCRT_NTSC_GPU=1 (or "force": also on a software device such as WARP,
-// where the Rust path is faster); never on Metal in this phase (unverified;
-// Metal compiles with fast math). `why` says why not.
-bool ntsc_gpu_route(gpu::Device &dev, std::string *why = nullptr);
-// NTSCRT_NTSC_GPU is set to something other than "" / "0".
+class NtscGpu;
+
+// NTSCRT_NTSC_GPU: unset / "" / "auto" = Auto (the default), "0" = Off (ntsc-rs
+// always), "1" = On (as Auto), "force" = also on software devices (WARP) and
+// on a GPU whose mad() isn't fused and that has no doubles.
+enum class NtscGpuEnv { Auto, Off, On, Force };
+NtscGpuEnv ntsc_gpu_env();
+// The raw value ("" when unset): a change re-decides an instance's route.
+std::string ntsc_gpu_env_text();
+
+// Whether frames may take the GPU route on `dev` at all (NTSC-GPU.md "The
+// default rule"): not with NTSCRT_NTSC_GPU=0, never on Metal (unverified;
+// Metal compiles with fast math), not on a software device (ntsc-rs is
+// faster) and, given `g` (its fused-mad probe), not on a GPU that can do
+// ntsc-rs's fused multiply-adds neither with mad() nor in double precision,
+// unless "force". `why` gets the reason either way: on, it names the
+// setting, the adapter, the FMA mode and whether this CPU's ntsc-rs fuses.
+bool ntsc_gpu_route(gpu::Device &dev, std::string *why = nullptr, NtscGpu *g = nullptr);
+// NTSCRT_NTSC_GPU isn't "0" (the route may be on).
 bool ntsc_gpu_requested();
 // The D3D11 device is Microsoft's software rasterizer (WARP).
 bool gpu_is_software(gpu::Device &dev);
+// This CPU's ntsc-rs fuses its multiply-adds (fearless_simd's AVX2 level,
+// which requires FMA, or NEON): the GPU route is then bit-identical to it.
+// Without (pre-AVX2 x86) ntsc-rs rounds its products separately and the GPU,
+// which always fuses, may differ from it by a level (the route is still used).
+bool cpu_ntsc_fuses();
 
 class NtscGpu {
 public:
