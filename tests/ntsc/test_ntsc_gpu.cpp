@@ -11,6 +11,7 @@
 //   NTSCRT_NTSC_GPU_DUMP=<dir>   write the YIQ planes of the stage-by-stage comparison
 //                                (<case>.<n>.<stage>.{rust,gpu}.f32: Y, I, Q planes, width x plane_rows each)
 //   NTSCRT_NTSC_GPU_VERBOSE=1    per-case lines on stdout ("PARITY ...", "STAGE ...", "COVERAGE ...")
+//   NTSCRT_NTSC_GPU_STAGE_SETTINGS=<json>  settings over the stage-by-stage case's (e.g. one stage alone)
 #include <doctest/doctest.h>
 #include <ntscrs_capi.h>
 #include <ntscrt/ntscrt.h>
@@ -90,15 +91,10 @@ json minimal_settings() {
         "vhs_settings": false, "vhs_chroma_vert_blend": false, "chroma_lowpass_out": 0
     })");
 }
-// The house defaults with the stages later phases implement turned off: every
-// pass the GPU has now, as the house look sets them.
-json gpu_full_settings() {
-    return json::parse(R"({
-        "composite_noise": false, "snow_intensity": 0, "head_switching": false, "tracking_noise": false,
-        "luma_noise": false, "chroma_noise": false, "chroma_delay_horizontal": 0, "chroma_delay_vertical": 0,
-        "vhs_edge_wave_enabled": false
-    })");
-}
+// The house defaults: every stage but snow (off in the house look), as the
+// house look sets them. Snow is added at the preset intensity of "Obliterated"-
+// style looks so the full-effect cases have every stage.
+json gpu_full_settings() { return json::parse(R"({"snow_intensity": 0.6, "snow_anisotropy": 0.5})"); }
 json with(json base, const json &over) {
     for (auto it = over.begin(); it != over.end(); ++it) base[it.key()] = it.value();
     return base;
@@ -155,6 +151,68 @@ std::vector<Case> single_cases() {
                                          {"vhs_sharpen_frequency", 1.0}, {"filter_type", ft}}),
                      kModem | bit(NTSC_ST_TAPE_SPEED) | bit(NTSC_ST_SHARPEN)});
     c.push_back({"vert_blend", with(m, {{"vhs_chroma_vert_blend", true}}), kModem | bit(NTSC_ST_VERT_BLEND)});
+
+    // ---- phase 2: noise ----
+    const double cn[][2] = {{0.8576, 1}, {0.5, 2}, {2.0, 5}, {0.05, 3}, {6.0, 4}};
+    for (const auto &f : cn) {
+        const std::string sfx = "_f" + std::to_string(f[0]).substr(0, 4) + "_d" + std::to_string(int(f[1]));
+        c.push_back({"composite_noise" + sfx,
+                     with(m, {{"composite_noise", true}, {"composite_noise_intensity", 0.2},
+                              {"composite_noise_frequency", f[0]}, {"composite_noise_detail", int(f[1])}}),
+                     kModem | bit(NTSC_ST_COMPOSITE_NOISE)});
+        c.push_back({"luma_noise" + sfx,
+                     with(m, {{"luma_noise", true}, {"luma_noise_intensity", 0.153}, {"luma_noise_frequency", f[0]},
+                              {"luma_noise_detail", int(f[1])}}),
+                     kModem | bit(NTSC_ST_LUMA_NOISE)});
+        c.push_back({"chroma_noise" + sfx,
+                     with(m, {{"chroma_noise", true}, {"chroma_noise_intensity", 0.13}, {"chroma_noise_frequency", f[0]},
+                              {"chroma_noise_detail", int(f[1])}}),
+                     kModem | bit(NTSC_ST_CHROMA_NOISE)});
+    }
+    const double sn[][2] = {{0.6, 0.5}, {5, 0}, {20, 1.0}, {1, 0.9}, {60, 0.25}};
+    for (const auto &x : sn)
+        c.push_back({"snow_i" + std::to_string(x[0]).substr(0, 4) + "_a" + std::to_string(x[1]).substr(0, 4),
+                     with(m, {{"snow_intensity", x[0]}, {"snow_anisotropy", x[1]}}), kModem | bit(NTSC_ST_SNOW)});
+
+    // ---- phase 3: VHS ----
+    const json hs = {{"head_switching", true}, {"head_switching_height", 8}, {"head_switching_offset", 3},
+                     {"head_switching_horizontal_shift", 41.57}, {"head_switching_start_mid_line", true},
+                     {"head_switching_mid_line_position", 0.95}, {"head_switching_mid_line_jitter", 0.181}};
+    const uint32_t hsb = kModem | bit(NTSC_ST_HEAD_SWITCHING);
+    c.push_back({"head_switching", with(m, hs), hsb});
+    c.push_back({"head_switching_no_mid", with(with(m, hs), {{"head_switching_start_mid_line", false}}), hsb});
+    c.push_back({"head_switching_tall", with(with(m, hs), {{"head_switching_height", 900}, {"head_switching_offset", 10}}),
+                 hsb});  // more rows than a field: cut_off_rows
+    c.push_back({"head_switching_offset_gt", with(with(m, hs), {{"head_switching_offset", 20}}), hsb});  // no rows
+    c.push_back({"head_switching_mid_off_row",
+                 with(with(m, hs), {{"head_switching_mid_line_position", 1.3}, {"head_switching_mid_line_jitter", 0.0}}),
+                 hsb});  // copy_start > width: the row stays
+    c.push_back({"head_switching_left",
+                 with(with(m, hs), {{"head_switching_horizontal_shift", -60.0}, {"head_switching_mid_line_position", 0.1},
+                                    {"head_switching_mid_line_jitter", 1.0}}),
+                 hsb});
+    const json tn = {{"tracking_noise", true}, {"tracking_noise_height", 63}, {"tracking_noise_wave_intensity", 15},
+                     {"tracking_noise_snow_intensity", 0.025}, {"tracking_noise_snow_anisotropy", 0.25},
+                     {"tracking_noise_noise_intensity", 0.25}};
+    const uint32_t tnb = kModem | bit(NTSC_ST_TRACKING_NOISE);
+    c.push_back({"tracking_noise", with(m, tn), tnb});
+    c.push_back({"tracking_noise_tall", with(with(m, tn), {{"tracking_noise_height", 700}}), tnb});
+    c.push_back({"tracking_noise_heavy",
+                 with(with(m, tn), {{"tracking_noise_wave_intensity", 50}, {"tracking_noise_snow_intensity", 0.5},
+                                    {"tracking_noise_snow_anisotropy", 0.9}, {"tracking_noise_noise_intensity", 1.0}}),
+                 tnb});
+    const double cd[][2] = {{1.728, 0}, {-3.3, 0}, {0, 2},   {0, -2},     {6.35, -3},
+                            {-2.5, 4},  {2.0, 300}, {0.5, -300}, {-0.25, -1}, {40.0, 1}};
+    for (const auto &d : cd)
+        c.push_back({"chroma_delay_h" + std::to_string(d[0]).substr(0, 5) + "_v" + std::to_string(int(d[1])),
+                     with(m, {{"chroma_delay_horizontal", d[0]}, {"chroma_delay_vertical", int(d[1])}}),
+                     kModem | bit(NTSC_ST_CHROMA_DELAY)});
+    for (int d = 1; d <= 5; ++d)
+        c.push_back({"edge_wave_d" + std::to_string(d),
+                     with(with(m, vhs), {{"vhs_edge_wave_enabled", true}, {"vhs_edge_wave", d == 5 ? 6.0 : 0.342},
+                                         {"vhs_edge_wave_speed", 4}, {"vhs_edge_wave_frequency", d == 3 ? 0.5 : 0.05},
+                                         {"vhs_edge_wave_detail", d}}),
+                     kModem | bit(NTSC_ST_EDGE_WAVE)});
     return c;
 }
 
@@ -237,6 +295,7 @@ Diff run_case(NtscStage &st, const json &look, const ImageBGRA8 &src, int64_t fr
     auto t1 = std::chrono::steady_clock::now();
     NtscGpuPlan plan;
     st.gpu_plan(ctx, src.width, src.height, plan);
+    auto t1b = std::chrono::steady_clock::now();
     REQUIRE_MESSAGE(plan.supported(), "unsupported: " << plan.unsupported_names());
     CHECK_MESSAGE((plan.info.enabled & expect) == expect, "settings didn't take: enabled 0x" << std::hex
                                                                                              << plan.info.enabled);
@@ -246,7 +305,7 @@ Diff run_case(NtscStage &st, const json &look, const ImageBGRA8 &src, int64_t fr
     auto px = gputest::read(*g.dev, *out);
     auto t3 = std::chrono::steady_clock::now();
     if (rust_ms) *rust_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
-    if (gpu_ms) *gpu_ms += std::chrono::duration<double, std::milli>(t3 - t2).count();
+    if (gpu_ms) *gpu_ms += std::chrono::duration<double, std::milli>((t3 - t2) + (t1b - t1)).count();
     return compare(ref, px);
 }
 
@@ -255,8 +314,28 @@ struct Report {
     void line(const std::string &name, const Diff &d, const Tol &t) {
         by_case[name].add(d);
         if (verbose())
-            std::printf("PARITY %-24s max=%d mean=%.5f differ=%.4f%% over1=%.4f%% (tol max %d, %.2f%%)\n",
+            std::printf("PARITY %-32s max=%d mean=%.6f differ=%.4f%% over1=%.4f%% (tol max %d, %.2f%%)\n",
                         name.c_str(), d.max, d.mean(), d.frac() * 100, d.frac1() * 100, t.max, t.frac * 100);
+    }
+    // One line per test: how many cases were exact, the worst one.
+    void summary(const char *what) const {
+        if (!verbose()) return;
+        int exact = 0;
+        Diff all;
+        std::string worst;
+        int worst_max = -1;
+        double worst_frac = -1;
+        for (const auto &kv : by_case) {
+            exact += kv.second.differ == 0;
+            all.add(kv.second);
+            if (kv.second.max > worst_max || (kv.second.max == worst_max && kv.second.frac() > worst_frac)) {
+                worst_max = kv.second.max;
+                worst_frac = kv.second.frac();
+                worst = kv.first;
+            }
+        }
+        std::printf("SUMMARY %s: %d cases, %d exact; overall max=%d mean=%.6f differ=%.5f%%; worst %s\n", what,
+                    int(by_case.size()), exact, all.max, all.mean(), all.frac() * 100, worst.c_str());
     }
 };
 
@@ -333,19 +412,38 @@ std::vector<StageDiff> stage_by_stage(NtscStage &st, const std::string &name, co
 
 }  // namespace
 
-TEST_CASE("ntsc gpu: plan of the house look names what keeps it on the CPU") {
+TEST_CASE("ntsc gpu: the house look runs entirely on the GPU; a forced stage names itself") {
     NtscStage st;
     const json look = json::object();
     FrameContext ctx = ctx_for(look, 0, 0, 1.0);
     NtscGpuPlan plan;
     st.gpu_plan(ctx, 64, 48, plan);
-    CHECK_FALSE(plan.supported());
-    const std::string u = plan.unsupported_names();
-    CHECK(u.find("head_switching") != std::string::npos);
-    CHECK(u.find("composite_noise") != std::string::npos);
+    CHECK(plan.supported());
+    CHECK(plan.unsupported_names().empty());
+    for (int s : {NTSC_ST_COMPOSITE_NOISE, NTSC_ST_HEAD_SWITCHING, NTSC_ST_TRACKING_NOISE, NTSC_ST_LUMA_NOISE,
+                  NTSC_ST_CHROMA_NOISE, NTSC_ST_CHROMA_DELAY, NTSC_ST_EDGE_WAVE}) {
+        CAPTURE(ntsc_stage_name(s));
+        CHECK((plan.info.enabled & bit(s)) != 0);
+    }
     CHECK(plan.info.plane_rows == 48);  // InterleavedUpper: both fields' rows
     CHECK(plan.info.num_fields == 2);
-    CHECK((ntsc_gpu_implemented_stages() & kModem) == kModem);
+    CHECK(ntsc_gpu_implemented_stages() == (1u << NTSC_ST_COUNT) - 1);
+    CHECK((plan.simd_lanes == 4 || plan.simd_lanes == 8));
+    // The tables of the passes: shifts of the head-switching rows (the bottom of each field).
+    st.gpu_plan(ctx, 720, 480, plan);
+    const auto &hs = plan.shifts[NTSC_ST_HEAD_SWITCHING];
+    REQUIRE(hs.size() == 480);
+    int touched = 0;
+    for (const auto &r : hs) touched += r.boundary >= 0;
+    CHECK(touched > 0);
+    CHECK(hs[0].boundary == NTSC_GPU_SHIFT_NONE);
+    {
+        gputest::set_env("NTSCRT_NTSC_GPU_CPU_STAGES", "vhs_edge_wave,snow");
+        NtscGpuPlan forced;
+        st.gpu_plan(ctx, 64, 48, forced);
+        gputest::set_env("NTSCRT_NTSC_GPU_CPU_STAGES", nullptr);
+        CHECK(forced.unsupported_names() == "vhs_edge_wave");  // snow is off in the house look
+    }
 }
 
 TEST_CASE("ntsc gpu: row seeds are ntsc-rs's (phase noise rows match through the effect)") {
@@ -365,7 +463,32 @@ TEST_CASE("ntsc gpu: row seeds are ntsc-rs's (phase noise rows match through the
         CHECK(seeds[size_t(i)].offset < 32.0f);
     }
     CHECK(seeds[0].seed_lo != seeds[1].seed_lo);
-    CHECK(ntsc_gpu_row_shifts(inst, 32, 20, 4, 1, 1, 77, 0, nullptr) == -1);  // phase 3
+    // Tracking noise's rows: the bottom tracking_noise_height * vertical_scale rows of each field only.
+    std::vector<NtscGpuRowSeed> tr(20);
+    REQUIRE(ntsc_gpu_row_seeds(inst, 32, 20, 4, 1, 1, 77, NTSC_GPU_SEEDS_TRACKING, tr.data()) == 0);
+    CHECK(tr[0].seed_lo == 0);
+    CHECK(tr[0].seed_hi == 0);
+    CHECK((tr[9].seed_lo != 0 || tr[9].seed_hi != 0));  // last row of the upper field
+    CHECK(ntsc_gpu_row_shifts(inst, 32, 20, 4, 1, 1, 77, NTSC_ST_HEAD_SWITCHING, nullptr) == 1);
+    CHECK(ntsc_gpu_row_shifts(inst, 32, 20, 4, 1, 1, 77, NTSC_ST_SNOW, nullptr) == 1);
+    std::vector<NtscGpuRowShift> sh(20);
+    CHECK(ntsc_gpu_row_shifts(inst, 32, 20, 4, 1, 1, 77, NTSC_ST_LUMA_SMEAR, sh.data()) == 1);  // no row table
+    REQUIRE(ntsc_gpu_row_shifts(inst, 32, 20, 4, 1, 1, 77, NTSC_ST_EDGE_WAVE, sh.data()) == 0);
+    CHECK(sh[0].boundary == 1);
+    // Speckles: too little room says how much is needed and copies nothing.
+    const json snowy = look_of(with(gpu_full_settings(), {{"snow_intensity", 40}}));
+    REQUIRE(ntsc_settings_from_json(inst, ntsc_effective_settings_json(snowy).c_str(), nullptr) == 0);
+    uint32_t ne = 0, nv = 0;
+    CHECK(ntsc_gpu_speckles(inst, 64, 20, 4, 1, 1, 77, NTSC_ST_SNOW, nullptr, 0, nullptr, 0, &ne, &nv) == 3);
+    CHECK(ne > 0);
+    CHECK(nv >= ne);
+    std::vector<NtscGpuSpeckle> ev(ne);
+    std::vector<float> va(nv);
+    uint32_t ne2 = 0, nv2 = 0;
+    CHECK(ntsc_gpu_speckles(inst, 64, 20, 4, 1, 1, 77, NTSC_ST_SNOW, ev.data(), ne, va.data(), nv, &ne2, &nv2) == 0);
+    CHECK(ne2 == ne);
+    CHECK(nv2 == nv);
+    for (size_t i = 1; i < ev.size(); ++i) CHECK(ev[i].row >= ev[i - 1].row);  // in row order
     ntsc_free(inst);
 }
 
@@ -374,14 +497,16 @@ TEST_CASE("ntsc gpu: every kernel compiles on this device") {
     if (!g.dev) return;
     // On Metal this compiles the MSL library at runtime: the build only translates the Slang.
     for (const char *k : {"from_bgra8", "to_bgra8", "row_filter", "luma_box", "chroma_into_luma", "demod_luma",
-                          "demodulate", "rotate_chroma", "chroma_loss", "vert_blend", "probe_fma"}) {
+                          "demodulate", "rotate_chroma", "chroma_loss", "vert_blend", "probe_fma", "noise_add",
+                          "add_speckles", "shift_rows", "chroma_delay"}) {
         CAPTURE(k);
         gpu::Kernel *kk = nullptr;
         CHECK_NOTHROW(kk = g.dev->kernel(std::string("ntsc_gpu/") + k));
         CHECK(kk != nullptr);
     }
     // The exact-FMA variants use doubles in HLSL (fma() on Metal): needed only where mad() isn't fused.
-    for (const char *k : {"from_bgra8_x", "to_bgra8_x", "row_filter_x"}) {
+    for (const char *k : {"from_bgra8_x", "to_bgra8_x", "row_filter_x", "noise_add_x", "shift_rows_x",
+                          "chroma_delay_x"}) {
         try {
             g.dev->kernel(std::string("ntsc_gpu/") + k);
         } catch (const std::exception &e) {
@@ -412,6 +537,7 @@ TEST_CASE("ntsc gpu: parity with ntsc-rs, each pass alone") {
         rep.line(c.name, total, t);
         check_tol(c.name, total, t);
     }
+    rep.summary("each pass alone");
 }
 
 TEST_CASE("ntsc gpu: parity with ntsc-rs, all GPU passes together, every field mode, sizes, render scale") {
@@ -425,7 +551,8 @@ TEST_CASE("ntsc gpu: parity with ntsc-rs, all GPU passes together, every field m
         double scale;
         bool video_size;
     };
-    const Size sizes[] = {{720, 480, 1.0, true}, {333, 247, 1.0, true}, {720, 480, 0.5, false}, {5, 6, 1.0, true}};
+    const Size sizes[] = {{720, 480, 1.0, true}, {333, 247, 1.0, true}, {720, 480, 0.5, false}, {5, 6, 1.0, true},
+                          {1920, 1080, 1.0, true}};
     for (int field = 0; field <= 5; ++field)
         for (const Size &sz : sizes) {
             if (!strict() && (field != 4 || sz.w != 333)) continue;  // Metal: one report-only case
@@ -433,50 +560,90 @@ TEST_CASE("ntsc gpu: parity with ntsc-rs, all GPU passes together, every field m
             const json look = look_of(s);
             Diff total;
             double rust_ms = 0, gpu_ms = 0;
+            int runs = 0;
+            const bool big = sz.w >= 1920;
             for (const std::string &pk : pics) {
+                if (big && pk != "gradient" && pk != "edges") continue;
                 const ImageBGRA8 src = picture(pk, sz.w, sz.h);
-                for (int64_t frame : {0, 1, 2, 7})
-                    for (uint64_t seed : {0ull, 99ull})
+                for (int64_t frame : {0, 1, 2, 7, 31})
+                    for (uint64_t seed : {0ull, 99ull, 4000000000ull}) {
+                        if (big && frame != 1 && frame != 31) continue;
                         total.add(run_case(st, look, src, frame, seed, sz.scale, kModem, &rust_ms, &gpu_ms));
+                        ++runs;
+                    }
             }
             const std::string name = "full_f" + std::to_string(field) + "_" + std::to_string(sz.w) + "x" +
                                      std::to_string(sz.h) + (sz.scale != 1.0 ? "_rs0.5" : "");
             const Tol t;
             rep.line(name, total, t);
-            if (verbose() && sz.w == 720 && sz.scale == 1.0)
-                std::printf("TIME %-24s rust %.2f ms/frame, gpu (upload+run+readback) %.2f ms/frame%s\n", name.c_str(),
-                            rust_ms / 32, gpu_ms / 32, g.software ? " [software device]" : "");
+            if (verbose() && (sz.w == 720 || big) && sz.scale == 1.0)
+                std::printf("TIME %-24s rust %.2f ms/frame, gpu (plan+tables+upload+run+readback) %.2f ms/frame%s\n",
+                            name.c_str(), rust_ms / runs, gpu_ms / runs, g.software ? " [software device]" : "");
             check_tol(name, total, t);
         }
+    rep.summary("all passes together");
 }
 
-TEST_CASE("ntsc gpu: parity on the bundled presets that run entirely on the GPU") {
+TEST_CASE("ntsc gpu: parity on every bundled preset with NTSC on and the house look") {
     Gpu &g = gpu_env();
     if (!g.dev) return;
     NtscStage st;
     Report rep;
     int ran = 0;
+    std::vector<std::pair<std::string, json>> looks;
     for (auto &e : fs::directory_iterator(fs::path(NTSCRT_SOURCE_DIR) / "presets")) {
         if (e.path().extension() != ".json") continue;
         std::ifstream f(e.path(), std::ios::binary);
-        const json look = json::parse(f);
+        looks.emplace_back("preset " + e.path().stem().string(), json::parse(f));
+    }
+    std::sort(looks.begin(), looks.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+    looks.emplace_back("house look", json::object());
+    for (const auto &[name, look] : looks) {
         if (!st.active(look)) continue;
         NtscGpuPlan plan;
         st.gpu_plan(ctx_for(look, 0, 0, 1.0), 1920, 1080, plan);
+        CHECK_MESSAGE(plan.supported(), name << ": " << plan.unsupported_names());
         if (!plan.supported()) continue;
         ++ran;
-        if (!strict()) continue;
+        if (!strict() && name != "preset Medium VHS") continue;  // Metal: one report-only case
         Diff total;
         for (const std::string &pk : {"gradient", "edges"})
             for (int64_t frame : {0, 1, 30}) {
                 total.add(run_case(st, look, picture(pk, 1920, 1080), frame, 0, 1.0, kModem));
+                total.add(run_case(st, look, picture(pk, 720, 480), frame, 7, 1.0, kModem));
                 total.add(run_case(st, look, picture(pk, 1280, 720), frame, 5, 0.5, kModem));
             }
-        const std::string name = "preset " + e.path().stem().string();
         rep.line(name, total, Tol{});
         check_tol(name, total, Tol{});
     }
-    CHECK(ran >= 1);  // "Mild VHS" in this phase
+    CHECK(ran == 26);  // the 25 presets with NTSC on, and the house look
+    rep.summary("presets");
+}
+
+TEST_CASE("ntsc gpu: a comb filter on a picture whose fields have 1 and 2 rows") {
+    // luma_into_chroma falls back to the notch on a field of one row: per field,
+    // so a 3-row interleaved picture has the comb on one field and the notch on the other.
+    Gpu &g = gpu_env();
+    if (!g.dev || !strict()) return;
+    NtscStage st;
+    Report rep;
+    for (int field : {4, 5})  // InterleavedUpper, InterleavedLower
+        for (int demod : {2, 3}) {
+            const json look = look_of(with(gpu_full_settings(), {{"use_field", field}, {"chroma_demodulation", demod},
+                                                                 {"vhs_chroma_vert_blend", false}}));
+            Diff total;
+            for (const std::string &pk : {"gradient", "bars", "noise", "edges"})
+                for (int64_t frame : {0, 1, 2})
+                    for (int h : {3, 1}) total.add(run_case(st, look, picture(pk, 41, h), frame, 3, 1.0, kModem));
+            const std::string name = "comb_mixed_f" + std::to_string(field) + "_d" + std::to_string(demod);
+            rep.line(name, total, Tol{});
+            check_tol(name, total, Tol{});
+            NtscGpuPlan plan;
+            st.gpu_plan(ctx_for(look, 0, 0, 1.0), 41, 3, plan);
+            bool mixed = false;
+            for (const auto &p : plan.passes) mixed |= p.kind == NTSC_GPU_K_DEMOD && p.pad[0] == 1;
+            CHECK(mixed);
+        }
 }
 
 TEST_CASE("ntsc gpu: a field of one row with the vertical blend stays on ntsc-rs (which fails the frame)") {
@@ -503,11 +670,13 @@ TEST_CASE("ntsc gpu: stage-by-stage YIQ planes match ntsc-rs") {
     for (int field : {4, 0, 3}) {
         if (!strict() && field != 4) continue;
         json s = with(gpu_full_settings(), {{"use_field", field}});
+        // NTSCRT_NTSC_GPU_STAGE_SETTINGS=<json>: other settings on top (debugging)
+        if (const char *o = std::getenv("NTSCRT_NTSC_GPU_STAGE_SETTINGS"); o && *o) s = with(s, json::parse(o));
         const json look = look_of(s);
         const ImageBGRA8 src = picture("edges", 333, 247);
         const std::string name = "full_f" + std::to_string(field);
         auto diffs = stage_by_stage(st, name, look, src, 5, 3, 1.0);
-        CHECK(diffs.size() >= 10);
+        CHECK(diffs.size() >= 20);
         {
             // The harness sees a difference when there is one: the GPU planes
             // without the last pass against ntsc-rs's with it.
@@ -524,8 +693,8 @@ TEST_CASE("ntsc gpu: stage-by-stage YIQ planes match ntsc-rs") {
         for (const StageDiff &d : diffs) {
             const std::string stage_name = ntsc_stage_name(d.stage);
             CAPTURE(stage_name);
-            // Float differences of a few ulps of the planes' range (|Y| < ~2) at most:
-            // the same operations, fused where ntsc-rs fuses.
+            // The same operations, fused where ntsc-rs fuses: identical planes.
+            // (1e-4 would be a few ulps of the planes' range, |Y| < ~2.)
             if (strict())
                 for (int p = 0; p < 3; ++p) CHECK(d.max[p] <= 1e-4f);
             else
@@ -565,6 +734,18 @@ TEST_CASE("ntsc gpu: GPU time per stage (NTSCRT_NTSC_GPU_VERBOSE=1)") {
         };
         NtscGpuPlan full;
         st.gpu_plan(c, w, h, full);
+        for (const auto &[what, lk] : {std::pair<const char *, json>{"tables", look},
+                                       std::pair<const char *, json>{"tables house look", json::object()}}) {
+            // CPU side: the plan and its tables per frame (median of 15).
+            std::vector<double> ms;
+            for (int i = 0; i < 15; ++i) {
+                NtscGpuPlan p;
+                st.gpu_plan(ctx_for(lk, 1 + i, 0, 1.0), w, h, p);
+                ms.push_back(p.table_ms);
+            }
+            std::sort(ms.begin(), ms.end());
+            std::printf("STAGETIME %dx%d %-22s %.3f ms/frame (CPU: plan + tables, median)\n", w, h, what, ms[7]);
+        }
         const double all = time_mask(0xffffffffu), modem = time_mask(0);
         std::printf("STAGETIME %dx%d %-22s %.3f ms/frame (%s)\n", w, h, "all", all, g.ntsc->fma_mode());
         std::printf("STAGETIME %dx%d %-22s %.3f ms/frame (conversions + modulation)\n", w, h, "modem only", modem);
@@ -576,7 +757,8 @@ TEST_CASE("ntsc gpu: GPU time per stage (NTSCRT_NTSC_GPU_VERBOSE=1)") {
 }
 
 TEST_CASE("ntsc gpu: coverage of the bundled presets") {
-    // Which presets would run entirely on the GPU after each phase. Phase 2:
+    // Which presets would run entirely on the GPU after each phase (phases 2
+    // and 3 are both in now: every preset runs on the GPU). Phase 2:
     // composite / snow / luma / chroma noise; phase 3: the VHS passes (head
     // switching, tracking noise, chroma delay, edge wave).
     const uint32_t phase2 = bit(NTSC_ST_COMPOSITE_NOISE) | bit(NTSC_ST_SNOW) | bit(NTSC_ST_LUMA_NOISE) |
@@ -597,20 +779,25 @@ TEST_CASE("ntsc gpu: coverage of the bundled presets") {
         ++ntsc_on;
         NtscGpuPlan plan;
         st.gpu_plan(ctx_for(look, 10, 0, 1.0), 1920, 1080, plan);
-        const uint32_t u = plan.info.unsupported;
-        CHECK((u & ~(phase2 | phase3)) == 0);  // nothing outside the plan for phases 2-3
+        CHECK(plan.info.unsupported == 0);
+        const uint32_t u = plan.info.enabled & (phase2 | phase3);  // what phase 1 lacked
         const int ph = u == 0 ? 1 : (u & ~phase2) == 0 ? 2 : 3;
         p1 += ph <= 1;
         p2 += ph <= 2;
         p3 += ph <= 3;
-        if (verbose())
-            std::printf("COVERAGE %-28s gpu after phase %d (needs: %s)\n", e.path().stem().string().c_str(), ph,
-                        u ? plan.unsupported_names().c_str() : "-");
+        if (verbose()) {
+            std::string needs;
+            for (int i = 0; i < NTSC_ST_COUNT; ++i)
+                if (u & (1u << i)) needs += std::string(needs.empty() ? "" : ",") + ntsc_stage_name(i);
+            std::printf("COVERAGE %-28s gpu since phase %d (uses: %s)\n", e.path().stem().string().c_str(), ph,
+                        needs.empty() ? "-" : needs.c_str());
+        }
     }
     if (verbose())
         std::printf("COVERAGE presets=%d ntsc_on=%d full_gpu_after_phase1=%d phase2=%d phase3=%d\n", n, ntsc_on, p1,
                     p2, p3);
-    CHECK(ntsc_on > 0);
+    CHECK(ntsc_on == 25);
+    CHECK(p3 == ntsc_on);
 }
 
 // ---- the pipeline: default untouched, fallback exact --------------------------------------
@@ -654,7 +841,10 @@ ntscrt_instance *make_instance() {
 }
 
 struct EnvGuard {
-    ~EnvGuard() { gputest::set_env("NTSCRT_NTSC_GPU", nullptr); }
+    ~EnvGuard() {
+        gputest::set_env("NTSCRT_NTSC_GPU", nullptr);
+        gputest::set_env("NTSCRT_NTSC_GPU_CPU_STAGES", nullptr);
+    }
 };
 
 }  // namespace
@@ -663,8 +853,8 @@ TEST_CASE("ntsc gpu pipeline: unset or 0 changes nothing; an unsupported setting
     EnvGuard guard;
     ntscrt_instance *inst = make_instance();
     const ImageBGRA8 src = picture("bars", 160, 120);
-    const std::string house = pipeline_look(json::object());  // head switching etc.: not on the GPU yet
-    const std::string gpu_ok = pipeline_look(gpu_full_settings());
+    const std::string house = pipeline_look(json::object());
+    const std::string gpu_ok = pipeline_look(gpu_full_settings());  // house + snow
 
     gputest::set_env("NTSCRT_NTSC_GPU", nullptr);
     const Rendered a = render(inst, house, src, 4);
@@ -687,12 +877,16 @@ TEST_CASE("ntsc gpu pipeline: unset or 0 changes nothing; an unsupported setting
     CHECK(render(inst, gpu_ok, src, 4).px == a2.px);
 
     gputest::set_env("NTSCRT_NTSC_GPU", "1");
+    // Every stage is on the GPU now: a stage left to ntsc-rs on purpose (the
+    // debugging variable) stands in for an unsupported setting.
+    gputest::set_env("NTSCRT_NTSC_GPU_CPU_STAGES", "head_switching");
     const Rendered b = render(inst, house, src, 4);
+    gputest::set_env("NTSCRT_NTSC_GPU_CPU_STAGES", nullptr);
     CHECK(b.px == a.px);  // fallback: byte-identical to the Rust path
     if (ntscrt::testing::stats(inst).has_gpu) {
         CHECK(b.timings.find("ntsc_route=cpu") != std::string::npos);
         // Why: the unsupported stage, or (WARP without "force") the software device.
-        CHECK((b.timings.find("head_switching") != std::string::npos ||
+        CHECK((b.timings.find("not on the GPU yet: head_switching") != std::string::npos ||
                b.timings.find("software device") != std::string::npos ||
                b.timings.find("not on Metal") != std::string::npos));
     }
@@ -706,6 +900,11 @@ TEST_CASE("ntsc gpu pipeline: unset or 0 changes nothing; an unsupported setting
         ref.px = a2.px;
         const Diff d = compare(ref, c.px);
         check_tol("pipeline", d, Tol{});
+        const Rendered c2 = render(inst, house, src, 4);  // the house look: on the GPU too
+        CHECK(c2.timings.find("ntsc_route=gpu") != std::string::npos);
+        ref.px = a.px;
+        check_tol("pipeline house", compare(ref, c2.px), Tol{});
     }
     ntscrt_destroy(inst);
 }
+
