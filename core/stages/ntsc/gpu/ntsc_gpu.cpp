@@ -7,6 +7,7 @@
 //   from_bgra8 -> one dispatch (or two) per pass -> to_bgra8.
 #include "ntsc_gpu.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -108,6 +109,21 @@ struct NtscGpu::Impl {
     size_t rows_cap = 0, out_cap = 0;
     explicit Impl(gpu::Device &d) : dev(d) {}
 
+    // NTSCRT_PROFILE=1: time per pass (finish() after each).
+    std::vector<std::pair<std::string, double>> times;
+    const bool profile = [] {
+        const char *e = std::getenv("NTSCRT_PROFILE");
+        return e && *e && *e != '0';
+    }();
+    std::chrono::steady_clock::time_point mark;
+    void tick(const std::string &what) {
+        if (!profile) return;
+        dev.finish();
+        const auto now = std::chrono::steady_clock::now();
+        times.emplace_back(what, std::chrono::duration<double, std::milli>(now - mark).count());
+        mark = now;
+    }
+
     // ntsc-rs's mul_adds: mad() where the device fuses it, else the double-precision kernels.
     int fma = -1;  // -1 not probed, 0 mad, 1 double, 2 unfused mad (no doubles)
     void probe() {
@@ -204,7 +220,13 @@ struct NtscGpu::Impl {
             dev.dispatch(fused ? kf(name) : k(name), b, wx, wy);
         };
 
+        times.clear();
+        if (profile) {
+            dev.finish();
+            mark = std::chrono::steady_clock::now();
+        }
         run("ntsc_gpu/from_bgra8", base, W, R, true, &in, true);
+        tick("from_bgra8");
         const int count = n < 0 ? int(plan.passes.size()) : std::min<int>(n, int(plan.passes.size()));
         for (int idx = 0; idx < count; ++idx) {
             const NtscGpuPass &ps = plan.passes[size_t(idx)];
@@ -248,11 +270,18 @@ struct NtscGpu::Impl {
                 run("ntsc_gpu/chroma_loss", u, W, R, true);
                 break;
             case NTSC_GPU_K_VERT_BLEND:
-                if (plan.height >= 2) run("ntsc_gpu/vert_blend", u, W, 2, true);  // yiq.dimensions.1 < 2: skipped
+                if (plan.height < 2) break;  // ntsc-rs: yiq.dimensions.1 < 2 skips it
+                dev.copy(*p.i, *p.s);
+                u.mode = 0;
+                run("ntsc_gpu/vert_blend", u, W, R, true);
+                dev.copy(*p.q, *p.s);
+                u.mode = 1;
+                run("ntsc_gpu/vert_blend", u, W, R, true);
                 break;
             default:
                 throw std::runtime_error("ntsc gpu: unknown pass kind " + std::to_string(ps.kind));
             }
+            tick(ntsc_stage_name(ps.stage));
         }
         (void)kPlaneI;
         (void)kPlaneQ;
@@ -278,8 +307,11 @@ std::shared_ptr<gpu::Texture> NtscGpu::run(const gpu::Texture &in, const NtscGpu
     b.buffers = {m.rows.get(), m.out.get()};
     b.out_textures = {p.y.get(), p.i.get(), p.q.get(), p.s.get(), out.get()};
     m.dev.dispatch(m.kf("ntsc_gpu/to_bgra8"), b, plan.width, plan.height);
+    m.tick("to_bgra8");
     return out;
 }
+
+const std::vector<std::pair<std::string, double>> &NtscGpu::pass_times() const { return impl_->times; }
 
 const char *NtscGpu::fma_mode() {
     impl_->probe();

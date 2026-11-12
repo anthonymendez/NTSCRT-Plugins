@@ -141,7 +141,7 @@ void to_bgra8_x(uint3 id : SV_DispatchThreadID) { to_bgra8_impl<ExactFma>(id); }
 //   z[k]   = fma(-den[k], y, fma(num[k+1], x, z[k+1]))   (z[3] = 0)
 // Reads sample min(i, width - 1), writes output i - delay (in place: a sample
 // is always read before anything is written over it).
-#define FILTER_CHUNK 8
+#define FILTER_CHUNK 16
 
 void filter_row<F : IFma>(RWTexture2D<float> T, uint row, uint p)
 {
@@ -156,25 +156,45 @@ void filter_row<F : IFma>(RWTexture2D<float> T, uint row, uint p)
     precise float z0 = U.zi[p].x * v;
     precise float z1 = U.zi[p].y * v;
     precise float z2 = U.zi[p].z * v;
-    // Eight loads issued together, then eight serial steps: the loads' latency
-    // overlaps instead of stalling every step. (Written out: Slang emits loops
-    // as for(;;) + break, which fxc cannot unroll.)
-#define NTSC_LOAD(k) const float x##k = T[uint2(uint(min(base + k, W - 1)), row)];
+    // Software-pipelined: the next 16 samples are loaded while this 16 are
+    // filtered, so the memory latency overlaps the serial arithmetic (one thread
+    // per row leaves the GPU mostly idle; latency, not math, is the cost).
+    // Safe in place: the next chunk's samples are never written before they're
+    // read (writes go to i - delay <= i). Written out because Slang emits loops
+    // as for(;;) + break, which fxc cannot unroll.
+#define NTSC_LOAD(k, b) cur##k = T[uint2(uint(min((b) + k, W - 1)), row)];
+#define NTSC_NEXT(k) const float nxt##k = T[uint2(uint(min(base + FILTER_CHUNK + k, W - 1)), row)];
 #define NTSC_STEP(k)                                                   \
     if (base + k < total) {                                            \
-        precise float y = F.fma3(n.x, x##k, z0);                       \
-        precise float n3 = n.w * x##k;                                 \
-        z0 = F.fma3(-d.x, y, F.fma3(n.y, x##k, z1));                   \
-        z1 = F.fma3(-d.y, y, F.fma3(n.z, x##k, z2));                   \
+        precise float y = F.fma3(n.x, cur##k, z0);                     \
+        precise float n3 = n.w * cur##k;                               \
+        z0 = F.fma3(-d.x, y, F.fma3(n.y, cur##k, z1));                 \
+        z1 = F.fma3(-d.y, y, F.fma3(n.z, cur##k, z2));                 \
         z2 = F.fma3(-d.z, y, n3);                                      \
         if (base + k >= D) T[uint2(uint(base + k - D), row)] = y;      \
     }
+#define NTSC_SHIFT(k) cur##k = nxt##k;
+    float cur0, cur1, cur2, cur3, cur4, cur5, cur6, cur7, cur8, cur9, cur10, cur11, cur12, cur13, cur14, cur15;
+    NTSC_LOAD(0, 0) NTSC_LOAD(1, 0) NTSC_LOAD(2, 0) NTSC_LOAD(3, 0)
+    NTSC_LOAD(4, 0) NTSC_LOAD(5, 0) NTSC_LOAD(6, 0) NTSC_LOAD(7, 0)
+    NTSC_LOAD(8, 0) NTSC_LOAD(9, 0) NTSC_LOAD(10, 0) NTSC_LOAD(11, 0)
+    NTSC_LOAD(12, 0) NTSC_LOAD(13, 0) NTSC_LOAD(14, 0) NTSC_LOAD(15, 0)
     [loop] for (int base = 0; base < total; base += FILTER_CHUNK) {
-        NTSC_LOAD(0) NTSC_LOAD(1) NTSC_LOAD(2) NTSC_LOAD(3)
-        NTSC_LOAD(4) NTSC_LOAD(5) NTSC_LOAD(6) NTSC_LOAD(7)
+        NTSC_NEXT(0) NTSC_NEXT(1) NTSC_NEXT(2) NTSC_NEXT(3)
+        NTSC_NEXT(4) NTSC_NEXT(5) NTSC_NEXT(6) NTSC_NEXT(7)
+        NTSC_NEXT(8) NTSC_NEXT(9) NTSC_NEXT(10) NTSC_NEXT(11)
+        NTSC_NEXT(12) NTSC_NEXT(13) NTSC_NEXT(14) NTSC_NEXT(15)
         NTSC_STEP(0) NTSC_STEP(1) NTSC_STEP(2) NTSC_STEP(3)
         NTSC_STEP(4) NTSC_STEP(5) NTSC_STEP(6) NTSC_STEP(7)
+        NTSC_STEP(8) NTSC_STEP(9) NTSC_STEP(10) NTSC_STEP(11)
+        NTSC_STEP(12) NTSC_STEP(13) NTSC_STEP(14) NTSC_STEP(15)
+        NTSC_SHIFT(0) NTSC_SHIFT(1) NTSC_SHIFT(2) NTSC_SHIFT(3)
+        NTSC_SHIFT(4) NTSC_SHIFT(5) NTSC_SHIFT(6) NTSC_SHIFT(7)
+        NTSC_SHIFT(8) NTSC_SHIFT(9) NTSC_SHIFT(10) NTSC_SHIFT(11)
+        NTSC_SHIFT(12) NTSC_SHIFT(13) NTSC_SHIFT(14) NTSC_SHIFT(15)
     }
+#undef NTSC_NEXT
+#undef NTSC_SHIFT
 #undef NTSC_LOAD
 #undef NTSC_STEP
 }
@@ -337,24 +357,17 @@ void chroma_loss(uint3 id : SV_DispatchThreadID)
     pQ[id.xy] = 0.0;
 }
 
-// ---- chroma_vert_blend (ntsc.rs 1118-1147): one thread per column and plane,
-// down the rows of each field ----
-void blend_column(RWTexture2D<float> T, uint x)
-{
-    precise float prev = 0.0;
-    [loop] for (uint y = 0; y < U.planeRows; y++) {
-        if (rows[y].field_row == 0u) prev = 0.0;
-        precise float c = T[uint2(x, y)];
-        T[uint2(x, y)] = (prev + c) * 0.5;
-        prev = c;
-    }
-}
-
+// ---- chroma_vert_blend (ntsc.rs 1118-1147): each chroma row averaged with the
+// one above it in its field (the field's first row with 0), from a copy of the
+// plane in the scratch plane: mode 0 writes I, mode 1 Q ----
 [shader("compute")]
-[numthreads(64, 1, 1)]
+[numthreads(8, 8, 1)]
 void vert_blend(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= U.width || id.y > 1u) return;
-    if (id.y == 0u) blend_column(pI, id.x);
-    else blend_column(pQ, id.x);
+    if (id.x >= U.width || id.y >= U.planeRows) return;
+    precise float prev = rows[id.y].field_row == 0u ? 0.0 : pS[uint2(id.x, id.y - 1u)];
+    precise float c = pS[id.xy];
+    precise float r = (prev + c) * 0.5;
+    if (U.mode == 0u) pI[id.xy] = r;
+    else pQ[id.xy] = r;
 }

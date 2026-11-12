@@ -33,6 +33,7 @@ void simulate_device_lost(ntscrt_instance *inst, bool recreate_fails = false);
 struct PhaseTimes {
     double convert_in = 0;   // host picture -> internal BGRA8 (to_bgra8)
     double cpu_stages = 0;   // Digital video, ntsc-rs
+    double ntsc = 0;         // of cpu_stages: the NTSC stage (ntsc-rs, or its GPU port: NTSCRT_NTSC_GPU)
     double upload = 0;       // CPU -> GPU texture uploads
     double gpu_stages = 0;   // Downscale, Glitch, CRT, Screen Loop (submission)
     double readback = 0;     // GPU -> CPU, including the wait for the GPU

@@ -284,6 +284,7 @@ PhaseTimes last_phases(ntscrt_instance *inst) {
     using P = ntscrt::PhaseTimes;
     p.convert_in = t.ms[P::In];
     p.cpu_stages = t.ms[P::Digital] + t.ms[P::Ntsc];
+    p.ntsc = t.ms[P::Ntsc];
     p.upload = t.ms[P::Upload];
     p.gpu_stages = t.ms[P::Downscale] + t.ms[P::Glitch] + t.ms[P::Crt] + t.ms[P::Loop];
     p.readback = t.ms[P::Readback];

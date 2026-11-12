@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../../../gpu/gpu.h"
@@ -73,6 +74,9 @@ public:
     // fused), "double" (it isn't, e.g. WARP: the *_x kernels, exact), or
     // "mad-unfused" (neither: results may differ from ntsc-rs by a level).
     const char *fma_mode();
+    // With NTSCRT_PROFILE=1: the last run's time per pass (waits for the GPU
+    // after each one), "from_bgra8", "<stage name>", ..., "to_bgra8".
+    const std::vector<std::pair<std::string, double>> &pass_times() const;
 
 private:
     struct Impl;

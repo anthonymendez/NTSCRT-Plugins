@@ -462,6 +462,46 @@ TEST_CASE("ntsc gpu: stage-by-stage YIQ planes match ntsc-rs") {
     }
 }
 
+TEST_CASE("ntsc gpu: GPU time per stage (NTSCRT_NTSC_GPU_VERBOSE=1)") {
+    // Throughput, not latency: 20 frames queued back to back, one wait. A
+    // stage's cost is the full plan's time minus the time without it.
+    Gpu &g = gpu_env();
+    if (!g.dev || !verbose()) return;
+    NtscStage st;
+    const json look = look_of(gpu_full_settings());
+    for (int w : {3840, 1920}) {
+        const int h = w * 9 / 16;
+        const ImageBGRA8 src = picture("gradient", w, h);
+        const FrameContext c = ctx_for(look, 1, 0, 1.0);
+        auto tex = gputest::bgra(*g.dev, w, h, src.px);
+        auto time_mask = [&](uint32_t mask) {
+            NtscGpuPlan plan;
+            st.gpu_plan(c, w, h, plan, mask);
+            for (int i = 0; i < 20; ++i) g.ntsc->run(*tex, plan);  // warm-up (clocks up)
+            g.dev->finish();
+            double best = 1e9;
+            for (int trial = 0; trial < 3; ++trial) {
+                const int n = 30;
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < n; ++i) g.ntsc->run(*tex, plan);
+                g.dev->finish();
+                const auto t1 = std::chrono::steady_clock::now();
+                best = std::min(best, std::chrono::duration<double, std::milli>(t1 - t0).count() / n);
+            }
+            return best;
+        };
+        NtscGpuPlan full;
+        st.gpu_plan(c, w, h, full);
+        const double all = time_mask(0xffffffffu), modem = time_mask(0);
+        std::printf("STAGETIME %dx%d %-22s %.3f ms/frame (%s)\n", w, h, "all", all, g.ntsc->fma_mode());
+        std::printf("STAGETIME %dx%d %-22s %.3f ms/frame (conversions + modulation)\n", w, h, "modem only", modem);
+        for (int s2 = 0; s2 < NTSC_ST_COUNT; ++s2) {
+            if (!(full.info.enabled & (1u << s2)) || (kModem & (1u << s2))) continue;
+            std::printf("STAGETIME %dx%d %-22s +%.3f ms\n", w, h, ntsc_stage_name(s2), time_mask(1u << s2) - modem);
+        }
+    }
+}
+
 TEST_CASE("ntsc gpu: coverage of the bundled presets") {
     // Which presets would run entirely on the GPU after each phase. Phase 2:
     // composite / snow / luma / chroma noise; phase 3: the VHS passes (head
