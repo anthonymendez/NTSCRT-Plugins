@@ -116,6 +116,10 @@ written but not yet built.
   serial numbers / hardware UUIDs), and trims crash reports to the crash itself. Non-text files are left out.
 
 ### Fixed
+- Resolve: far into a timeline (an hour in, the default 01:00:00:00 start), choosing a preset, editing the
+  CRT shader or pressing *Load* with no file no longer re-runs the Glitch receiver from the timeline's first
+  frame (seconds per hour; in 0.4.0 every edit there took ~45 s at UHD). Param edits no longer freeze
+  Resolve's interface while a frame is rendering: the caches they drop are dropped before the next render.
 - The one-line installs (`install.ps1` / `install.sh` from `main`) work again with v0.3.0 and v0.4.0, which
   predate `SHA256SUMS`: they resolve `latest` to its tag and install those two releases with a warning
   instead of refusing them; a missing `SHA256SUMS` on any other release is still refused.

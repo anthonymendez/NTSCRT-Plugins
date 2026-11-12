@@ -551,6 +551,137 @@ TEST_CASE("edits and seeks: look history, cache flushing, timings") {
     }
 }
 
+// An hour into a 60 fps timeline (frame 216000, Resolve's default 01:00:00:00
+// start): edits must not make the next render re-run the whole hour.
+// NTSCRT_BENCH_UHD=1 renders 3840x2160 (the report's size) instead of 640x360.
+TEST_CASE("high frame number: renders after edits stay bounded") {
+    Fixture f;
+    f.create();
+    const bool uhd = std::getenv("NTSCRT_BENCH_UHD") != nullptr;
+    const int w = uhd ? 3840 : 640, h = uhd ? 2160 : 360, last = 250000;
+    const double fps = 60.0;
+    mock::Clip &src = *f.inst->clips[kOfxImageEffectSimpleSourceClipName];
+    mock::Clip &dst = *f.inst->clips[kOfxImageEffectOutputClipName];
+    src.width = dst.width = w;
+    src.height = dst.height = h;
+    src.any_frame.resize(size_t(w) * h * 4);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float *p = &src.any_frame[(size_t(y) * w + x) * 4];
+            p[0] = x / float(w - 1);
+            p[1] = y / float(h - 1);
+            p[2] = float((x / 16 + y / 16) % 2);
+            p[3] = 1.f;
+        }
+    dst.any_frame.assign(src.any_frame.size(), 0.f);
+    src.any_frame_last = dst.any_frame_last = last;
+    src.props.set(kOfxImageEffectPropFrameRange, {0.0, double(last)});
+    src.props.set(kOfxImageEffectPropFrameRate, {fps});
+    src.props.set(kOfxImageEffectPropUnmappedFrameRate, {fps});
+    f.inst->props.set(kOfxImageEffectPropFrameRate, {fps});
+    std::vector<float> out;
+    f.host.on_release = [&](const mock::Image &im) {
+        if (im.props.s(kOfxImagePropUniqueIdentifier).rfind(kOfxImageEffectOutputClipName, 0) == 0) out = im.px;
+    };
+    auto render = [&](double t) {
+        mock::PropSet in;
+        in.set(kOfxPropTime, {t});
+        in.set(kOfxImageEffectPropFieldToRender, {std::string(kOfxImageFieldNone)});
+        in.set(kOfxImageEffectPropRenderWindow, {0, 0, w, h});
+        in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
+        in.set(kOfxImageEffectPropSequentialRenderStatus, {0});
+        in.set(kOfxImageEffectPropInteractiveRenderStatus, {1});
+        in.set(kOfxImageEffectPropRenderQualityDraft, {0});
+        auto t0 = std::chrono::steady_clock::now();
+        OfxStatus st = f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in);
+        REQUIRE(st == kOfxStatOK);
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+    auto purged = [&](double t) {
+        OfxStatus st = f.host.action(f.plug, kOfxActionPurgeCaches, f.inst.get());
+        REQUIRE((st == kOfxStatOK || st == kOfxStatReplyDefault));
+        render(t);
+        return out;
+    };
+    std::ostringstream report;
+    report.setf(std::ios::fixed);
+    report.precision(1);
+    report << w << "x" << h << " @" << fps << " fps, Clean CRT:";
+    const char *bench_frame = std::getenv("NTSCRT_BENCH_FRAME");  // another timeline position
+    const double T = bench_frame ? std::atof(bench_frame) : 216067;
+    // The report's look: Clean CRT (Downscale 256 px, Glitch on with its defaults).
+    mock::Param *pp = f.param("host_preset");
+    const int clean = f.choice_index(*pp, "Clean CRT");
+    REQUIRE(clean > 0);
+    pp->v[0] = clean;
+    REQUIRE(f.changed("host_preset", T) == kOfxStatOK);
+    // The first render simulates the Glitch receiver from frame 0: the cost edits
+    // used to pay again (0.4.0: ~30 s here, ~45 s in Resolve at UHD).
+    const double first_ms = render(T);
+    report << " first render t=" << T << " " << first_ms << " ms";
+    report << "; next frame " << render(T + 1) << " ms";
+    report << "; seek back 10 " << render(T - 9) << " ms";
+
+    // The CRT shader menu (the report: royale -> glow_gauss).
+    mock::Param *crt = f.param("crt_preset");
+    int royale = -1;
+    for (int i = 0; i < crt->props.dim(kOfxParamPropChoiceOption); ++i) {
+        std::string l = crt->props.s(kOfxParamPropChoiceOption, i);
+        for (char &ch : l) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        if (l.find("royale") != std::string::npos) royale = i;
+    }
+    REQUIRE(royale >= 0);
+    crt->v[0] = royale;
+    REQUIRE(f.changed("crt_preset", T) == kOfxStatOK);
+    const double shader_ms = render(T);
+    report << "; CRT shader royale + render " << shader_ms << " ms";
+
+    // The Preset menu again: Clean CRT's values (glow_gauss), the Glitch ones unchanged.
+    pp->v[0] = clean;
+    REQUIRE(f.changed("host_preset", T) == kOfxStatOK);
+    const double preset_ms = render(T);
+    const std::vector<float> after_preset = out;
+    report << "; preset Clean CRT + render " << preset_ms << " ms";
+
+    mock::Param *boost = f.param("crt_glow_gauss_BOOST");
+    boost->v[0] = 1.3;
+    REQUIRE(f.changed("crt_glow_gauss_BOOST", T) == kOfxStatOK);
+    const double crt_ms = render(T);
+    report << "; CRT edit + render " << crt_ms << " ms";
+
+    f.param("host_preset_file")->str.clear();
+    REQUIRE(f.changed("host_load_preset", T) == kOfxStatOK);  // "Choose a preset file first."
+    const double load_ms = render(T);
+    report << "; Load (no file) + render " << load_ms << " ms";
+
+    // These do re-run the receiver: its raster / every earlier frame's settings changed.
+    mock::Param *dsw = f.param("downscale_width");
+    dsw->v[0] = 320;
+    REQUIRE(f.changed("downscale_width", T) == kOfxStatOK);
+    report << "; Downscale edit + render " << render(T) << " ms";
+    mock::Param *sig = f.param("glitch_signal_strength");
+    sig->v[0] = 0.6;
+    REQUIRE(f.changed("glitch_signal_strength", T) == kOfxStatOK);
+    report << "; Glitch edit + render " << render(T) << " ms";
+
+    MESSAGE(report.str());
+    std::printf("[timing] %s\n", report.str().c_str());
+
+    // Only meaningful when the first render had an hour to simulate. (The first
+    // switch to royale compiles its chain, ~1 s whatever the frame: not checked.)
+    if (T > 100000) {
+        CHECK(preset_ms < 0.3 * first_ms);
+        CHECK(crt_ms < 0.3 * first_ms);
+        CHECK(load_ms < 0.3 * first_ms);
+    }
+    // Keeping the receiver changed nothing: the picture a render from scratch gives.
+    pp->v[0] = clean;
+    REQUIRE(f.changed("host_preset", T) == kOfxStatOK);  // back to Clean CRT's values
+    render(T);
+    CHECK(out == after_preset);
+    CHECK(purged(T) == after_preset);
+}
+
 // Animated presets become host keyframes; Horizontal resolution / Digital video
 // formats write what their schema "applies" says; preset files round-trip.
 TEST_CASE("presets: timeline keyframes, menus with applies, save/load round trip") {

@@ -470,13 +470,14 @@ public:
         if (args.reason != OFX::eChangeTime) {
             ++look_gen_;
             keys_dirty_ = true;
-            if (uint32_t m = cache_mask(name)) {
-                std::lock_guard<std::mutex> lk(mu_);
-                if (inst_) ntscrt_flush_caches_mask(inst_, m);
-            }
+            if (uint32_t m = cache_mask(name)) flush_before_next_render(m);
         }
         if (applying_) return;
         if (args.reason == OFX::eChangeUserEdit) {
+            // Glitch keys before a preset / file replaces them (see below).
+            const bool presets = name == kPresetParam || name == kLoopPresetParam || name == kLoadParam;
+            const bool glitch_keyed_before = presets && glitch_keyed();
+            bool applied = name != kLoadParam;
             if (name == kPresetParam) {
                 int i = 0;
                 preset_->getValue(i);
@@ -490,17 +491,24 @@ public:
                 loop_preset_->getValue(i);
                 if (i > 0 && size_t(i) <= g_.loops.size()) apply_preset(g_.loops[size_t(i - 1)].data, args.time);
             } else if (name == kLoadParam) {
-                load_preset_file(args.time);
+                applied = load_preset_file(args.time);
             } else if (name == kSaveParam) {
                 save_preset_file(args.time);
             } else {
                 apply_choice_effects(name, args.time);
             }
             // preset apply/load changed many params (keyframes too): flush once
-            // more afterwards. Source frames are keyed by what shapes them.
-            if (name == kPresetParam || name == kLoopPresetParam || name == kLoadParam) {
-                std::lock_guard<std::mutex> lk(mu_);
-                if (inst_) ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
+            // more afterwards. Source frames are keyed by what shapes them. The
+            // Glitch receiver re-checks its own history (and its raster), which
+            // catches values that hold for every frame; only keyframes (before
+            // or after) can change frames between its probes. Re-simulating it
+            // costs time in proportion to the frame number (seconds an hour into
+            // a timeline), so it is kept when no Glitch param is keyed. A Load
+            // that read no file changed nothing.
+            if (presets && applied) {
+                uint32_t m = NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE;
+                if (!glitch_keyed_before && !glitch_keyed()) m &= ~uint32_t(NTSCRT_CACHE_GLITCH);
+                flush_before_next_render(m);
             }
         }
         update_dependents(args.time);
@@ -656,6 +664,25 @@ public:
         look_cache_[t] = look;
     }
 
+    // Cache flushes asked for by param changes run at the start of the next
+    // render, under mu_: a changedParam (Resolve's UI thread) never waits for a
+    // render in flight, which can take seconds.
+    void flush_before_next_render(uint32_t m) { pending_flush_.fetch_or(m); }
+
+    // Does any Glitch param have keyframes (unreadable: assume so)?
+    bool glitch_keyed() const {
+        for (size_t i = 0; i < params_.size(); ++i) {
+            const ParamDef &p = g_.schema.params[i];
+            if (p.feedback || p.path.rfind("/glitch/", 0) != 0) continue;
+            try {
+                if (static_cast<OFX::ValueParam *>(params_[i])->getNumKeys() > 0) return true;
+            } catch (...) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Core caches a change of host param `name` can invalidate (0 = none).
     uint32_t cache_mask(const std::string &name) {
         // Host-only params: never part of the look (presets / files apply their
@@ -804,21 +831,23 @@ private:
         }
     }
 
-    void load_preset_file(double t) {
+    // True when a preset was read and applied.
+    bool load_preset_file(double t) {
         std::string path;
         preset_file_->getValue(path);
         if (path.empty()) {
             sendMessage(OFX::Message::eMessageError, "", "Choose a preset file first.");
-            return;
+            return false;
         }
         std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
         json j = f ? json::parse(f, nullptr, false) : json();
         if (!j.is_object()) {
             sendMessage(OFX::Message::eMessageError, "", "Could not read an NTSCRT preset from " + path);
-            return;
+            return false;
         }
         apply_preset(j, t);
         update_dependents(t);
+        return true;
     }
 
     void save_preset_file(double t) {
@@ -872,6 +901,7 @@ private:
     bool par_warned_ = false;                // non-square pixels: said once
     std::atomic<uint64_t> look_gen_{0};      // bumped by every param change
     std::atomic<bool> keys_dirty_{true};     // re-count keyframes before the next render
+    std::atomic<uint32_t> pending_flush_{0};  // NTSCRT_CACHE_* to drop before the next render
     bool animated_ = true;
     uint64_t keys_sig_ = 0;      // key counts per param, hashed (0 = no keys anywhere)
     bool keys_counted_ = false;
@@ -1032,6 +1062,7 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         report_error("NTSCRT: core failed to initialise");
         OFX::throwSuiteStatusException(kOfxStatFailed);
     }
+    if (uint32_t m = pending_flush_.exchange(0)) ntscrt_flush_caches_mask(inst_, m);
     ctx.animated = animated();
     if (ctx.animated) note_current_look(args.time, look);
     const size_t builds_before = look_builds_;
