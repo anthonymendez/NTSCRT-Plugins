@@ -4,7 +4,8 @@ ntscrt_add_test(test_hostparams
   test_params_model.cpp
   test_params_ofx.cpp
   test_params_timeline.cpp
-  test_ofx_reference.cpp)
+  test_ofx_reference.cpp
+  test_debug_switch.cpp)
 target_link_libraries(test_hostparams PRIVATE ntscrt_hostparams)
 
 ntscrt_add_test(test_hostparams_cross test_cross_host.cpp)

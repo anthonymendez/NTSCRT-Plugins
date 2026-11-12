@@ -6,6 +6,7 @@
 // the core's fetch_source / look_at callbacks.
 #include <ntscrt/ntscrt.h>
 
+#include "ntscrt_host/debug_switch.h"
 #include "ntscrt_host/file_log.h"
 #include "ntscrt_host/params.h"
 #include "ofxsImageEffect.h"
@@ -59,6 +60,12 @@ const char kSaveParam[] = "host_save_preset";
 const char kSeedParam[] = "host_seed";
 const char kDebugParam[] = "host_debug_logging";
 const char kOpenLogsParam[] = "host_open_logs";
+const char kDebugAllParam[] = "host_debug_all";               // push button: toggles the global switch
+const char kDebugAllStatusParam[] = "host_debug_all_status";  // read-only: the global switch's state
+const char kDebugAllOn[] = "ON for every NTSCRT effect";
+const char kDebugAllOff[] = "off";
+const char kDebugAllTurnOn[] = "Turn on debug logging for all effects";
+const char kDebugAllTurnOff[] = "Turn off debug logging for all effects";
 const char kHostGroup[] = "grp_host_presets";
 const char kNoPreset[] = "(none)";
 
@@ -177,7 +184,9 @@ bool wrap_padded(OFX::Image &im, const OfxRectI &r, ntscrt_image &out, std::vect
 // instance, the first renders of each instance and every failure. For bug reports.
 //   Windows: %LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log    macOS: ~/Library/Logs/NTSCRT/ntscrt-ofx.log
 //   NTSCRT_OFX_LOG=<file> logs there instead ("off" disables), NTSCRT_OFX_LOG_VERBOSE=1 logs every frame.
-//   The per-instance "Debug logging" checkbox logs every frame of that instance in detail.
+//   The per-instance "Debug logging" checkbox logs every frame of that instance in detail; so does
+//   every instance while "Debug logging for all effects" is on (a marker file in the log's default
+//   folder, ntscrt::host::DebugSwitch; NTSCRT_SETTINGS_DIR moves it) or NTSCRT_DEBUG_LOG=1 is set.
 // Rotated to ntscrt-ofx.old.log at 1 MB (ntscrt::host::FileLog, shared with the FxPlug plug-in).
 namespace dlog {
 std::filesystem::path default_path() {
@@ -211,6 +220,23 @@ bool verbose() {
 void write(const std::string &msg) {
     static const ntscrt::host::FileLog log(u8(path()));  // empty path: logging off
     log.write(msg);
+}
+// "Debug logging for all effects": in the default log folder whatever NTSCRT_OFX_LOG says.
+const ntscrt::host::DebugSwitch &all_switch() {
+    static const ntscrt::host::DebugSwitch sw(ntscrt::host::debug_switch_path(
+        default_path().empty() ? std::string() : u8(default_path().parent_path())));
+    return sw;
+}
+std::string all_state(bool on) {
+    return std::string(on ? "on" : "off") + " (" + (all_switch().path().empty() ? "unavailable" : all_switch().path()) + ")";
+}
+// Is the global switch on? Re-read at most once a second; a change made elsewhere (another
+// host, the file deleted by hand) is logged once, by whichever instance notices it first.
+bool debug_all(bool refresh = false) {
+    bool changed = false;
+    const bool on = refresh ? all_switch().refresh(&changed) : all_switch().on(&changed);
+    if (changed) write("debug logging for all NTSCRT effects is now " + all_state(on));
+    return on;
 }
 const char *depth_name(OFX::BitDepthEnum d) {
     switch (d) {
@@ -325,6 +351,8 @@ public:
         preset_file_ = fetchStringParam(kPresetFileParam);
         seed_ = fetchIntParam(kSeedParam);
         debug_ = fetchBooleanParam(kDebugParam);
+        debug_all_ = fetchPushButtonParam(kDebugAllParam);
+        debug_all_status_ = fetchStringParam(kDebugAllStatusParam);
         for (size_t i = 0; i < s.params.size(); ++i) {
             by_name_[s.params[i].name] = i;
             if (s.params[i].type == PType::Bool) by_id_[s.params[i].id] = i;
@@ -338,6 +366,8 @@ public:
             o << "instance #" << id_ << " created, context " << getContext() << ", core "
               << (inst_ ? "ok" : "FAILED to initialise");
             if (inst_ && *ntscrt_last_error(inst_)) o << " (" << ntscrt_last_error(inst_) << ")";
+            o << "; debug logging for all effects " << dlog::all_state(dlog::debug_all())
+              << (env_debug_log() ? "; NTSCRT_DEBUG_LOG set: this instance logs in detail" : "");
             dlog::write(o.str());
         }
         update_dependents(0.0);
@@ -450,17 +480,28 @@ public:
         if (inst_) ntscrt_flush_caches(inst_);
     }
 
+    // The panel was opened: show the global switch's current state.
+    void beginEdit() override { show_debug_all(true); }
+
     void changedParam(const OFX::InstanceChangedArgs &args, const std::string &name) override {
         // Diagnostics only: they never touch the look, so no cache flush.
+        if (name == kDebugAllStatusParam) return;  // our own display update
         if (name == kOpenLogsParam) {
             dlog::open_folder(id_);
+            show_debug_all(false);
             return;
         }
         if (name == kDebugParam) {
             bool on = false;
             try { debug_->getValue(on); } catch (...) {}
-            dlog::write("instance #" + std::to_string(id_) + " debug logging " + (on ? "on" : "off"));
+            dlog::write("instance #" + std::to_string(id_) + " debug logging " + (on ? "on" : "off") +
+                        "; for all effects " + dlog::all_state(dlog::debug_all()));
             last_look_hash_ = 0;  // log the full look on the next frame
+            show_debug_all(false);
+            return;
+        }
+        if (name == kDebugAllParam) {
+            toggle_debug_all();
             return;
         }
         // Any param change (user edit, keyframe add/remove, preset apply/load =
@@ -504,6 +545,7 @@ public:
             }
         }
         update_dependents(args.time);
+        show_debug_all(false);
     }
 
     void render(const OFX::RenderArguments &args) override;
@@ -661,7 +703,7 @@ public:
         // Host-only params: never part of the look (presets / files apply their
         // values as edits of the params below, which report themselves).
         for (const char *h : {kVersionParam, kPresetParam, kLoopPresetParam, kPresetFileParam, kLoadParam, kSaveParam,
-                              kDebugParam, kOpenLogsParam})
+                              kDebugParam, kOpenLogsParam, kDebugAllParam, kDebugAllStatusParam})
             if (name == h) return 0;
         auto it = by_name_.find(name);
         if (it == by_name_.end()) return NTSCRT_CACHE_ALL;  // the seed, anything unknown
@@ -677,6 +719,39 @@ public:
     }
 
 private:
+    // "Debug logging for all effects" pressed: flip the global switch (every instance in every
+    // project notices within a second) and say so in the log.
+    void toggle_debug_all() {
+        const bool want = !dlog::debug_all(true);
+        const bool ok = dlog::all_switch().set(want);
+        dlog::write("instance #" + std::to_string(id_) + " debug logging for all NTSCRT effects " +
+                    (ok ? std::string("turned ") : std::string("could NOT be turned ")) + (want ? "on" : "off") +
+                    ": now " + dlog::all_state(dlog::debug_all(true)));
+        last_look_hash_ = 0;
+        show_debug_all(false);
+    }
+    // The global switch's state on the panel: the read-only status line and the button's label.
+    // Written only when they differ from what is shown (no spurious project change / undo step).
+    void show_debug_all(bool refresh) {
+        const bool on = dlog::debug_all(refresh);
+        try {
+            if (debug_all_status_) {
+                std::string cur;
+                debug_all_status_->getValue(cur);
+                const char *want = on ? kDebugAllOn : kDebugAllOff;
+                if (cur != want) debug_all_status_->setValue(want);
+            }
+        } catch (...) {
+        }
+        try {
+            if (debug_all_ && shown_all_label_ != int(on)) {
+                debug_all_->setLabel(on ? kDebugAllTurnOff : kDebugAllTurnOn);
+                shown_all_label_ = int(on);
+            }
+        } catch (...) {
+        }
+    }
+
     template <class P, class... V>
     static void set_param(P *p, double t, V... v) {
         if (p->getNumKeys() > 0) p->setValueAtTime(t, v...);
@@ -865,7 +940,11 @@ private:
     OFX::StringParam *preset_file_ = nullptr;
     OFX::IntParam *seed_ = nullptr;
     OFX::BooleanParam *debug_ = nullptr;
+    OFX::PushButtonParam *debug_all_ = nullptr;
+    OFX::StringParam *debug_all_status_ = nullptr;
+    int shown_all_label_ = -1;   // global switch state the button's label shows (-1 = the default)
     size_t last_look_hash_ = 0;  // debug logging: full look only when it changes
+    bool was_debug_ = false;     // the previous render logged in detail (under mu_)
     std::map<std::string, size_t> by_name_;  // host param name -> schema index
     std::map<std::string, size_t> by_id_;    // schema id -> schema index (bool params: the stage switches)
     std::atomic<int> frames_needed_logged_{0}, identity_logged_{0};
@@ -992,8 +1071,11 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     look_at_time(args.time, look, fb);
     int seed = 0;
     seed_->getValueAtTime(args.time, seed);
-    bool debug = false;
-    debug_->getValue(debug);
+    // Detailed log: this effect's checkbox, the switch for all effects, or NTSCRT_DEBUG_LOG.
+    bool debug_box = false;
+    debug_->getValue(debug_box);
+    const bool debug_all = dlog::debug_all(), debug_env = env_debug_log();
+    const bool debug = debug_box || debug_all || debug_env;
     const auto t_looked = std::chrono::steady_clock::now();
 
     OfxRangeD range = source_frame_range();
@@ -1032,6 +1114,8 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         report_error("NTSCRT: core failed to initialise");
         OFX::throwSuiteStatusException(kOfxStatFailed);
     }
+    if (debug && !was_debug_) last_look_hash_ = 0;  // just turned on: the full look first
+    was_debug_ = debug;
     ctx.animated = animated();
     if (ctx.animated) note_current_look(args.time, look);
     const size_t builds_before = look_builds_;
@@ -1069,7 +1153,9 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
             o << " fetch_ms=" << ms(t_start, t_fetched) << " look_ms=" << ms(t_fetched, t_looked)
               << " core_ms=" << ms(t_core, t_done) << " seed=" << seed << " temporal_fetches=" << ctx.fetches
               << " animated=" << ctx.animated << " look_builds=" << (look_builds_ - builds_before)
-              << " sequential=" << args.sequentialRenderStatus << " field=" << int(args.fieldToRender);
+              << " sequential=" << args.sequentialRenderStatus << " field=" << int(args.fieldToRender)
+              << " debug_by=" << (debug_box ? "effect" : "") << (debug_box && (debug_all || debug_env) ? "," : "")
+              << (debug_all ? "all" : "") << (debug_all && debug_env ? "," : "") << (debug_env ? "env" : "");
             const size_t h = std::hash<std::string>{}(look) ^ (std::hash<std::string>{}(fb) << 1);
             o << " look#" << std::hex << h << std::dec;
             if (h != last_look_hash_) {
@@ -1334,6 +1420,26 @@ void NtscrtFactory::describeInContext(OFX::ImageEffectDescriptor &desc, OFX::Con
         e->setLabel("Open logs folder");
         e->setHint("Show the folder with ntscrt-ofx.log in Explorer / Finder, to attach it to a bug report.");
         e->setParent(*hg);
+        // Debug logging for every NTSCRT effect (every clip, every project) until turned off: a switch
+        // outside the project (a file next to the log), so a button and a status line, not a saved checkbox.
+        const bool all_on = dlog::debug_all(true);
+        auto *s = desc.defineStringParam(kDebugAllStatusParam);
+        s->setLabel("Debug logging, all effects");
+        s->setHint("Debug logging for all NTSCRT effects: on or off. The same switch in every project; it stays "
+                   "on (after restarts too) until turned off with the button below.");
+        s->setDefault(all_on ? kDebugAllOn : kDebugAllOff);
+        s->setStringType(OFX::eStringTypeLabel);
+        s->setIsPersistant(false);
+        s->setEnabled(false);
+        s->setAnimates(false);
+        s->setEvaluateOnChange(false);
+        s->setParent(*hg);
+        auto *a = desc.definePushButtonParam(kDebugAllParam);
+        a->setLabel(all_on ? kDebugAllTurnOff : kDebugAllTurnOn);
+        a->setHint("Turn detailed debug logging on or off for EVERY NTSCRT effect, in every clip and project, "
+                   "without ticking each effect's Debug logging (effects already open follow within a second). "
+                   "Stays on until pressed again. Slows rendering slightly.");
+        a->setParent(*hg);
     }
     {
         auto *d = desc.defineIntParam(kSeedParam);
