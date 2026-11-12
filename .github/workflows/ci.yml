@@ -9,10 +9,12 @@ on:
     branches: [main]
     tags: ["v*"]   # a version tag also publishes a GitHub Release (job "release")
     # Docs-only pushes don't build. GitHub never evaluates path filters for tag pushes,
-    # so a release tag always runs, whatever it changed.
-    paths-ignore: ["**.md", "docs/**"]
+    # so a release tag always runs, whatever it changed. docs/dev/port-map.json is data the
+    # sync-check job reads (scripts/check_sync.py), so a change to it still runs CI; the
+    # later, positive pattern wins over "!docs/**".
+    paths: ["**", "!**.md", "!docs/**", "docs/dev/port-map.json"]
   pull_request:
-    paths-ignore: ["**.md", "docs/**"]
+    paths: ["**", "!**.md", "!docs/**", "docs/dev/port-map.json"]
   workflow_dispatch:   # also how to run CI on a branch: gh workflow run ci --ref <branch>
 
 concurrency:
@@ -543,13 +545,32 @@ jobs:
           $r | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-String -Width 300 | Write-Host
           if ($r.Count) { throw "PSScriptAnalyzer: $($r.Count) finding(s)" }
 
+  # The port matches the upstream NTSCRT commit it's pinned at (scripts/check_sync.py): the
+  # schema regenerates identically, presets are upstream's bytes, the golden refs, schema and
+  # vendor pins (slang-shaders, ntsc-rs, librashader) agree, and docs/dev/port-map.json maps every
+  # upstream file. Needs only upstream/NTSCRT and vendor/slang-shaders (gen_schema.py reads the
+  # committed core/params/ntsc_descriptors.json, so no Rust). A Dependabot upstream/NTSCRT bump
+  # fails here until the sync is done (docs/dev/UPSTREAM-SYNC.md).
+  sync-check:
+    name: sync-check (upstream NTSCRT pin)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Submodules (upstream/NTSCRT, vendor/slang-shaders)
+        run: git submodule update --init --depth 1 upstream/NTSCRT vendor/slang-shaders
+
+      - name: Check sync with upstream
+        run: python3 scripts/check_sync.py
+
   # Tag push (vX.Y.Z or vX.Y.Z-rc.N): publish the zips, installers and SHA256SUMS as a GitHub
   # Release with build provenance. install.ps1 / install.sh download from it
   # ("releases/latest/download/<asset>", which skips -rc prereleases) and verify SHA256SUMS.
   release:
     name: publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos, fxplug, lint]
+    needs: [windows, macos, fxplug, lint, sync-check]
     runs-on: ubuntu-latest
     permissions:
       contents: write       # create the release / upload assets
