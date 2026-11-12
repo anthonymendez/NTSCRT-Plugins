@@ -224,6 +224,9 @@ written but not yet built.
   settings.
 
 ### Developer
+- `test_ofx` keeps its log, "debug logging for all effects" switch and preset files in names of its own per
+  process: copies running at once (two build dirs' ctest, parallel agents) failed each other's log and switch
+  checks (in 4 parallel copies, every run failed; now none of 20).
 - Host GPU frames (docs/dev/HOST-GPU.md): `ntscrt_render_host_gpu`, `ntscrt_host_gpu_read` / `_write`,
   `ntscrt_host_gpu_supported` and `ntscrt_last_timings` in the C ABI (additions only). CUDA images are copied
   GPU to GPU into the core's D3D11 device (textures registered with the host's CUDA context; the driver API is

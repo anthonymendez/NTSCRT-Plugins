@@ -18,6 +18,11 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 using nlohmann::json;
 namespace fs = std::filesystem;
@@ -26,9 +31,19 @@ namespace {
 // Before the plug-in loads (it reads these once): keep the test runs out of the user's
 // log and their "Debug logging for all effects" switch (NTSCRT_SETTINGS_DIR: a fresh, empty
 // folder), never open a file-manager window from "Open logs folder".
-const fs::path kSettingsDir = fs::temp_directory_path() / "ntscrt_ofx_test_settings";
+// Per process (the process id in the names): copies of test_ofx running at once (ctest
+// runs of several build dirs, parallel agents) would otherwise share one log and one switch
+// file, and fail each other's log and switch checks.
+std::string pid_suffix() {
+#ifdef _WIN32
+    return std::to_string(_getpid());
+#else
+    return std::to_string(getpid());
+#endif
+}
+const fs::path kSettingsDir = fs::temp_directory_path() / ("ntscrt_ofx_test_settings-" + pid_suffix());
 const fs::path kLogFile = [] {
-    fs::path p = fs::temp_directory_path() / "ntscrt_ofx_test.log";
+    fs::path p = fs::temp_directory_path() / ("ntscrt_ofx_test-" + pid_suffix() + ".log");
     std::error_code ec;
     fs::remove(p, ec);
     fs::remove_all(kSettingsDir, ec);
@@ -50,6 +65,14 @@ const fs::path kLogFile = [] {
     return p;
 }();
 const fs::path kSwitchFile = kSettingsDir / "debug-logging-all-effects.txt";
+// This process's files go when it ends (best effort: the plug-in may still hold the log).
+struct RemoveTestFiles {
+    ~RemoveTestFiles() {
+        std::error_code ec;
+        fs::remove_all(kSettingsDir, ec);
+        fs::remove(kLogFile, ec);
+    }
+} remove_test_files;
 std::string read_log() {
     std::ifstream f(kLogFile);
     std::stringstream ss;
@@ -285,7 +308,7 @@ TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
     }
 
     SUBCASE("save and load preset files") {
-        fs::path tmp = fs::temp_directory_path() / "ntscrt_ofx_test_preset.json";
+        fs::path tmp = fs::temp_directory_path() / ("ntscrt_ofx_test_preset-" + pid_suffix() + ".json");
         f.param("downscale_width")->v[0] = 256;
         auto u8 = tmp.u8string();
         f.param("host_preset_file")->str = std::string(u8.begin(), u8.end());
@@ -313,7 +336,7 @@ TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
         REQUIRE(f.changed("host_preset") == kOfxStatOK);
         CHECK(dbg->v[0] == 1);
         CHECK(dbg->sets == 0);
-        fs::path tmp = fs::temp_directory_path() / "ntscrt_ofx_test_preset2.json";
+        fs::path tmp = fs::temp_directory_path() / ("ntscrt_ofx_test_preset2-" + pid_suffix() + ".json");
         auto u8 = tmp.u8string();
         f.param("host_preset_file")->str = std::string(u8.begin(), u8.end());
         REQUIRE(f.changed("host_save_preset") == kOfxStatOK);
@@ -994,8 +1017,8 @@ TEST_CASE("presets: timeline keyframes, menus with applies, save/load round trip
     }
 
     SUBCASE("Save writes upstream JSON with the Screen Loop settings; Load restores the same look") {
-        fs::path tmp = fs::temp_directory_path() / "ntscrt_ofx_roundtrip.json";
-        fs::path side = fs::temp_directory_path() / "ntscrt_ofx_roundtrip (Screen Loop).json";
+        fs::path tmp = fs::temp_directory_path() / ("ntscrt_ofx_roundtrip-" + pid_suffix() + ".json");
+        fs::path side = fs::temp_directory_path() / ("ntscrt_ofx_roundtrip-" + pid_suffix() + " (Screen Loop).json");
         fs::remove(side);
         auto u8 = tmp.u8string();
         f.param("host_preset_file")->str = std::string(u8.begin(), u8.end());

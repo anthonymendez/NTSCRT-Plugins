@@ -254,9 +254,10 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
     // No CPU stage on: the frame stays on the GPU, converted and cropped there.
     const facade::DirectSrc direct{
         fw, fh, true,
-        [&](gpu::Device &dev, AlphaMode mode, const json &look, std::vector<float> &,
+        [&](gpu::Device &dev, AlphaMode mode, const json &look, std::vector<float> &alpha,
             const facade::PoolFn &) -> std::shared_ptr<gpu::Texture> {
             if (needs_fill(dev, mode)) return nullptr;
+            alpha.clear();  // merge_out reads alpha from the source texture
             crop::Rect r{0, 0, fw, fh};
             if (auto c = crop::from_look(look)) r = c->rect(fw, fh);
             return convert(dev, mode, r);
