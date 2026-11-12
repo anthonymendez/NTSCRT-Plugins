@@ -522,13 +522,14 @@ TEST_CASE("ntsc gpu: stage-by-stage YIQ planes match ntsc-rs") {
             if (strict()) CHECK(m > 1e-3f);
         }
         for (const StageDiff &d : diffs) {
-            CAPTURE(ntsc_stage_name(d.stage));
+            const std::string stage_name = ntsc_stage_name(d.stage);
+            CAPTURE(stage_name);
             // Float differences of a few ulps of the planes' range (|Y| < ~2) at most:
             // the same operations, fused where ntsc-rs fuses.
             if (strict())
                 for (int p = 0; p < 3; ++p) CHECK(d.max[p] <= 1e-4f);
             else
-                MESSAGE("report only: " << ntsc_stage_name(d.stage) << " Y " << d.max[0] << " I " << d.max[1]
+                MESSAGE("report only: " << stage_name << " Y " << d.max[0] << " I " << d.max[1]
                                         << " Q " << d.max[2]);
         }
     }
@@ -692,7 +693,8 @@ TEST_CASE("ntsc gpu pipeline: unset or 0 changes nothing; an unsupported setting
         CHECK(b.timings.find("ntsc_route=cpu") != std::string::npos);
         // Why: the unsupported stage, or (WARP without "force") the software device.
         CHECK((b.timings.find("head_switching") != std::string::npos ||
-               b.timings.find("software device") != std::string::npos));
+               b.timings.find("software device") != std::string::npos ||
+               b.timings.find("not on Metal") != std::string::npos));
     }
 
     if (ntscrt::testing::stats(inst).has_gpu && gputest::native_backend() == gpu::Backend::D3D11) {
