@@ -197,6 +197,11 @@ TEST_CASE("model: diagnostics are host extras outside the look, presets and sche
     // fixed host ids, below every schema-mapped id, distinct from the other extras
     CHECK(uint32_t(kDebugLogging) <= kLastHostID);
     CHECK(uint32_t(kOpenLogs) <= kLastHostID);
+    CHECK(uint32_t(kDebugAll) <= kLastHostID);
+    CHECK(kDebugAll != kOpenLogs);
+    CHECK(kDebugAll != kDebugLogging);
+    CHECK(m.find_host(kDebugAll) == nullptr);
+    CHECK(m.cache_mask(kDebugAll, true) == 0);
     CHECK(kLastHostID < kFirstMappedID);
     CHECK(kDebugLogging != kOpenLogs);
     CHECK(m.find_host(kDebugLogging) == nullptr);

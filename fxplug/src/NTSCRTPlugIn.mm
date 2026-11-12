@@ -57,6 +57,9 @@ namespace {
 // container (~/Library/Containers/<renderer bundle id>/Data/Library). Same content as the
 // Resolve plug-in's ntscrt-ofx.log: load, failures, the first renders, and every frame while
 // "Debug Logging" is on. Load lines and failures also go to the system log ([NTSCRT], Console.app).
+// Every instance also logs every frame while "Debug logging for all effects" is on: the shared
+// host::DebugSwitch, a marker file next to this log (so inside the container too), or while
+// NTSCRT_DEBUG_LOG=1 is set (which Final Cut's sandboxed renderer rarely sees).
 const FileLog &Log() {
     static const FileLog *log = [] {
         NSURL *lib = [[NSFileManager defaultManager] URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
@@ -69,6 +72,28 @@ const FileLog &Log() {
 void LogLine(const std::string &msg, bool also_nslog = true) {
     Log().write(msg);
     if (also_nslog) NSLog(@"[NTSCRT] %s", msg.c_str());
+}
+
+std::atomic<size_t> gLastDebugLookHash{0};  // debug logging: the full look only when it changes
+
+// "Debug logging for all effects": the switch file in the log's folder (the container's).
+const host::DebugSwitch &AllSwitch() {
+    static const host::DebugSwitch *sw = new host::DebugSwitch(host::debug_switch_path(Log().folder()));
+    return *sw;
+}
+std::string AllState(bool on) {
+    return std::string(on ? "on" : "off") + " (" + (AllSwitch().path().empty() ? "unavailable" : AllSwitch().path()) + ")";
+}
+// Is the switch on? Re-read at most once a second; a change made elsewhere (the file created or
+// deleted by hand) is logged once.
+bool DebugAll(bool refresh = false) {
+    bool changed = false;
+    const bool on = refresh ? AllSwitch().refresh(&changed) : AllSwitch().on(&changed);
+    if (changed) {
+        LogLine("debug logging for all NTSCRT effects is now " + AllState(on), false);
+        gLastDebugLookHash.store(0);
+    }
+    return on;
 }
 
 struct Shared {
@@ -102,7 +127,8 @@ const Shared &GetShared() {
             NSString *proc = NSProcessInfo.processInfo.processName ?: @"?";
             NSString *os = NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?";
             LogLine(std::string("NTSCRT ") + ver.UTF8String + " (FxPlug) loaded; resources " + sh->resource_dir +
-                    "; process " + proc.UTF8String + "; macOS " + os.UTF8String + "; log " + Log().path());
+                    "; process " + proc.UTF8String + "; macOS " + os.UTF8String + "; log " + Log().path() +
+                    "; debug logging for all effects " + AllState(DebugAll(true)));
         }
         for (const auto &w : warnings) LogLine("schema: " + w);
 
@@ -118,7 +144,6 @@ const Shared &GetShared() {
 
 // Render log bookkeeping (process-wide: one renderer process serves all the plug-in's instances).
 std::atomic<long> gRenders{0};
-std::atomic<size_t> gLastDebugLookHash{0};  // debug logging: the full look only when it changes
 
 // Render calls whose status still wrote a complete (possibly degraded) frame: the CRT shader
 // skipped (ERR_MISSING_RESOURCE / ERR_GPU) or an earlier source frame missing. ntscrt.h.
@@ -323,6 +348,9 @@ NSError *MakeError(NSInteger code, NSString *msg) {
         _apiManager = newApiManager;
         _state = std::make_shared<InstanceState>();
         (void)GetShared();
+        LogLine("effect instance created; debug logging for all effects " + AllState(DebugAll(true)) +
+                    (host::env_debug_log() ? "; NTSCRT_DEBUG_LOG set: every frame logged in detail" : ""),
+                false);
     }
     return self;
 }
@@ -379,6 +407,10 @@ NSError *MakeError(NSInteger code, NSString *msg) {
     ok &= [api addToggleButtonWithName:@"Debug Logging" parameterID:kDebugLogging defaultValue:NO parameterFlags:fixed];
     ok &= [api addPushButtonWithName:@"Open Logs Folder" parameterID:kOpenLogs selector:@selector(openLogsPressed)
                       parameterFlags:PF(kFxParameterFlag_DEFAULT)];
+    // Not a checkbox: the switch lives outside the project (it applies to every NTSCRT effect in every
+    // project until turned off), so the button shows its state and asks before changing it.
+    ok &= [api addPushButtonWithName:@"Debug Logging for All Effects…" parameterID:kDebugAll
+                            selector:@selector(debugAllPressed) parameterFlags:PF(kFxParameterFlag_DEFAULT)];
     ok &= [api endParameterSubGroup];
 
     for (const UiItem &it : m.layout) {
@@ -643,12 +675,13 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
 
 - (BOOL)parameterChanged:(UInt32)paramID atTime:(CMTime)time error:(NSError **)error {
     (void)error;
-    if (paramID == kDebugLogging || paramID == kOpenLogs) {  // diagnostics: the look is unchanged
+    if (paramID == kDebugLogging || paramID == kOpenLogs || paramID == kDebugAll) {  // diagnostics: the look is unchanged
         if (paramID == kDebugLogging) {
             id<FxParameterRetrievalAPI_v6> g = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
             BOOL on = NO;
             if (g) [g getBoolValue:&on fromParameter:kDebugLogging atTime:time];
-            LogLine(std::string("debug logging ") + (on ? "on" : "off"), false);
+            LogLine(std::string("debug logging ") + (on ? "on" : "off") + "; for all effects " + AllState(DebugAll()),
+                    false);
             gLastDebugLookHash.store(0);
         }
         return YES;
@@ -772,6 +805,32 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     });
 }
 
+// ---- Debug Logging for All Effects button ------------------------------------------
+// Shows whether debug logging for all NTSCRT effects is on and offers to switch it. Every effect
+// (every clip, every project, open or not) follows within a second; it stays until switched back.
+- (void)debugAllPressed {
+    const bool on = DebugAll(true);
+    LogLine(std::string("debug logging for all effects button: currently ") + AllState(on), false);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAlert *a = [NSAlert new];
+        a.messageText = on ? @"Debug logging for all NTSCRT effects is ON" : @"Debug logging for all NTSCRT effects is off";
+        a.informativeText = on ? @"Every NTSCRT effect, in every project, logs each frame in detail (timings and the "
+                                 @"look) to ntscrt-fxplug.log. Turn it off when you have sent the log."
+                               : @"Turn it on to log each frame of every NTSCRT effect, in every project, in detail "
+                                 @"(timings and the look) to ntscrt-fxplug.log, without ticking each effect's Debug "
+                                 @"Logging. It stays on, after restarts too, until you turn it off here. Rendering "
+                                 @"slows slightly.";
+        [a addButtonWithTitle:on ? @"Turn Off" : @"Turn On"];
+        [a addButtonWithTitle:@"Cancel"];
+        if ([a runModal] != NSAlertFirstButtonReturn) return;
+        const bool ok = AllSwitch().set(!on);
+        gLastDebugLookHash.store(0);
+        LogLine(std::string("debug logging for all NTSCRT effects ") + (ok ? "turned " : "could NOT be turned ") +
+                    (on ? "off" : "on") + ": now " + AllState(DebugAll(true)),
+                !ok);
+    });
+}
+
 // ---- timing / state -----------------------------------------------------------
 - (BOOL)pluginState:(NSData **)pluginState atTime:(CMTime)renderTime quality:(FxQuality)qualityLevel error:(NSError **)error {
     (void)qualityLevel;
@@ -802,8 +861,10 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     st.look = now.look.dump();
     st.feedback = now.feedback.is_null() ? std::string() : now.feedback.dump();
     st.seed = host::render_seed(GetInt(get, kSeed, renderTime, 0));
+    // Detailed log: this effect's Debug Logging, debug logging for all effects, or NTSCRT_DEBUG_LOG.
     BOOL debug = NO;
-    st.debug = [get getBoolValue:&debug fromParameter:kDebugLogging atTime:renderTime] && debug;
+    st.debug = ([get getBoolValue:&debug fromParameter:kDebugLogging atTime:renderTime] && debug) || DebugAll() ||
+               host::env_debug_log();
 
     // Earlier source frames: only what the stages that read them (Digital video back to its
     // keyframe, Screen Loop's window) can fetch, capped by "History Frames". Glitch and the
