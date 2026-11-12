@@ -146,7 +146,13 @@ route differs (`mixa`/`cpu`, `gpu`/`mixb`) every value must be equal; with host 
 Every case's route is read from the plug-in's log (`path=`, `ntsc_route=`) and must be the configuration's, so a
 pass can't come from both sides taking the same route. Results: `parity.md`, `parity.json`, `parity.csv` in
 `--out`, with one folder of frames and logs per session; `--parity-compare-only` compares them again,
-`--parity-configs` picks sessions (e.g. rerun one). A full run takes about two hours.
+`--parity-configs` picks sessions, `--parity-retry` renders again the cases a session lost (Resolve sometimes stops
+answering scripting calls for a while) and merges them in. A full run takes about two and a half hours (RTX 5090).
+First run (2026-11-12, 355 cases, 972 images per pair): every image equal in every pair except the CRT *sim* shader,
+whose output depends on the frames rendered before it (it differs between two CPU sessions too), and the documented
+8-bit Fusion case. Not covered: Adjustment Clips (scripts can't give them an OpenFX effect), render scale (the
+render queue always renders at full size), Screen Loop on an Edit-page clip in 1080p / UHD projects (Resolve fetches
+hundreds of full-size history frames and stalls).
 
 ### Debug logging (for a specific problem)
 The plug-in always keeps a small log (start-up, the first frames of each effect, every error). To capture

@@ -1696,6 +1696,9 @@ def main():
     ap.add_argument("--parity-sources", default=None, help="--parity: folder for the generated source clips (default <out>/_src)")
     ap.add_argument("--parity-compare-only", action="store_true",
                     help="--parity: don't render, compare the sessions already in --out again")
+    ap.add_argument("--parity-retry", action="store_true",
+                    help="--parity: render again the cases of --parity-configs' sessions in --out that didn't render "
+                         "(each in a session of its own), merge them in and compare")
     a = ap.parse_args()
     a.only = {s.strip() for s in a.only.split(",") if s.strip()}
     a.parity_cases = a.parity_config = a.parity_subset = None

@@ -353,9 +353,11 @@ def build_cases(quick=False):
         for lab, look, prm in edit:
             if lab not in ("default", "mild-vhs", "clean-crt", "bottom-to-top", "minidv"):
                 continue
-            if proj == "uhd" and lab == "bottom-to-top":
-                # Screen Loop on an Edit-page clip asks Resolve for up to 300 earlier UHD float frames (getFramesNeeded
-                # t-299..t): Resolve grew past 30 GB and the render didn't finish in 10 minutes (2026-11-12, CPU path)
+            if lab == "bottom-to-top":
+                # Screen Loop on an Edit-page clip at 1080p / UHD: getFramesNeeded asks Resolve for the loop's history
+                # (frames 1440..1850 for frame 1850), float frames of the timeline's size; Resolve grew to 20-30 GB
+                # and the render didn't finish in 10 minutes (2026-11-12, CPU path), blocking the session. Covered at
+                # 640x360 (edit-bottom-to-top) and on the Fusion page of these projects.
                 continue
             if quick and lab != "default":
                 continue
@@ -910,11 +912,11 @@ def wait_resolve_gone(grace=180, total=600):
     return True
 
 
-def run_config(a, cfg, base, cases_path):
+def run_config(a, cfg, base, cases_path, out_name=None):
     sub = copy.copy(a)
     sub.parity = sub.parity_quick = False
     sub.only = {"parity"}
-    sub.out = str(base / cfg)
+    sub.out = str(base / (out_name or cfg))
     sub.parity_cases = str(cases_path)
     sub.parity_config = cfg
     sub.parity_subset = CONFIGS[cfg].get("subset")
@@ -939,6 +941,52 @@ def run_config(a, cfg, base, cases_path):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def retry_config(a, cfg, base, cases, timings):
+    """--parity-retry: render again, in a session of their own, the cases of `cfg` that errored or are missing (Resolve
+    stopped answering for a while, say) and merge them into its session.json. None when there was nothing to do."""
+    doc = load_session(base, cfg)
+    if not doc:
+        print(f"--parity-retry: no session {cfg} in {base}", flush=True)
+        return None
+    sub = CONFIGS[cfg].get("subset")
+    todo = [c for c in cases if (not sub or sub in c["tags"]) and
+            (c["id"] not in doc["results"] or doc["results"][c["id"]].get("error") or "images" not in doc["results"][c["id"]])]
+    if not todo:
+        return None
+    full = json.loads((base / "cases.json").read_text(encoding="utf-8"))
+    path = base / f"cases-retry-{cfg}.json"
+    path.write_text(json.dumps({"sources": full["sources"], "cases": todo, "expected": full["expected"]}, indent=1),
+                    encoding="utf-8")
+    print(f"--parity-retry {cfg}: {len(todo)} cases", flush=True)
+    rc, secs = run_config(a, cfg, base, path, out_name=f"{cfg}-retry")
+    timings[cfg + "-retry"] = secs
+    redo = load_session(base, f"{cfg}-retry")
+    if not redo:
+        return rc or 1
+    merged = []
+    for c in todo:
+        r = redo["results"].get(c["id"])
+        if not r or r.get("error") or "images" not in r:
+            continue
+        for name in r["images"].values():
+            shutil.copyfile(base / f"{cfg}-retry" / name, base / cfg / name)
+        doc["results"][c["id"]] = dict(r, retried=True)
+        merged.append(c["id"])
+    # The retry session's sources against the first session's (Resolve should have rendered the same pictures).
+    src_check = {}
+    for k, r in redo["results"].items():
+        if k.startswith("src:") and k in doc["results"]:
+            for f, name in r.get("images", {}).items():
+                old = doc["results"][k].get("images", {}).get(f)
+                if old:
+                    src_check[f"{k}:{f}"] = compare(base / cfg / old, base / f"{cfg}-retry" / name).get("max16")
+    doc["info"].setdefault("retries", []).append({"cases": len(todo), "merged": len(merged), "seconds": secs,
+                                                  "sources_max16_vs_first_session": src_check})
+    (base / cfg / "session.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")
+    print(f"--parity-retry {cfg}: merged {len(merged)} of {len(todo)}; sources vs the first session {src_check}", flush=True)
+    return rc
 
 
 def load_session(base, cfg):
@@ -1117,7 +1165,7 @@ def main(a):
         print(f"--parity-configs: unknown {unknown} (known: {', '.join(CONFIGS)})", file=sys.stderr)
         return 2
     cases_path = base / "cases.json"
-    if a.parity_compare_only and cases_path.exists():
+    if (a.parity_compare_only or a.parity_retry) and cases_path.exists():
         doc = json.loads(cases_path.read_text(encoding="utf-8"))
         cases, expected = doc["cases"], doc["expected"]
     else:
@@ -1131,7 +1179,13 @@ def main(a):
     if timings_path.exists():
         timings = json.loads(timings_path.read_text(encoding="utf-8"))
     rcs = {}
-    if not a.parity_compare_only:
+    if a.parity_retry:
+        for cfg in configs:
+            rc = retry_config(a, cfg, base, cases, timings)
+            if rc is not None:
+                rcs[cfg + "-retry"] = rc
+            timings_path.write_text(json.dumps(timings), encoding="utf-8")
+    elif not a.parity_compare_only:
         for cfg in configs:
             rc, secs = run_config(a, cfg, base, cases_path)
             rcs[cfg] = rc
