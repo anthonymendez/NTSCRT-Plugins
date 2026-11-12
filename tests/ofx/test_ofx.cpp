@@ -554,7 +554,10 @@ TEST_CASE("edits and seeks: look history, cache flushing, timings") {
 // An hour into a 60 fps timeline (frame 216000, Resolve's default 01:00:00:00
 // start): edits must not make the next render re-run the whole hour.
 // NTSCRT_BENCH_UHD=1 renders 3840x2160 (the report's size) instead of 640x360.
-TEST_CASE("high frame number: renders after edits stay bounded") {
+struct EditTimings {
+    double first, preset, crt, load;
+};
+static EditTimings edits_at_frame(double T) {
     Fixture f;
     f.create();
     const bool uhd = std::getenv("NTSCRT_BENCH_UHD") != nullptr;
@@ -607,8 +610,6 @@ TEST_CASE("high frame number: renders after edits stay bounded") {
     report.setf(std::ios::fixed);
     report.precision(1);
     report << w << "x" << h << " @" << fps << " fps, Clean CRT:";
-    const char *bench_frame = std::getenv("NTSCRT_BENCH_FRAME");  // another timeline position
-    const double T = bench_frame ? std::atof(bench_frame) : 216067;
     // The report's look: Clean CRT (Downscale 256 px, Glitch on with its defaults).
     mock::Param *pp = f.param("host_preset");
     const int clean = f.choice_index(*pp, "Clean CRT");
@@ -667,19 +668,29 @@ TEST_CASE("high frame number: renders after edits stay bounded") {
     MESSAGE(report.str());
     std::printf("[timing] %s\n", report.str().c_str());
 
-    // Only meaningful when the first render had an hour to simulate. (The first
-    // switch to royale compiles its chain, ~1 s whatever the frame: not checked.)
-    if (T > 100000) {
-        CHECK(preset_ms < 0.3 * first_ms);
-        CHECK(crt_ms < 0.3 * first_ms);
-        CHECK(load_ms < 0.3 * first_ms);
-    }
     // Keeping the receiver changed nothing: the picture a render from scratch gives.
     pp->v[0] = clean;
     REQUIRE(f.changed("host_preset", T) == kOfxStatOK);  // back to Clean CRT's values
     render(T);
     CHECK(out == after_preset);
     CHECK(purged(T) == after_preset);
+    return {first_ms, preset_ms, crt_ms, load_ms};
+}
+
+TEST_CASE("high frame number: renders after edits stay bounded") {
+    const char *bench_frame = std::getenv("NTSCRT_BENCH_FRAME");  // another timeline position
+    const double T = bench_frame ? std::atof(bench_frame) : 216067;
+    const EditTimings hi = edits_at_frame(T);
+    if (T < 100000) return;  // no hour to simulate: nothing to compare
+    // The same edits two seconds into the timeline: what they cost whatever the
+    // frame (CRT chain rebuilds, slow on some GPUs). An hour in they may cost that
+    // plus a fraction of the first render's extra time, not a re-run of the hour.
+    // (The first switch to royale compiles its chain, ~1 s anywhere: not checked.)
+    const EditTimings lo = edits_at_frame(101);
+    const double budget = 0.3 * (hi.first - lo.first);
+    CHECK(hi.preset < lo.preset + budget);
+    CHECK(hi.crt < lo.crt + budget);
+    CHECK(hi.load < lo.load + budget);
 }
 
 // Animated presets become host keyframes; Horizontal resolution / Digital video
