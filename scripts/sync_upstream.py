@@ -10,8 +10,8 @@ Steps: refuse a dirty tree (--allow-dirty to re-run after fixing something); mov
 submodule to --to; copy upstream presets/ byte for byte (adds and updates; upstream deletions are
 reported, not deleted); regenerate core/params/schema.json (tools/gen_schema.py: its refusal of a
 breaking change stops the sync with its exit code); add FxPlug ids (fxplug/tools/update_param_ids.py);
-update the version strings (README "Synced with upstream NTSCRT vX", docs/params.md, the pin line in
-docs/dev/UPSTREAM-SYNC.md). Then prints the hand-port list (scripts/upstream_diff.py) and the
+update the version strings (README "Synced with upstream NTSCRT vX", docs/params.md, the pin lines in
+docs/dev/UPSTREAM-SYNC.md and docs/dev/AGENTS.md, tests/golden/manifest.json upstream_commit). Then prints the hand-port list (scripts/upstream_diff.py) and the
 manual steps left. Never commits or pushes: review `git status` / `git diff` and commit yourself.
 Stdlib only, Python 3.9+.
 """
@@ -37,8 +37,19 @@ VERSION_SITES = [
     ("README.md", r"(Synced with upstream NTSCRT )(v[0-9][\w.\-]*)(\.)", "README status line"),
     ("docs/params.md", r"(synced with upstream\s+NTSCRT )(v[0-9][\w.\-]*)()", "docs/params.md look-format line"),
 ]
-PIN_SITE = ("docs/dev/UPSTREAM-SYNC.md", r"(Current pin: \*\*)(v[0-9][\w.\-]*|[0-9a-f]{7,40})(\*\* \(`)([0-9a-f]{7,40})(`\))",
-            "pin line in docs/dev/UPSTREAM-SYNC.md")
+# (file, regex with groups (prefix)(version)(middle)(short sha)(suffix), what it is): version and sha replaced.
+PIN_SITES = [
+    ("docs/dev/UPSTREAM-SYNC.md", r"(Current pin: \*\*)(v[0-9][\w.\-]*|[0-9a-f]{7,40})(\*\* \(`)([0-9a-f]{7,40})(`\))",
+     "pin line in docs/dev/UPSTREAM-SYNC.md"),
+    ("docs/dev/AGENTS.md", r"(submodule, upstream )(v[0-9][\w.\-]*|[0-9a-f]{7,40})(, commit )([0-9a-f]{7,40})(;)",
+     "pin line in docs/dev/AGENTS.md"),
+]
+# (file, regex with groups (prefix)(full sha)(suffix), what it is): the full sha replaced.
+SHA_SITES = [
+    # render_golden.py records the commit it builds; this is the manifest's own note of it
+    # (check_sync.py compares it with the pin).
+    ("tests/golden/manifest.json", r'("upstream_commit": ")([0-9a-f]{40})(")', "tests/golden/manifest.json upstream_commit"),
+]
 
 
 def say(msg=""):
@@ -136,18 +147,30 @@ def update_versions(version, sha, dry):
             text = text[:m.start(2)] + version + text[m.end(2):]
             with open(p, "w", encoding="utf-8", newline="") as f:
                 f.write(text)
-    rel, rx, what = PIN_SITE
-    p = ROOT / rel
-    text = p.read_bytes().decode("utf-8")
-    m = re.search(rx, text)
-    if not m:
-        say("  WARNING: %s: no match for the %s; update it by hand" % (rel, what))
-    elif m.group(2) != version or m.group(4) != sha[:7]:
-        changed.append("%s: %s (%s) -> %s (%s) (%s)" % (rel, m.group(2), m.group(4), version, sha[:7], what))
-        if not dry:
-            text = text[:m.start(2)] + version + m.group(3) + sha[:7] + text[m.end(4):]
-            with open(p, "w", encoding="utf-8", newline="") as f:
-                f.write(text)
+    for rel, rx, what in PIN_SITES:
+        p = ROOT / rel
+        text = p.read_bytes().decode("utf-8")
+        m = re.search(rx, text)
+        if not m:
+            say("  WARNING: %s: no match for the %s; update it by hand" % (rel, what))
+        elif m.group(2) != version or m.group(4) != sha[:7]:
+            changed.append("%s: %s (%s) -> %s (%s) (%s)" % (rel, m.group(2), m.group(4), version, sha[:7], what))
+            if not dry:
+                text = text[:m.start(2)] + version + m.group(3) + sha[:7] + text[m.end(4):]
+                with open(p, "w", encoding="utf-8", newline="") as f:
+                    f.write(text)
+    for rel, rx, what in SHA_SITES:
+        p = ROOT / rel
+        text = p.read_bytes().decode("utf-8")
+        m = re.search(rx, text)
+        if not m:
+            say("  WARNING: %s: no match for the %s; update it by hand" % (rel, what))
+        elif m.group(2) != sha:
+            changed.append("%s: %s -> %s (%s)" % (rel, m.group(2)[:7], sha[:7], what))
+            if not dry:
+                text = text[:m.start(2)] + sha + text[m.end(2):]
+                with open(p, "w", encoding="utf-8", newline="") as f:
+                    f.write(text)
     return changed
 
 
@@ -162,6 +185,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     U.utf8_stdio()
     dry = a.dry_run
+    would = "would: " if dry else ""   # message prefix (a real run says what it did)
     try:
         U.need_upstream()
         if a.fetch:
@@ -193,7 +217,7 @@ def main(argv=None):
         else:
             if cur != new:
                 todo += 1
-                say("  %s checkout %s -> %s" % ("would" if dry else "", cur[:7], new[:7]))
+                say("  %scheckout %s -> %s" % (would, cur[:7], new[:7]))
                 if not dry:
                     U.upstream_git("checkout", "--quiet", new)
             if recorded != new:
@@ -203,7 +227,7 @@ def main(argv=None):
         say("\n== 2. presets/ (byte for byte)")
         changes, extra, up_deleted = sync_presets(old, new, dry)
         for kind, p in changes:
-            say("  %s %s %s" % ("would" if dry else "", kind, p))
+            say("  %s%s %s" % (would, kind, p))
         todo += len(changes)
         pm = U.PortMap()
         for p in extra:
@@ -246,7 +270,7 @@ def main(argv=None):
             else:
                 todo += 1
                 for line in schema_summary(old_schema.decode("utf-8"), new_schema.decode("utf-8")):
-                    say("  %s %s" % ("would:" if dry else "", line))
+                    say("  %s%s" % (would, line))
 
             say("\n== 4. FxPlug parameter ids (fxplug/tools/update_param_ids.py)")
             cmd = [sys.executable, UPDATE_IDS, "--schema", schema_path] + (["--check"] if dry else [])
@@ -263,7 +287,7 @@ def main(argv=None):
         say("\n== 5. version strings")
         vchanges = update_versions(version, new, dry)
         for c in vchanges:
-            say("  %s %s" % ("would:" if dry else "", c))
+            say("  %s%s" % (would, c))
         if not vchanges:
             say("  already %s" % version)
         todo += len(vchanges)
@@ -290,6 +314,13 @@ def main(argv=None):
   - new bundled looks / Digital video formats: append to released_preset_order() in
     hostparams/src/params.cpp when releasing (never reorder)
   - looks using a stage the Resolve cli test doesn't cover: DIGITAL_LOOKS in tests/resolve/run_resolve_tests.py
+  - host tests: tests/hostparams/ofx_reference.json is a frozen snapshot (new params: add them to its default
+    look at their defaults; new looks: their menu entry and case), and the released_preset_order() size check
+    in tests/hostparams/test_params_timeline.cpp
+  - rebuild an existing build tree so it copies new presets (CMake re-globs presets/ on build)
+  - self-goldens: add new looks to tests/golden/self/manifest.json; regenerate only entries whose look
+    legitimately changed (NTSCRT_GOLDEN_UPDATE=1 NTSCRT_GOLDEN_ONLY=<id>); the rest must stay byte-identical
+  - presets gallery: scripts/make_presets_gallery.py --only <new slugs> (docs/PRESETS-GALLERY.md)
   - CHANGELOG.md line under [Unreleased] (changed defaults, what happens to existing projects) and the
     sync log at the end of docs/dev/UPSTREAM-SYNC.md
   - build + ctest; then refresh the golden references: gh workflow run golden --ref <branch>,

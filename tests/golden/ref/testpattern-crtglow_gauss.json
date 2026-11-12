@@ -25,6 +25,6 @@
     "--set",
     "BLOOM_STRENGTH=0.1"
   ],
-  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "upstream_commit": "8b260925bc05427ce94baaade647d9c7f4b0fc4e",
   "width": 640
 }

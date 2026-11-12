@@ -78,6 +78,13 @@ def main():
     with open(a.manifest, encoding="utf-8") as f:
         manifest = json.load(f)
     os.makedirs(a.out, exist_ok=True)
+    # The sidecars record the upstream commit actually built (check_sync.py compares it with the
+    # pin), not the manifest's note of it, which a sync may not have updated yet.
+    r = subprocess.run(["git", "-C", up, "rev-parse", "HEAD"], capture_output=True, text=True)
+    upstream_commit = r.stdout.strip() if r.returncode == 0 else manifest.get("upstream_commit")
+    if manifest.get("upstream_commit") and upstream_commit != manifest.get("upstream_commit"):
+        print(f"::warning::tests/golden/manifest.json says upstream {manifest.get('upstream_commit')}, "
+              f"rendering {upstream_commit}: update the manifest (scripts/sync_upstream.py does)")
     tmp = tempfile.mkdtemp(prefix="golden-ntsc-")
     failures = []
     index = []
@@ -143,7 +150,7 @@ def main():
             "height": h,
             "downscale_height": down_h,
             "smoke_args": [os.path.relpath(c, up) if os.path.isabs(c) else c for c in cmd[1:]],
-            "upstream_commit": manifest.get("upstream_commit"),
+            "upstream_commit": upstream_commit,
             "librashader_commit": manifest.get("librashader_commit"),
         }
         with open(os.path.join(a.out, eid + ".json"), "w", encoding="utf-8") as f:

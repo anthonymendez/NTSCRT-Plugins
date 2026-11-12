@@ -560,7 +560,7 @@ class Suite:
         return fx
 
     # Bundled looks with Digital video (the cli test applies them through the Preset menu).
-    DIGITAL_LOOKS = ("CD-ROM (low quality)", "Chunky webcam", "Webcam (low quality)")
+    DIGITAL_LOOKS = ("CD-ROM (low quality)", "Cheap camcorder", "Chunky webcam", "Webcam (low quality)")
 
     def look_preset_index(self, name):
         """Index of a bundled look in the plug-in's Preset menu (0 = "(none)"): released presets

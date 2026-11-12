@@ -361,12 +361,15 @@ TEST_CASE("Digital video formats: in the Preset menu after the released presets,
     CHECK(menu[3].format);
     CHECK(menu[8].name == "Digital video/Datamosh");
     CHECK(menu[9].name == "Zzz new");  // presets newer than the formats follow them
-    // released order: v0.4.0's 32 untouched, then 0.5.0's looks and formats
+    // released order: v0.4.0's 32 untouched, then 0.5.0's looks and formats, then
+    // the upstream 0.21 sync's look (appended after rc.3: rc menus keep their indices)
     const auto &rel = released_preset_order();
-    REQUIRE(rel.size() == 40);
+    REQUIRE(rel.size() == 41);
     CHECK(rel[0] == "15 second glitches");
     CHECK(rel[31] == "Webcam (low quality)");
     CHECK(rel[34] == "Digital video/Webcam (2005)");
+    CHECK(rel[39] == "Digital video/Datamosh");
+    CHECK(rel[40] == "Cheap camcorder");
 
     const json &minidv = s.digital_formats[2]["applies"];
     auto vals = applies_values(s, minidv);

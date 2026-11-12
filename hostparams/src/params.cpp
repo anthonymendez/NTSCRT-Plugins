@@ -780,6 +780,8 @@ const std::vector<std::string> &released_preset_order() {
         "CD-ROM (low quality)", "Chunky webcam", "Digital video/Webcam (2005)", "Digital video/Video call",
         "Digital video/MiniDV", "Digital video/Early web video", "Digital video/CD-ROM (Video 1)",
         "Digital video/Datamosh",
+        // v0.5.0 (upstream 0.21 sync, after rc.3): one new look
+        "Cheap camcorder",
     };
     return names;
 }

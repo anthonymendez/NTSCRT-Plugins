@@ -9,8 +9,8 @@ Fails (exit 1) when:
      from core/params/schema.json;
   b. a file in presets/ differs from upstream's blob at the pin, upstream has a preset we lack, or we
      have one upstream doesn't (unless port-map.json lists it in retained_presets);
-  c. schema.json's sources.upstream_ntscrt, or a tests/golden/ref/*.json upstream_commit, isn't the
-     submodule commit (also: the submodule checkout must be the recorded gitlink);
+  c. schema.json's sources.upstream_ntscrt, tests/golden/manifest.json's or a tests/golden/ref/*.json
+     upstream_commit isn't the submodule commit (also: the submodule checkout must be the recorded gitlink);
   d. the slang-shaders commit differs between the vendor/slang-shaders gitlink, SLANG_COMMIT in
      tools/gen_schema.py, schema.json, core/stages/crt/CMakeLists.txt and upstream's own
      Vendor/slang-shaders pin (likewise ntsc-rs: vendor/ntsc-rs vs upstream's Vendor/ntsc-rs);
@@ -140,6 +140,14 @@ def check_pins(commit, sub_head, rep):
                          "schema (tools/gen_schema.py)" % (short(pin), short(commit)))
     except U.Fail as e:
         probs.append(str(e))
+    manifest = GOLDEN_REF.parent / "manifest.json"
+    try:
+        mc = json.loads(manifest.read_text(encoding="utf-8")).get("upstream_commit")
+        if mc != commit:
+            probs.append("tests/golden/manifest.json upstream_commit is %s, the submodule is %s: set it to the pin "
+                         "(scripts/sync_upstream.py does)" % (short(mc), short(commit)))
+    except (OSError, ValueError) as e:
+        probs.append("tests/golden/manifest.json: %s" % e)
     refs = sorted(GOLDEN_REF.glob("*.json"))
     stale = []
     for f in refs:

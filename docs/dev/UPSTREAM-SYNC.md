@@ -1,7 +1,7 @@
 # Syncing with upstream NTSCRT
 
 The core is a port of [NTSCRT](https://github.com/finnmckenty/NTSCRT) (Swift, macOS), pinned as the
-read-only submodule `upstream/NTSCRT`. Current pin: **v0.20.0** (`c6ab639`). This page is the routine for
+read-only submodule `upstream/NTSCRT`. Current pin: **v0.21.0** (`8b26092`). This page is the routine for
 bringing a later upstream release in: run one script, hand-port the files it lists, and CI checks the rest.
 
 | Tool | What it does |
@@ -58,8 +58,8 @@ port map's `retained_presets`); regenerates `core/params/schema.json` with `tool
 vendor/slang-shaders` (when the generator refuses a breaking change, the sync stops with its exit code: see
 section 4, fix it, then re-run with `--allow-dirty`; `--allow-breaking` is passed through, for use only before a
 first release); runs `fxplug/tools/update_param_ids.py` (new FxPlug ids, append-only); and updates the version
-strings (the README "Synced with upstream NTSCRT vX" line, the `docs/params.md` look-format line and the pin line
-at the top of this page). Then it prints the hand-port list and the manual steps left. It never commits or pushes.
+strings (the README "Synced with upstream NTSCRT vX" line, the `docs/params.md` look-format line, the pin lines
+at the top of this page and in `docs/dev/AGENTS.md`, and `tests/golden/manifest.json`'s `upstream_commit`). Then it prints the hand-port list and the manual steps left. It never commits or pushes.
 
 If upstream moved its `Vendor/slang-shaders` or `Vendor/ntsc-rs` pin, the report says so: bump ours to match
 (`vendor/slang-shaders` also needs `SLANG_COMMIT` in `tools/gen_schema.py` and the comment in
@@ -113,6 +113,12 @@ Hosts store params by **id** and every value, defaults included (checked in Reso
    when they use a stage the test doesn't cover yet.
 3. A CHANGELOG entry listing changed defaults and what happens to existing projects, and a line in the sync log
    below.
+   Host tests: `tests/hostparams/ofx_reference.json` is a frozen snapshot of the looks the OpenFX host built
+   before the param models merged: add new Digital / Glitch params to its `default` look at their defaults
+   (render-identical), and a new look's menu entry and case; `test_params_timeline.cpp` checks the size of
+   `released_preset_order()`. Self-goldens: add new looks to `tests/golden/self/manifest.json` and regenerate
+   only the entries whose look legitimately changed (`NTSCRT_GOLDEN_UPDATE=1 NTSCRT_GOLDEN_ONLY=<id>`); every
+   other entry must stay byte-identical. Presets gallery: `scripts/make_presets_gallery.py --only <slug>`.
 4. Refresh the golden references (they record the upstream commit they were rendered from, and `check_sync.py`
    compares it with the pin): `gh workflow run golden --ref <branch>`, then
    `gh run download <run-id> -n golden-refs -D tests/golden/ref` (see tests/golden/README.md).
@@ -134,8 +140,8 @@ descriptors come from the committed `core/params/ntsc_descriptors.json`, so no R
 - **b.** a file in `presets/` differs from upstream's blob at the pin (raw bytes, so a flipped byte or a changed
   line ending counts; `.gitattributes` marks `presets/** -text`), upstream has a preset we lack, or we have one it
   doesn't (unless listed in `retained_presets`);
-- **c.** `schema.json`'s `upstream_ntscrt` or a `tests/golden/ref/*.json` `upstream_commit` isn't the submodule
-  commit, or the submodule checkout isn't the recorded gitlink;
+- **c.** `schema.json`'s `upstream_ntscrt`, `tests/golden/manifest.json`'s or a `tests/golden/ref/*.json` `upstream_commit`
+  isn't the submodule commit (the golden workflow records the commit it built), or the submodule checkout isn't the recorded gitlink;
 - **d.** the slang-shaders commit differs between the `vendor/slang-shaders` gitlink, `SLANG_COMMIT` in
   gen_schema.py, `schema.json`, `core/stages/crt/CMakeLists.txt` and upstream's `Vendor/slang-shaders`; or
   `vendor/ntsc-rs` differs from upstream's `Vendor/ntsc-rs`;
@@ -208,3 +214,17 @@ Proposal, in order of value per effort:
   *CD-ROM (low quality)*; Compression group first. App-only (not ported): the CRT_DIGITAL `width=` and
   CRT_EXPORT_MP4 automation hooks, the panel's codec-dependent hiding (here: `visible_if` on `codec`),
   preview sizing, README; licences handled separately.
+- **v0.21.0** (`8b26092`, from v0.20.0 `c6ab639`; the first real run of `sync_upstream.py`): Digital video
+  **Low-light noise** (`low_light_noise`, default 0: Sensor noise × up to 8 as the frame's median luma falls
+  below sRGB 100) and **Halo width** (`sharpening_width`, 1–4 px, default 1 = the old 3×3 sharpening): new
+  ids (FxPlug 449/450), and every format writes both at those defaults (the `digital_formats` change); no
+  breaking change, no migration. The sensor noise's per-row RNG seeds are hashed: same strength, new grain,
+  so every look with Sensor noise > 0 renders different grain (checked: with the old seeding, old looks are
+  bit-identical to v0.20.0; self-goldens of those looks regenerated). Bundled look *Cheap camcorder*
+  (appended to `released_preset_order()`, added to `DIGITAL_LOOKS` and the self-goldens). Tests:
+  `testHaloWidth`, `testLowLightNoiseGrowsInTheDark`. Not ported: `DigitalParam.startingValues` (a new
+  window's stage starts off but set to Cheap camcorder): the schema keeps the controls' defaults, which
+  preset application fills missing values from (see `core/stages/digital/renderer.h`); upstream's first
+  switch-on in such a window applies the Webcam format anyway (`digitalFormatApplied` is still false).
+  App-only: the panel graying Low-light noise / Halo width out while Sensor noise / Sharpening is 0 (both
+  stay enabled here), README, DEVELOPMENT.md. No `Timeline.swift`, vendor-pin or new-file (port map) changes.

@@ -8,7 +8,7 @@ Sections: [Looks](#looks) · [Animated looks](#animated-looks) · [Digital video
 
 ## Looks
 
-Bundled looks with fixed settings (the noise, waves and glitches still move every frame). Choose them in **Presets → Preset**. (13 presets)
+Bundled looks with fixed settings (the noise, waves and glitches still move every frame). Choose them in **Presets → Preset**. (14 presets)
 
 <table>
 <tr>
@@ -37,7 +37,7 @@ Bundled looks with fixed settings (the noise, waves and glitches still move ever
 </tr>
 <tr>
 <td width="350" valign="top"><img src="images/presets/chunky-webcam.gif" width="336" height="189" alt="Chunky webcam"><br><b>Chunky webcam</b><br><sub>Downscaled to 256 px (Smooth); NTSC signal off; Digital video (DCT (MPEG, DV) codec, 30 fps); no CRT shader.</sub></td>
-<td width="350"></td>
+<td width="350" valign="top"><img src="images/presets/cheap-camcorder.gif" width="336" height="189" alt="Cheap camcorder"><br><b>Cheap camcorder</b><br><sub>Downscaled to 480 px (Smooth); NTSC signal off; Digital video (DCT (MPEG, DV) codec, 29.0957 fps); no CRT shader.</sub></td>
 </tr>
 </table>
 
