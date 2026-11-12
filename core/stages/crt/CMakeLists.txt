@@ -119,7 +119,8 @@ set(shader_srcs)
 foreach(f ${shader_files})
   list(APPEND shader_srcs ${NTSCRT_SLANG_SHADERS_DIR}/${f})
 endforeach()
-file(GLOB_RECURSE preset_files ${NTSCRT_ROOT}/presets/*.json)
+# CONFIGURE_DEPENDS: a preset added by an upstream sync is picked up without a manual re-configure.
+file(GLOB_RECURSE preset_files CONFIGURE_DEPENDS ${NTSCRT_ROOT}/presets/*.json)
 set(stamp ${CMAKE_BINARY_DIR}/ntscrt_resources.stamp)
 add_custom_command(OUTPUT ${stamp}
   COMMAND ${CMAKE_COMMAND} -DMANIFEST=${manifest} -DSRC=${NTSCRT_SLANG_SHADERS_DIR} -DDST=${res}/shaders
