@@ -321,3 +321,45 @@ TEST_CASE("host GPU conversion rounds like the CPU path at every 8-bit boundary"
     }
 #endif
 }
+
+// NTSCRT_HOSTGPU_BENCH=1: UHD frames through both paths, timings printed (not a check).
+TEST_CASE("UHD timings, CPU path vs host GPU path" * doctest::skip(std::getenv("NTSCRT_HOSTGPU_BENCH") == nullptr)) {
+#ifdef _WIN32
+    fakecuda::FakeCudaHost cuda;
+    if (!cuda.start()) return;
+    const auto schema = ntscrt::host::Schema::parse(ntscrt_param_schema_json());
+    nlohmann::json l = ntscrt::host::build_look(schema, [&](size_t i) { return schema.params[i].def; }).look;
+    for (const char *patch : {"{}", R"({"ntsc":{"enabled":false}})"}) {
+        nlohmann::json lk = l;
+        lk.merge_patch(nlohmann::json::parse(patch));
+        const std::string look = lk.dump();
+        const int W = 3840, H = 2160;
+        HostImage src, out;
+        src.init(W, H, NTSCRT_RGBA32F);
+        fill(src, 0, Alpha::Opaque);
+        out.init(W, H, NTSCRT_RGBA32F);
+        ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, NTSCRT_BUILT_RESOURCES_DIR};
+        ntscrt_instance *a = nullptr;
+        REQUIRE(ntscrt_create(&ci, &a) == NTSCRT_OK);
+        auto ds = cuda.upload(src.mem.data(), src.mem.size()), dd = cuda.upload(out.mem.data(), out.mem.size());
+        ntscrt_host_gpu host{NTSCRT_HOST_GPU_CUDA, cuda.stream};
+        ntscrt_gpu_image gs{W, H, ptrdiff_t(src.pitch), NTSCRT_RGBA32F, 1, reinterpret_cast<void *>(ds), 0};
+        ntscrt_gpu_image gd{W, H, ptrdiff_t(out.pitch), NTSCRT_RGBA32F, 1, reinterpret_cast<void *>(dd), 0};
+        for (int f = 0; f < 12; ++f) {
+            ntscrt_render_args ra{};
+            ra.frame_index = f;
+            ra.fps = 30;
+            ra.look_json = look.c_str();
+            ra.render_scale = 1;
+            ntscrt_image s = src.cpu(), d = out.cpu();
+            REQUIRE(ntscrt_render_cpu(a, &ra, &s, &d) == NTSCRT_OK);
+            const std::string tc = ntscrt_last_timings(a);
+            REQUIRE(ntscrt_render_host_gpu(a, &ra, &host, &gs, 0, 0, &gd) == NTSCRT_OK);
+            if (f >= 9) MESSAGE(std::string(patch) << " cpu: " << tc << " | gpu: " << std::string(ntscrt_last_timings(a)));
+        }
+        cuda.MemFree(ds);
+        cuda.MemFree(dd);
+        ntscrt_destroy(a);
+    }
+#endif
+}

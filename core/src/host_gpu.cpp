@@ -219,16 +219,17 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
         if (mode != AlphaMode::Clip) return false;
         if (!transparent) {
             InParams p = in_params(mode);
-            auto flags = bridge().scratch(dev, {fh, 1, gpu::Format::R32F, true, false});
+            const int fx = (fw + 63) / 64;  // one flag per 64 pixels of a row
+            auto flags = bridge().scratch(dev, {fx, fh, gpu::Format::R32F, true, false});
             gpu::Bindings b;
             b.constants = &p;
             b.constants_size = sizeof p;
             auto s = source(dev);
             b.textures = {s.get()};
             b.out_textures = {flags.get()};
-            dev.dispatch(dev.kernel("hostgpu_flags/row_flags"), b, fh, 1, 1);
-            std::vector<float> rows(static_cast<size_t>(fh));
-            dev.download(*flags, rows.data(), ptrdiff_t(fh) * 4);
+            dev.dispatch(dev.kernel("hostgpu_flags/row_flags"), b, fx, fh, 1);
+            std::vector<float> rows(size_t(fx) * size_t(fh));
+            dev.download(*flags, rows.data(), ptrdiff_t(fx) * 4);
             transparent = std::any_of(rows.begin(), rows.end(), [](float f) { return f != 0.f; });
         }
         return *transparent;
