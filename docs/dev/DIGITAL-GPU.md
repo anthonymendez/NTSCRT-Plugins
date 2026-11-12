@@ -99,7 +99,7 @@ The target was the NTSC port's: byte-identical to the CPU code, and it is, for e
   even, not fused into the subtraction), `x*y - w` (rounded to nearest, not toward zero) and `(1 + v) - 1` (sums
   round to nearest), with the operands from the constant buffer. `float` when all three are right, else
   `probe_round_x` on the double kernels (`double`), else `inexact` (the route stays off unless `force`).
-  Measured: RTX 5090 `float`, WARP `float`. `NTSCRT_DIGITAL_GPU_ARITH=double` forces the double kernels (the
+  Measured: RTX 5090 `float`, WARP `float`, the macOS CI runner's paravirtual Metal GPU `inexact`. `NTSCRT_DIGITAL_GPU_ARITH=double` forces the double kernels (the
   test runs them on both devices: also byte-identical).
 - **No sin(), no division, no doubles in the plain kernels.** The Lanczos taps (`makeTaps`: sin, the
   normalisation division, double centres), the aliasing coordinates (doubles), its 3x3 mean's `/ 9` (a table of
@@ -303,5 +303,29 @@ this way: the dev copy's test preset file only takes bundled looks.)
 
 ### Resolve parity
 
-PARITY_SECTION
+`run_resolve_tests.py --headless --bundle <bundle> --parity --parity-digital` (2026-11-12): the 62 cases that run
+Digital video (the 4 bundled Digital looks and the 6 formats on the Fusion page, also at frame 107980 of a 1 h
+clip; the stage alone, every Digital option at a strong value, Digital over the default look, Datamosh over it;
+8-bit / half-float / smaller sources; a title in Clip mode; the Edit page with MiniDV and *CD-ROM (low
+quality)*, also an hour in; MiniDV in 1080p and UHD projects), five headless sessions:
+
+| pair | rule | images | pass | fail | info | route-fail |
+|---|---|---|---|---|---|---|
+| mixa vs cpu (Digital and NTSC routes differ) | exact | 182 | 182 | 0 | 0 | 0 |
+| gpu vs mixb (Digital and NTSC routes differ where NTSC is on) | exact | 182 | 182 | 0 | 0 | 0 |
+| mixb vs cpu | host GPU | 182 | 179 | 0 | 3 | 0 |
+| gpu vs cpu | host GPU | 182 | 179 | 0 | 3 | 0 |
+| cpu2 vs cpu | noise | 42 | 42 | 0 | 0 | 0 |
+
+The 3 "info" images are the documented 8-bit Fusion source case (`i8-minidv`: Resolve hands GPU-render plug-ins
+float images whatever the tool depth, HOST-GPU.md), the same in `mixb`, whose Digital video runs on the CPU. No
+route problems: render lines with `digital_route=gpu` 1236 in `gpu`, 288 in `mixa`; `digital_route=cpu` 286 in
+`cpu`, 36 in `cpu2`; `mixb` 421 `cpu` (NTSC on: ntsc-rs) and 829 `gpu` (NTSC off).
+
+### Metal (CI)
+
+The macOS runner's paravirtual GPU probes `inexact` (fast math): the capture scale-down differs from the CPU code
+by at most one level in a few hundred bytes of a UHD -> 320x180 picture (a few bytes at 1080p -> 720x406). The
+route is off there (as by default on every Mac); the Metal library compiles in CI.
+
 

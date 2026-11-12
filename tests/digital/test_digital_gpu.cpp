@@ -365,10 +365,11 @@ void check_sequence(const std::string &name, const json &look_j, const Sequence 
         const Rendered a = render(cpu, src, look, n, q.scale, "0");
         const Rendered b = render(gpu, src, look, n, q.scale, gpu_env());
         CHECK(a.timings.find("digital_route=cpu (NTSCRT_DIGITAL_GPU=0)") != std::string::npos);
-        if (ntscrt::testing::stats(gpu).has_gpu) {
+        if (ntscrt::testing::stats(gpu).has_gpu && gputest::native_backend() == gpu::Backend::D3D11) {
+            // (Metal: "not on Metal yet" comes first)
             if (ntsc_env && std::string(ntsc_env) == "0")
                 CHECK(b.timings.find("digital_route=cpu (ntsc-rs needs the picture on the CPU)") != std::string::npos);
-            else if (gputest::native_backend() == gpu::Backend::D3D11)
+            else
                 CHECK(b.timings.find("digital_route=gpu") != std::string::npos);
         }
         const Mismatch m = diff(a.px, b.px);
