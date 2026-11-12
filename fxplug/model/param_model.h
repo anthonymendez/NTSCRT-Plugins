@@ -82,7 +82,7 @@ using HostValues = std::map<uint32_t, json>;  // host id -> host value
 // A preset as FxPlug writes it (host::PresetPlan in host ids and host values).
 struct HostPlan {
     bool replaces_look = false;
-    int64_t pass = 0, frames = 0;  // animated: frames per timeline pass, frames keyed
+    int64_t pass = 0, first = 0, frames = 0;  // animated: frames per timeline pass, the keyed stretch
     // Every look param presets set (their keyframes are cleared first): one (0, v) entry =
     // a plain value; more = keyframes at frame offsets from the effect's first frame.
     std::map<uint32_t, std::vector<std::pair<int64_t, json>>> look;
@@ -122,7 +122,8 @@ public:
     std::vector<host::Preset> loop_menu(const json &bundled) const;
     // What applying a preset writes; fps = the host frame rate, available = frames from
     // the effect's first frame to its last (<= 0 = unknown).
-    HostPlan plan_preset(const json &preset, double fps, int64_t available) const;
+    // at: the frame (offset from the first) the keyed stretch must cover, e.g. the playhead.
+    HostPlan plan_preset(const json &preset, double fps, int64_t available, int64_t at = 0) const;
     // Host values a Digital video format's (or an option's) "applies" map writes.
     HostValues applies_host_values(const json &applies) const;
     // What a user edit of control `edited` writes next: its option's applies, choices dropping to Custom.

@@ -1,4 +1,5 @@
 // Tests the host-independent FxPlug parameter model (runs on all platforms).
+#include <algorithm>
 #include <doctest/doctest.h>
 #include <ntscrt/ntscrt.h>
 
@@ -288,17 +289,29 @@ const Model &real_model() {
     static Model m = Model::from_schema(json::parse(ntscrt_param_schema_json()), load("fxplug/param_ids.json"), nullptr);
     return m;
 }
-json keyed_at(const std::vector<std::pair<int64_t, json>> &keys, int64_t n) {
-    json v = keys.front().second;
-    for (const auto &[f, x] : keys)
-        if (f <= n) v = x;
-    return v;
+// Host value of keys at frame n, interpolated linearly (bools and menus step).
+json keyed_at(const Param &p, const std::vector<std::pair<int64_t, json>> &keys, int64_t n) {
+    auto hi = std::lower_bound(keys.begin(), keys.end(), n, [](const auto &k, int64_t x) { return k.first < x; });
+    if (hi == keys.begin()) return hi->second;
+    if (hi == keys.end()) return keys.back().second;
+    if (hi->first == n) return hi->second;
+    const auto &lo = *std::prev(hi);
+    if (p.type == Kind::Bool || p.type == Kind::Choice) return lo.second;
+    const double u = double(n - lo.first) / double(hi->first - lo.first);
+    auto mix = [&](const json &a, const json &b) { return a.get<double>() + (b.get<double>() - a.get<double>()) * u; };
+    if (lo.second.is_array()) {
+        json out = json::array();
+        for (size_t i = 0; i < lo.second.size(); ++i) out.push_back(mix(lo.second[i], hi->second[i]));
+        return out;
+    }
+    if (p.type == Kind::Int) return json(int64_t(std::llround(mix(lo.second, hi->second))));
+    return json(mix(lo.second, hi->second));
 }
 // The look a host holding pk's values / keys builds at frame n.
 json keyed_look(const Model &m, const HostPlan &pk, int64_t n) {
     return m.build([&](const Param &p) {
         auto it = pk.look.find(p.host_id);
-        return it != pk.look.end() ? keyed_at(it->second, n) : m.default_host_value(p);
+        return it != pk.look.end() ? keyed_at(p, it->second, n) : m.default_host_value(p);
     }).look;
 }
 // The look a host builds after applying `look` as a still look (its timeline left out).
@@ -327,24 +340,25 @@ TEST_CASE("model: animated presets become keyframes matching the upstream timeli
             CHECK(k.front().first == 0);
             if (k.size() > 1) {
                 ++moving;
-                if (p->type != Kind::Bool && p->type != Kind::Choice) CHECK(k.size() == 150);
+                CHECK(k.size() < 150);  // sparse: where the curve bends
             }
         }
         CHECK(moving > 3);
         bool differs = false;
         const json first = keyed_look(m, pk, 0);
-        for (int64_t n : {0, 1, 13, 29, 59, 60, 77, 149}) {
+        for (int64_t n = 0; n < 150; ++n) {
             CAPTURE(n);
             const json want = held_look(m, host::preset_look_at_frame(m.schema, preset, n, fps));
             const json got = keyed_look(m, pk, n);
-            CHECK(got == want);
+            std::string where;
+            CHECK_MESSAGE(host::within_key_tolerance(m.schema, got, want, &where), where);
             differs |= got != first;
         }
         CHECK(differs);
     }
     CHECK_FALSE(m.plan_preset(load("presets/Clean VHS.json"), 30, 100).animated());
     CHECK_FALSE(m.plan_preset(load("presets/Screen Loop/Bottom to top.json"), 30, 100).animated());
-    CHECK(m.plan_preset(load("presets/Glitch pop.json"), 30, 0).frames == 60);  // unknown length: one pass
+    CHECK(m.plan_preset(load("presets/Glitch pop.json"), 30, 0).frames == host::kMaxKeyedFrames);  // unknown length
 }
 
 TEST_CASE("model: Horizontal resolution applies, Custom demotion, Digital video formats") {

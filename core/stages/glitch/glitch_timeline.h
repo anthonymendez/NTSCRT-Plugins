@@ -17,6 +17,10 @@
 // frames between probes can go unnoticed until flush(), so hosts flush after
 // editing keyframed Glitch values (OFX instanceChanged / FxPlug). Probes sit
 // on whole seconds so they repeat from one render to the next.
+// The simulation restarts at every segment boundary (core/src/sim_segment.h, one a
+// minute): the receiver at frame F depends on the frames since its segment's start
+// only, which bounds the cost of an edit wherever F is. Frame numbers below are
+// relative to that start.
 // Owner: agent B.
 #pragma once
 
@@ -58,6 +62,7 @@ private:
     std::unique_ptr<ReceiverSimulator> sim_;
     uint64_t seed_ = 0;
     double fps_ = 0;
+    int64_t segment_ = -1;                // effect frame the simulation starts at (sim_segment.h)
     int64_t sim_frame_ = -1;              // frame the live simulation sits at (-1: none)
     std::vector<uint64_t> hist_;          // timing hash per frame 0..hist_.size()-1
     std::map<int64_t, ReceiverSimulator::Snapshot> checkpoints_;

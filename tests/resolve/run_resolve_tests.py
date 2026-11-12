@@ -26,6 +26,9 @@ Tests (see README.md next to this file):
             is pressed if Fusion scripting can press it (only logged, no window, under --headless)
   debugall  "Debug logging for all effects" (button): with the effect's checkbox off, every frame is
             logged in detail while it is on and not after it is off; the switch is left as found
+  position  Edit-page items an hour into the timeline: the frame ranges Resolve reports, an animated
+            look applied there (time, keyframes, first render) plays over the clip like
+            ntscrt-cli --timeline (headless with --bundle only)
 
 Resolve loads the plug-in from its OFX folder, or from OFX_PLUGIN_PATH at startup:
 tests/resolve/launch_resolve_dev.ps1 starts Resolve with a build's bundle.
@@ -40,6 +43,7 @@ import datetime
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -301,6 +305,10 @@ def start_headless(bundle, log_dir):
     # shell's NTSCRT_DEBUG_LOG doesn't turn detailed logging on behind the debug tests' back.
     env.setdefault("NTSCRT_SETTINGS_DIR", str(log_dir))
     env.pop("NTSCRT_DEBUG_LOG", None)
+    # The "position" test's switch: while this file exists the dev copy applies the look it names to
+    # new effects (scripts can't set OpenFX params on the Edit page).
+    env["NTSCRT_OFX_TEST_PRESET_FILE"] = str(Path(log_dir) / "test-preset.txt")
+    os.environ["NTSCRT_OFX_TEST_PRESET_FILE"] = env["NTSCRT_OFX_TEST_PRESET_FILE"]
     if not Path(RESOLVE_EXE).exists():
         raise RuntimeError(f"Resolve not found at {RESOLVE_EXE}")
     print(f"starting Resolve headless ({RESOLVE_EXE} -nogui)" + (f" with {bundle}" if bundle else ""), flush=True)
@@ -748,7 +756,11 @@ class Suite:
         name = self.ANIMATED_LOOK
         slug = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()
         fx = self.ntscrt(fu, src)
+        log = self.plugin_log()
+        mark = self.log_size(log)
+        t0 = time.time()
         fx.SetInput("host_preset", self.look_preset_index(name))
+        apply_s = time.time() - t0
         look = json.loads((ROOT / "presets" / f"{name}.json").read_text(encoding="utf-8"))
         problems, notes = [], []
         # The preset became keyframes: a moving value differs between frames as the timeline says.
@@ -776,6 +788,17 @@ class Suite:
             table[name] = {f: [fx.GetInput(f"ntsc_{name}", f), round(expected(name, f), 6)]
                            for f in (0, 1, 3, 5, 6, 7, 9, 10, 12, 20, 36, 39)}
         m["keyed_values_got_vs_timeline"] = table
+        # How Fusion interpolates the sparse keys (0.5.0-rc.3): the largest gap between the spline and the
+        # timeline over a pass, as a fraction of the value's swing (informational; the frames are the check).
+        vals = [(fx.GetInput("ntsc_composite_preemphasis", f), expected("composite_preemphasis", f)) for f in range(pass_frames)]
+        vals = [(a, b) for a, b in vals if a is not None]
+        if vals:
+            swing = (max(b for _, b in vals) - min(b for _, b in vals)) or 1.0
+            m["fusion_spline_max_dev_of_swing"] = round(max(abs(a - b) for a, b in vals) / swing, 5)
+        m["apply_preset_s"] = round(apply_s, 3)
+        ap = re.search(r"animated preset at t=.*?(\d+) keyframes on (\d+) params in (\d+) ms", self.log_since(log, mark))
+        if ap:
+            m.update({"keyframes": int(ap.group(1)), "plugin_apply_ms": int(ap.group(3))})
         n = 16 if self.a.quick else 40
         frames = (0, n - 1)
         # source and effect from the same render job (Fusion's source frames differ slightly between jobs)
@@ -819,6 +842,138 @@ class Suite:
             problems.append(f"Digital video/MiniDV: {got}")
         self.record("animated", "fail" if problems else "pass", m, "; ".join(problems + notes),
                     [f"anim-{slug}-diff.png"] if worst[0] > 2.0 else [])
+
+    # An animated look on the Edit page, far into a timeline (Resolve's default 01:00:00:00 start).
+    POSITION_LOOK = "Glitch pop"
+
+    def edit_page_items(self, tl):
+        """Effect targets an hour into `tl`: a Fusion composition clip (media-like: Resolve gives it
+        times from 0 at its start) and a Solid Color generator and an Adjustment Clip (no media) when
+        scripting can make them take an OpenFX effect. Returns [(kind, item)]."""
+        items = []
+        tl.SetCurrentTimecode("01:00:10:00")
+        comp_item = tl.InsertFusionCompositionIntoTimeline()
+        if comp_item:
+            items.append(("comp clip", comp_item))
+        for kind, make in (("generator", lambda: tl.InsertGeneratorIntoTimeline("Solid Color")),
+                           ("adjustment clip", lambda: tl.InsertGeneratorIntoTimeline("Adjustment Clip"))):
+            tl.SetCurrentTimecode("01:00:20:00" if kind == "generator" else "01:00:30:00")
+            try:
+                it = make()
+            except Exception:
+                it = None
+            if it:
+                items.append((kind, it))
+        return items
+
+    def t_position(self):
+        """The effect on Edit-page items starting at 01:00:10:00 and later: what frame range and
+        times Resolve reports (logged by the plug-in), and an animated look applied there (through
+        the dev copy's test preset file, as scripts can't set OpenFX params on the Edit page): the
+        time it takes, the keyframes written, the first render, and the frames against
+        ntscrt-cli --timeline (same tolerance as the cli test) and against the frozen look."""
+        if not self.cli or not self.res:
+            return self.record("position", "skip", notes="ntscrt-cli or bundle resources not found (pass --build)")
+        preset_file = os.environ.get("NTSCRT_OFX_TEST_PRESET_FILE") if self.a.headless else None
+        if not preset_file:
+            return self.record("position", "skip", notes="needs --headless --bundle (the dev copy's test preset file)")
+        fx_ids = [e["id"] for e in self.r.GetEffectsList() if "ntscrt" in (e.get("name", "") + e.get("id", "")).lower()]
+        if not fx_ids:
+            return self.record("position", "fail", notes="NTSCRT isn't in Resolve's effect list")
+        log = self.plugin_log()
+        tl = self.new_timeline("position")
+        st = tl.GetStartFrame()
+        name = self.POSITION_LOOK
+        look = json.loads((ROOT / "presets" / f"{name}.json").read_text(encoding="utf-8"))
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()
+        m = {"timeline_start_frame": st, "timeline_start_tc": tl.GetStartTimecode(), "items": {}}
+        problems = []
+        targets = self.edit_page_items(tl)
+        if not targets:
+            return self.record("position", "fail", notes="couldn't put any item on the timeline")
+        comp = next((it for k, it in targets if k == "comp clip"), None)
+        if comp:
+            fu = Fu(self, comp.GetFusionCompByIndex(1), tl)
+            fu.media_out.Input = self.scene(fu).Output
+        n = 8 if self.a.quick else 24
+        for kind, item in targets:
+            info = {"start": item.GetStart(), "end": item.GetEnd()}
+            m["items"][kind] = info
+            rel = item.GetStart() - st
+            # Source frames first (no effect), then the effect with the look applied at the clip's 6th frame.
+            if kind != "adjustment clip":
+                srcs = self.render_timeline(tl, (rel + 5, rel + 5 + n - 1), f"pos-{kind[:4]}-src")
+            mark = self.log_size(log)
+            # The playhead the look is applied at, in the times Resolve gives the effect: from 0 at
+            # the clip's start for a clip, timeline frames for items without media (an Adjustment
+            # Clip: the report's log). Whether that holds shows in the coverage check below.
+            at = 5 if kind == "comp clip" else item.GetStart() + 5
+            Path(preset_file).write_text(f"{name}\n{at}\n", encoding="utf-8")
+            t0 = time.time()
+            eff = item.AddEffect("ofx", fx_ids[0])
+            info["add_effect_s"] = round(time.time() - t0, 2)
+            try:
+                os.remove(preset_file)
+            except OSError:
+                pass
+            if not eff:
+                info["note"] = "AddEffect refused (scripting can't apply OpenFX to this item)"
+                continue
+            t0 = time.time()
+            outs = self.render_timeline(tl, (rel + 5, rel + 5 + n - 1), f"pos-{kind[:4]}-fx")
+            info["render_s"] = round(time.time() - t0, 2)
+            text = self.log_since(log, mark)
+            created = re.findall(r"instance #\d+ created.*?;( src_range=.*)", text)
+            info["reported_at_create"] = created[0].strip() if created else None
+            first = re.search(r"render #1 t=([\d.]+) frame=(-?\d+) .*? ms=(\d+).*?;( src_range=.*)", text)
+            if first:
+                info.update({"first_render_t": float(first.group(1)), "first_render_frame": int(first.group(2)),
+                             "first_render_ms": int(first.group(3)), "reported_at_render": first.group(4).strip()})
+            ap = re.search(r"animated preset at t=([\d.]+): (\d+) frames per pass, frames ([\d.]+)\.\.([\d.]+) keyed "
+                           r"\(origin ([\d.]+)([^)]*)\), (\d+) keyframes on (\d+) params in (\d+) ms", text)
+            if ap:
+                info.update({"preset_t": float(ap.group(1)), "keyed_from": float(ap.group(3)), "keyed_to": float(ap.group(4)),
+                             "origin": float(ap.group(5)), "range_unknown": bool(ap.group(6)), "keyframes": int(ap.group(7)),
+                             "apply_ms": int(ap.group(9))})
+            else:
+                problems.append(f"{kind}: the look wasn't applied (no 'animated preset' line in the plug-in log)")
+                continue
+            if kind == "adjustment clip" or not first:
+                continue
+            # The frames the plug-in rendered against ntscrt-cli --timeline at the same frame numbers
+            # (frame = host time - origin, as the plug-in logged it).
+            # Renders of the job: the earliest host time is the job's first frame; t - frame = the origin.
+            shift = info["first_render_t"] - info["first_render_frame"]
+            t_first = min(float(t) for t in re.findall(r"render #\d+ t=([\d.]+) frame=", text))
+            base_frame = int(round(t_first - shift))
+            seq = self.out / f"pos-{slug}-{kind[:4]}-seq"
+            seq.mkdir(exist_ok=True)
+            for k in range(n):
+                shutil.copyfile(srcs[rel + 5 + k], seq / f"s-{base_frame + k:04d}.png")
+            pat = seq / "s-%04d.png"
+            self.run_cli(pat, self.out / f"pos-{kind[:4]}-ref-%04d.png", base_frame, n, look, timeline=True)
+            self.run_cli(pat, self.out / f"pos-{kind[:4]}-frozen-%04d.png", base_frame, n, look)
+            worst, frozen_max = (0.0, 0), 0.0
+            for k in range(n):
+                a = read_png(outs[rel + 5 + k])
+                ref = read_png(self.out / f"pos-{kind[:4]}-ref-{base_frame + k:04d}.png")
+                s = stats(a, ref)["rgb"]["mean"]
+                if s >= worst[0]:
+                    worst = (s, base_frame + k)
+                    if s > 2.0:
+                        write_png(self.out / f"pos-{kind[:4]}-diff.png", diff_image(a, ref))
+                frozen_max = max(frozen_max, stats(a, read_png(self.out / f"pos-{kind[:4]}-frozen-{base_frame + k:04d}.png"))["rgb"]["mean"])
+            info.update({"cli_first_frame": base_frame, "worst_mean_vs_timeline": worst[0], "worst_frame": worst[1],
+                         "max_mean_vs_frozen": frozen_max})
+            if worst[0] > 2.0:
+                problems.append(f"{kind}: frame {worst[1]} mean diff {worst[0]} vs ntscrt-cli --timeline")
+            if frozen_max <= 4.0:
+                problems.append(f"{kind}: the output never departs from the frozen look (the animation isn't there)")
+            if not (info["keyed_from"] <= t_first <= info["keyed_to"]):
+                problems.append(f"{kind}: keyed {info['keyed_from']}..{info['keyed_to']} doesn't cover the clip's frames ({t_first})")
+            if info["keyframes"] > 20000:
+                problems.append(f"{kind}: {info['keyframes']} keyframes")
+        self.record("position", "fail" if problems else "pass", m, "; ".join(problems))
 
     def t_depth(self):
         fu, _ = self.new_comp("depth")
@@ -1178,7 +1333,7 @@ class Suite:
                              ("order", self.t_order), ("cli", self.t_cli),
                              ("animated", self.t_animated), ("depth", self.t_depth), ("precision", self.t_precision),
                              ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug),
-                             ("debugall", self.t_debugall)):
+                             ("debugall", self.t_debugall), ("position", self.t_position)):
                 self.run(name, fn)
         finally:
             self.close()
@@ -1204,7 +1359,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", help="CMake build dir (finds ntscrt-cli and the bundle's resources)")
     ap.add_argument("--out", default=None, help="output folder (default: a new temp folder)")
-    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,animated,depth,precision,sizes,speed,debug,debugall)")
+    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,animated,depth,precision,sizes,speed,debug,debugall,position)")
     ap.add_argument("--quick", action="store_true", help="fewer frames")
     ap.add_argument("--keep-project", action="store_true", help="stay in the test project afterwards")
     ap.add_argument("--headless", action="store_true",

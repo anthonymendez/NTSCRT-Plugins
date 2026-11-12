@@ -376,19 +376,141 @@ json preset_look_at_frame(const Schema &s, const json &preset, int64_t n, double
     return ntscrt::timeline::look_at_frame(up, ntscrt::timeline::parse(up), s.timeline, n, fps);
 }
 
-PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available) {
+namespace {
+// A numeric value's components (a colour's channels; one for the others).
+std::vector<double> components(const ParamDef &p, const json &v) {
+    if (p.type == PType::Color) return color_components(p, v);
+    return {v.is_number() ? v.get<double>() : v.is_boolean() ? double(v.get<bool>()) : 0.0};
+}
+
+// Frames of one pass (0..n-1) where a piecewise-linear curve through the per-frame values
+// bends: between two consecutive ones, linear interpolation of the end values is within
+// tol[c] of every frame's value (greedy, longest segment first). Always holds 0 and n - 1.
+// Sparse keys also stay within this fraction of the value itself: small values (a chance per
+// line, a noise level near 0) are followed closely, as ntsc-rs's random events depend on them.
+constexpr double kKeyRelTolerance = 0.02;
+
+// flat: only constant segments (integers: hosts round or truncate an interpolated int).
+std::vector<int64_t> bends(const std::vector<std::vector<double>> &v, const std::vector<double> &tol, bool flat) {
+    const int64_t n = int64_t(v.size());
+    // Frames where the value holds (equals a neighbour's): kept exactly, so a value resting at
+    // a default or at 0 between moves rests there (ntsc-rs reacts to tiny changes of some).
+    std::vector<char> held(size_t(n), 0);
+    for (int64_t k = 0; k < n; ++k)
+        held[size_t(k)] = (k > 0 && v[size_t(k)] == v[size_t(k - 1)]) || (k + 1 < n && v[size_t(k)] == v[size_t(k + 1)]);
+    std::vector<int64_t> out{0};
+    int64_t a = 0;
+    while (a < n - 1) {
+        int64_t best = a + 1;
+        for (int64_t b = a + 2; b < n; ++b) {
+            bool ok = true;
+            for (int64_t k = a + 1; k < b && ok; ++k) {
+                const double u = flat ? 0.0 : double(k - a) / double(b - a);
+                for (size_t c = 0; c < tol.size() && ok; ++c)
+                    ok = std::fabs(v[size_t(a)][c] + (v[size_t(b)][c] - v[size_t(a)][c]) * u - v[size_t(k)][c]) <=
+                         (held[size_t(k)] ? 1e-12 * std::max(1.0, std::fabs(v[size_t(k)][c]))
+                                          : std::min(tol[c], std::max(1e-12, kKeyRelTolerance * std::fabs(v[size_t(k)][c]))));
+            }
+            for (size_t c = 0; c < tol.size() && ok && flat; ++c) ok = v[size_t(b)][c] == v[size_t(a)][c];
+            if (!ok) break;
+            best = b;
+        }
+        out.push_back(best);
+        a = best;
+    }
+    return out;
+}
+}  // namespace
+
+json interpolated_key_value(const ParamDef &p, const std::vector<std::pair<int64_t, json>> &keys, double n) {
+    if (keys.empty()) return p.def;
+    auto hi = std::lower_bound(keys.begin(), keys.end(), n, [](const auto &k, double x) { return double(k.first) < x; });
+    if (hi == keys.begin()) return hi->second;
+    if (hi == keys.end()) return keys.back().second;
+    if (double(hi->first) == n) return hi->second;
+    const auto &lo = *std::prev(hi);
+    if (p.type == PType::Bool || p.type == PType::Choice) return lo.second;
+    const double u = (n - double(lo.first)) / double(hi->first - lo.first);
+    const auto a = components(p, lo.second), b = components(p, hi->second);
+    std::vector<double> c(a.size());
+    for (size_t i = 0; i < a.size(); ++i) c[i] = a[i] + (b[i] - a[i]) * u;
+    if (p.type == PType::Color) return color_value(p, c);
+    if (p.type == PType::Int) return json(int64_t(std::llround(c[0])));
+    return json(c[0]);
+}
+
+namespace {
+// The range a value's tolerance is measured against: its slider's (display) range.
+double display_span(const ParamDef &p) {
+    if (p.type == PType::Float) {
+        if (p.has_dmin && p.has_dmax && p.dmax > p.dmin) return p.dmax - p.dmin;
+        if (p.has_min && p.has_max && p.max > p.min) return p.max - p.min;
+    }
+    return 1;
+}
+}  // namespace
+
+double key_tolerance(const ParamDef &p, double factor) {
+    if (p.type != PType::Float && p.type != PType::Color) return 0;
+    double tol = kKeyTolerance * display_span(p);
+    if (p.has_step && p.step > 0) tol = std::max(tol, 0.5 * p.step);
+    return factor * tol + 1e-9;
+}
+
+bool within_key_tolerance(const Schema &s, const json &a, const json &b, std::string *where, double factor) {
+    // Compare with every param's value replaced by the other's when within its tolerance.
+    json x = a, y = b;
+    for (const ParamDef &p : s.params) {
+        auto va = value_at(x, p.path), vb = value_at(y, p.path);
+        if (!va || !vb) continue;
+        const double tol = key_tolerance(p, factor);
+        bool ok = false;
+        if (va->is_number() && vb->is_number()) {
+            ok = std::fabs(va->get<double>() - vb->get<double>()) <= tol;
+        } else if (va->is_array() && vb->is_array() && va->size() == vb->size()) {
+            ok = true;
+            for (size_t i = 0; i < va->size() && ok; ++i)
+                ok = (*va)[i].is_number() && (*vb)[i].is_number() &&
+                     std::fabs((*va)[i].get<double>() - (*vb)[i].get<double>()) <= tol;
+        } else if (p.type == PType::Color && va->is_string() && vb->is_string()) {
+            const auto ca = color_components(p, *va), cb = color_components(p, *vb);
+            ok = ca.size() == cb.size();
+            for (size_t i = 0; i < ca.size() && ok; ++i) ok = std::fabs(ca[i] - cb[i]) <= std::max(tol, 0.5 / 255);
+        }
+        if (ok) set_at(y, p.path, *va);
+    }
+    if (x == y) return true;
+    if (where) *where = json::diff(x, y).dump();
+    return false;
+}
+
+PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available, int64_t at) {
     namespace tl = ntscrt::timeline;
     PresetKeys out;
     if (is_feedback_preset(preset)) return out;
     const json up = ntscrt::digital::migrate::upgraded(preset);
     const tl::Timeline t = tl::parse(up);
     if (!t.animated()) return out;
-    out.pass = tl::pass_frames(t, fps);
-    out.frames = available > 0 ? std::min(available, kMaxKeyedFrames) : out.pass;
+    const int64_t P = tl::pass_frames(t, fps);
+    out.pass = P;
+    // The keyed stretch: whole passes from the origin, covering `at`, a quarter of it before
+    // `at` when the effect is long, inside the effect when its length is known.
+    const int64_t cap = kMaxKeyedFrames;
+    const int64_t hi = available > 0 ? available - 1 : INT64_MAX / 4;
+    at = std::clamp<int64_t>(at, 0, hi);
+    auto down = [&](int64_t f) { return f <= 0 ? 0 : f / P * P; };
+    auto ceil_pass = [&](int64_t f) { return f <= 0 ? 0 : (f + P - 1) / P * P; };
+    int64_t first = down(at - cap / 4);
+    if (first + cap <= at) first = down(at);
+    if (hi < INT64_MAX / 4 && first + cap - 1 > hi) first = std::min(first, ceil_pass(hi - cap + 1));
+    out.first = first;
+    out.frames = std::min(hi, first + cap - 1) - first + 1;
+    const int64_t last = first + out.frames - 1;
+
     // One pass of looks: later passes repeat it.
     std::vector<json> looks;
-    looks.reserve(size_t(out.pass));
-    for (int64_t i = 0; i < out.pass; ++i) looks.push_back(tl::look_at(up, t, s.timeline, tl::time_of_frame(i, out.pass)));
+    looks.reserve(size_t(P));
+    for (int64_t i = 0; i < P; ++i) looks.push_back(tl::look_at(up, t, s.timeline, tl::time_of_frame(i, P)));
     for (size_t pi = 0; pi < s.params.size(); ++pi) {
         const ParamDef &p = s.params[pi];
         if (p.feedback || !p.in_presets) continue;
@@ -404,22 +526,47 @@ PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t 
             keys.emplace_back(0, v.front());
             continue;
         }
-        const bool stepped = p.type == PType::Bool || p.type == PType::Choice;
-        for (int64_t n = 0; n < out.frames; ++n) {
-            const json &x = v[size_t(n % out.pass)];
-            if (stepped && !keys.empty()) {
-                if (same_value(keys.back().second, x)) continue;
-                // The old value again just before the change: hosts that interpolate a
-                // checkbox / menu (Fusion) then still switch exactly at frame n.
-                if (keys.back().first < n - 1) keys.emplace_back(n - 1, keys.back().second);
+        if (p.type == PType::Bool || p.type == PType::Choice) {
+            for (int64_t n = first; n <= last; ++n) {
+                const json &x = v[size_t(n % P)];
+                if (!keys.empty()) {
+                    if (same_value(keys.back().second, x)) continue;
+                    // The old value again just before the change: hosts that interpolate a
+                    // checkbox / menu (Fusion) then still switch exactly at frame n.
+                    if (keys.back().first < n - 1) keys.emplace_back(n - 1, keys.back().second);
+                }
+                keys.emplace_back(n, x);
             }
-            keys.emplace_back(n, x);
+            continue;
         }
+        // Numbers: the frames of a pass where the curve bends, with their neighbours.
+        std::vector<std::vector<double>> c;
+        c.reserve(v.size());
+        for (const auto &x : v) c.push_back(components(p, x));
+        const size_t nc = c.front().size();
+        std::vector<double> tol(nc, 0.0);  // integers: exact
+        if (p.type != PType::Int) {
+            for (size_t k = 0; k < nc; ++k) {
+                double lo = c.front()[k], up_ = lo;
+                for (const auto &x : c) lo = std::min(lo, x[k]), up_ = std::max(up_, x[k]);
+                const double swing = up_ - lo;
+                tol[k] = std::max(1e-9, kKeyTolerance * std::min(swing, display_span(p)));
+                // CRT values snap to their step: a fine grid (many steps over the swing) is
+                // followed as a line, a coarse one exactly.
+                if (p.has_step && p.step > 0 && swing >= 20 * p.step) tol[k] = std::max(tol[k], 0.5 * p.step);
+            }
+        }
+        std::vector<char> want(size_t(P), 0);
+        for (int64_t b : bends(c, tol, p.type == PType::Int))
+            for (int64_t d = -1; d <= 1; ++d)
+                if (b + d >= 0 && b + d < P) want[size_t(b + d)] = 1;
+        for (int64_t n = first; n <= last; ++n)
+            if (want[size_t(n % P)] || n == last) keys.emplace_back(n, v[size_t(n % P)]);
     }
     return out;
 }
 
-PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t available) {
+PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t available, int64_t at) {
     PresetPlan plan;
     auto loop_values = [&](const json &fb) {
         for (size_t i = 0; i < s.params.size(); ++i)
@@ -430,7 +577,7 @@ PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t 
         return plan;
     }
     plan.replaces_look = true;
-    plan.look = preset_keys(s, preset, fps, available);
+    plan.look = preset_keys(s, preset, fps, available, at);
     if (!plan.look.animated()) {
         const json up = ntscrt::digital::migrate::upgraded(preset);
         for (size_t i = 0; i < s.params.size(); ++i)

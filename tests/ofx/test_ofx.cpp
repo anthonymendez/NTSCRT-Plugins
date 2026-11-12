@@ -122,6 +122,16 @@ struct Fixture {
     }
 };
 
+// A keyed mock param's first component at time t, as the mock host interpolates it.
+double keyed_at(const mock::Param &p, double t) {
+    auto hi = p.keys.lower_bound(t);
+    if (hi == p.keys.begin()) return hi->second[0];
+    if (hi == p.keys.end()) return std::prev(hi)->second[0];
+    if (hi->first == t) return hi->second[0];
+    auto lo = std::prev(hi);
+    return lo->second[0] + (hi->second[0] - lo->second[0]) * (t - lo->first) / (hi->first - lo->first);
+}
+
 const char *ofx_type(const std::string &t, const json &def) {
     if (t == "bool") return kOfxParamTypeBoolean;
     if (t == "int") return kOfxParamTypeInteger;
@@ -574,7 +584,7 @@ TEST_CASE("edits and seeks: look history, cache flushing, timings") {
 // start): edits must not make the next render re-run the whole hour.
 // NTSCRT_BENCH_UHD=1 renders 3840x2160 (the report's size) instead of 640x360.
 struct EditTimings {
-    double first, preset, crt, load;
+    double first, preset, crt, load, downscale, glitch;
 };
 static EditTimings edits_at_frame(double T) {
     Fixture f;
@@ -635,8 +645,9 @@ static EditTimings edits_at_frame(double T) {
     REQUIRE(clean > 0);
     pp->v[0] = clean;
     REQUIRE(f.changed("host_preset", T) == kOfxStatOK);
-    // The first render simulates the Glitch receiver from frame 0: the cost edits
-    // used to pay again (0.4.0: ~30 s here, ~45 s in Resolve at UHD).
+    // The first render simulates the Glitch receiver from its segment's start (frame 0
+    // until 0.5.0-rc.2: the cost edits used to pay again; 0.4.0: ~30 s here, ~45 s in
+    // Resolve at UHD).
     const double first_ms = render(T);
     report << " first render t=" << T << " " << first_ms << " ms";
     report << "; next frame " << render(T + 1) << " ms";
@@ -678,11 +689,13 @@ static EditTimings edits_at_frame(double T) {
     mock::Param *dsw = f.param("downscale_width");
     dsw->v[0] = 320;
     REQUIRE(f.changed("downscale_width", T) == kOfxStatOK);
-    report << "; Downscale edit + render " << render(T) << " ms";
+    const double downscale_ms = render(T);
+    report << "; Downscale edit + render " << downscale_ms << " ms";
     mock::Param *sig = f.param("glitch_signal_strength");
     sig->v[0] = 0.6;
     REQUIRE(f.changed("glitch_signal_strength", T) == kOfxStatOK);
-    report << "; Glitch edit + render " << render(T) << " ms";
+    const double glitch_ms = render(T);
+    report << "; Glitch edit + render " << glitch_ms << " ms";
 
     MESSAGE(report.str());
     std::printf("[timing] %s\n", report.str().c_str());
@@ -693,7 +706,7 @@ static EditTimings edits_at_frame(double T) {
     render(T);
     CHECK(out == after_preset);
     CHECK(purged(T) == after_preset);
-    return {first_ms, preset_ms, crt_ms, load_ms};
+    return {first_ms, preset_ms, crt_ms, load_ms, downscale_ms, glitch_ms};
 }
 
 TEST_CASE("high frame number: renders after edits stay bounded") {
@@ -701,13 +714,18 @@ TEST_CASE("high frame number: renders after edits stay bounded") {
     const double T = bench_frame ? std::atof(bench_frame) : 216067;
     const EditTimings hi = edits_at_frame(T);
     if (T < 100000) return;  // no hour to simulate: nothing to compare
-    // The same edits two seconds into the timeline: what they cost whatever the
-    // frame (CRT chain rebuilds, slow on some GPUs). An hour in they may cost that
-    // plus a fraction of the first render's extra time, not a re-run of the hour.
+    // The same edits two seconds into the timeline: what they cost whatever the frame (CRT
+    // chain rebuilds, slow on some GPUs). An hour in they may cost that plus a quarter of a
+    // second: the Glitch receiver's history restarts every minute (core/src/sim_segment.h), so
+    // nothing re-runs the hour (0.5.0-rc.2: ~2.5 s for the first render and every Glitch edit
+    // at 640x360, ~5 s at UHD in Resolve).
     // (The first switch to royale compiles its chain, ~1 s anywhere: not checked.)
     const EditTimings lo = edits_at_frame(101);
-    const double budget = 0.3 * (hi.first - lo.first);
+    const double budget = 250;
+    CHECK(hi.first < lo.first + budget);
     CHECK(hi.load < lo.load + budget);
+    CHECK(hi.glitch < lo.glitch + budget);
+    CHECK(hi.downscale < lo.downscale + budget);
 #ifndef __APPLE__
     // macOS CI (Metal, virtual GPU): a CRT cache flush followed by a render an
     // hour in takes ~3 s there (0.24 s at frame 101) while the Glitch receiver is
@@ -716,6 +734,169 @@ TEST_CASE("high frame number: renders after edits stay bounded") {
     CHECK(hi.preset < lo.preset + budget);
     CHECK(hi.crt < lo.crt + budget);
 #endif
+}
+
+// The report: an animated preset ("5 second blips", 300 frames a pass at 60 fps) chosen on an
+// effect an hour into a 60 fps timeline. 0.5.0-rc.2 keyed it from frame 0 (an hour before the
+// clip) with a key on every frame (97,200 keys), and the next render built a look for every
+// frame since frame 0 for the Glitch receiver (37.7 s in Resolve).
+//  - "adjustment clip": what Resolve reports for an Adjustment Clip: host times are timeline
+//    frames (216,000 = 01:00:00:00) and the source range a made-up 0..1999.
+//  - "clip at 216000": a clip whose range starts there (the times are inside it).
+namespace {
+struct AnimatedTimings {
+    double apply_ms = 0, first_ms = 0, play_ms = 0, glitch_ms = 0, seek_ms = 0;
+    size_t keys = 0;
+};
+AnimatedTimings animated_preset_an_hour_in(bool adjustment_clip, const char *preset_name) {
+    Fixture f;
+    f.create();
+    const bool uhd = std::getenv("NTSCRT_BENCH_UHD") != nullptr;
+    const int w = uhd ? 3840 : 640, h = uhd ? 2160 : 360;
+    const double fps = 60.0, T = 216079;
+    mock::Clip &src = *f.inst->clips[kOfxImageEffectSimpleSourceClipName];
+    mock::Clip &dst = *f.inst->clips[kOfxImageEffectOutputClipName];
+    src.width = dst.width = w;
+    src.height = dst.height = h;
+    src.any_frame.resize(size_t(w) * h * 4);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float *p = &src.any_frame[(size_t(y) * w + x) * 4];
+            p[0] = x / float(w - 1);
+            p[1] = y / float(h - 1);
+            p[2] = float((x / 16 + y / 16) % 2);
+            p[3] = 1.f;
+        }
+    dst.any_frame.assign(src.any_frame.size(), 0.f);
+    src.any_frame_last = dst.any_frame_last = 250000;
+    for (mock::Clip *c : {&src, &dst}) {
+        if (adjustment_clip) {
+            c->props.set(kOfxImageEffectPropFrameRange, {0.0, 1999.0});
+            c->props.set(kOfxImageEffectPropUnmappedFrameRange, {0.0, 0.0});
+        } else {
+            c->props.set(kOfxImageEffectPropFrameRange, {216000.0, 219599.0});
+            c->props.set(kOfxImageEffectPropUnmappedFrameRange, {216000.0, 219599.0});
+        }
+        c->props.set(kOfxImageEffectPropFrameRate, {fps});
+        c->props.set(kOfxImageEffectPropUnmappedFrameRate, {fps});
+    }
+    f.inst->props.set(kOfxImageEffectPropFrameRate, {fps});
+    f.inst->props.set(kOfxImageEffectInstancePropEffectDuration, {adjustment_clip ? 2000.0 : 3600.0});
+    std::vector<float> out;
+    f.host.on_release = [&](const mock::Image &im) {
+        if (im.props.s(kOfxImagePropUniqueIdentifier).rfind(kOfxImageEffectOutputClipName, 0) == 0) out = im.px;
+    };
+    auto ms_since = [](auto t0) {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+    auto render = [&](double t) {
+        mock::PropSet in;
+        in.set(kOfxPropTime, {t});
+        in.set(kOfxImageEffectPropFieldToRender, {std::string(kOfxImageFieldNone)});
+        in.set(kOfxImageEffectPropRenderWindow, {0, 0, w, h});
+        in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
+        in.set(kOfxImageEffectPropSequentialRenderStatus, {0});
+        in.set(kOfxImageEffectPropInteractiveRenderStatus, {1});
+        in.set(kOfxImageEffectPropRenderQualityDraft, {0});
+        auto t0 = std::chrono::steady_clock::now();
+        REQUIRE(f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in) == kOfxStatOK);
+        return ms_since(t0);
+    };
+    auto purged = [&](double t) {
+        OfxStatus st = f.host.action(f.plug, kOfxActionPurgeCaches, f.inst.get());
+        REQUIRE((st == kOfxStatOK || st == kOfxStatReplyDefault));
+        render(t);
+        return out;
+    };
+    auto keys = [&] {
+        size_t n = 0;
+        for (auto &p : f.inst->params.params) n += p->keys.size();
+        return n;
+    };
+    render(T);  // warm-up: shaders compile, the default look's receiver runs
+    render(T);
+
+    AnimatedTimings r;
+    mock::Param *pp = f.param("host_preset");
+    const int idx = f.choice_index(*pp, preset_name);
+    REQUIRE(idx > 0);
+    pp->v[0] = idx;
+    auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(f.changed("host_preset", T) == kOfxStatOK);
+    r.apply_ms = ms_since(t0);
+    r.keys = keys();
+    r.first_ms = render(T);
+    const std::vector<float> first = out;
+    double play = 0;
+    std::vector<std::vector<float>> played;
+    for (int i = 1; i <= 10; ++i) {
+        play += render(T + i);
+        played.push_back(out);
+    }
+    r.play_ms = play / 10;
+
+    // The keys cover the playhead and the clip after it; the animation moves there.
+    size_t moving = 0;
+    for (auto &p : f.inst->params.params) {
+        if (p->keys.size() < 2) continue;
+        ++moving;
+        CAPTURE(p->name);
+        CHECK(p->keys.begin()->first <= T);
+        CHECK(p->keys.rbegin()->first >= T + 1000);
+        if (!adjustment_clip) CHECK(p->keys.begin()->first >= 216000);  // nothing before the clip
+    }
+    CHECK(moving > 5);
+    bool varies = false;
+    for (auto &p : f.inst->params.params)
+        if (p->keys.size() > 1 && p->type == kOfxParamTypeDouble)
+            for (int k = 1; k < 300 && !varies; k += 7) varies = keyed_at(*p, T + k) != keyed_at(*p, T);
+    CHECK(varies);
+
+    // A Glitch edit (a value the preset doesn't key): the receiver re-runs, from its segment's start.
+    mock::Param *edit = nullptr;
+    for (auto &p : f.inst->params.params)
+        if (p->name.rfind("glitch_", 0) == 0 && p->type == kOfxParamTypeDouble && p->keys.empty()) {
+            edit = p.get();
+            break;
+        }
+    REQUIRE(edit);
+    edit->v[0] = edit->v[0] > 0.5 ? edit->v[0] - 0.25 : edit->v[0] + 0.25;
+    REQUIRE(f.changed(edit->name, T + 10) == kOfxStatOK);
+    r.glitch_ms = render(T + 10);
+    const std::vector<float> edited = out;
+    r.seek_ms = render(T - 30);  // back, before the playhead
+    // The same pixels after a purge (another render order, a fresh history).
+    CHECK(purged(T + 10) == edited);
+    // ... and played in order from a seek to the first frame, after a purge.
+    purged(T + 3);
+    for (int i = 4; i <= 10; ++i) render(T + i);
+    CHECK(out == edited);
+    (void)first;
+    (void)played;
+    return r;
+}
+}  // namespace
+
+TEST_CASE("high frame number: an animated preset an hour in is applied and rendered quickly") {
+    for (bool adjustment : {true, false}) {
+        CAPTURE(adjustment);
+        const AnimatedTimings r = animated_preset_an_hour_in(adjustment, "5 second blips");
+        std::ostringstream o;
+        o.setf(std::ios::fixed);
+        o.precision(1);
+        o << (adjustment ? "adjustment clip (range 0..1999, times 216079..)" : "clip at 216000")
+          << ": 5 second blips applied at 216079 in " << r.apply_ms << " ms, " << r.keys << " keyframes; first render "
+          << r.first_ms << " ms; playback " << r.play_ms << " ms/frame; Glitch edit + render " << r.glitch_ms
+          << " ms; seek back 40 " << r.seek_ms << " ms";
+        MESSAGE(o.str());
+        std::printf("[timing] %s\n", o.str().c_str());
+        // 0.5.0-rc.2: 97,200 keys (every frame of 3,600, an hour before the clip); the first
+        // render after it built 216,000 looks.
+        CHECK(r.keys < 15000);
+        CHECK(r.apply_ms < 1000);
+        CHECK(r.first_ms < 1000);
+        CHECK(r.glitch_ms < 1000);
+    }
 }
 
 // Animated presets become host keyframes; Horizontal resolution / Digital video
@@ -751,14 +932,16 @@ TEST_CASE("presets: timeline keyframes, menus with applies, save/load round trip
         const auto tl = ntscrt::timeline::parse(preset);
         const auto rules = ntscrt::timeline::Rules::from_schema(s);
         mock::Param *noise = f.param("ntsc_composite_preemphasis");
-        REQUIRE(noise->keys.size() == 51);
+        // sparse keys (where the curve bends, with a guard key either side), from the first frame to the last
+        CHECK(noise->keys.size() > 3);
+        CHECK(noise->keys.size() < 51);
         CHECK(noise->keys.begin()->first == 10.0);
         CHECK(noise->keys.rbegin()->first == 60.0);
-        for (int n : {0, 5, 17, 33, 49, 50, 50 + 17}) {
-            if (10 + n > 60) continue;
+        for (int n = 0; 10 + n <= 60; ++n) {
             CAPTURE(n);
             const json look = ntscrt::timeline::look_at_frame(preset, tl, rules, n, 25.0);
-            CHECK(noise->keys.at(10.0 + n)[0] ==
+            // Glitch pop's keys are all Linear: the host's linear interpolation is exact
+            CHECK(keyed_at(*noise, 10.0 + n) ==
                   doctest::Approx(look["ntsc"]["settings"]["composite_preemphasis"].get<double>()));
         }
         // a param the preset holds still: its value, no keys
@@ -853,6 +1036,116 @@ TEST_CASE("presets: timeline keyframes, menus with applies, save/load round trip
         fs::remove(tmp);
         fs::remove(side);
     }
+}
+
+// Sparse preset keys (0.5.0-rc.3) render like the per-frame keys 0.5.0-rc.2 wrote: every
+// moving number is replaced by a key on every frame holding the upstream timeline's value
+// (the reference), and the same frames are rendered again. Glitch included: its receiver
+// reads every earlier frame's settings.
+TEST_CASE("presets: sparse keyframes render like a key on every frame") {
+    const int w = 320, h = 180, last = 400;
+    const double fps = 30;
+    const json schema = json::parse(ntscrt_param_schema_json());
+    const auto rules = ntscrt::timeline::Rules::from_schema(schema);
+    double worst = 0;
+    for (const char *name : {"5 second blips", "V Hold glitch", "Glitch 1", "Tracking Noise up", "Two blips loop"}) {
+        CAPTURE(name);
+        Fixture f;
+        f.create();
+        mock::Clip &src = *f.inst->clips[kOfxImageEffectSimpleSourceClipName];
+        mock::Clip &dst = *f.inst->clips[kOfxImageEffectOutputClipName];
+        src.width = dst.width = w;
+        src.height = dst.height = h;
+        src.any_frame.resize(size_t(w) * h * 4);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                float *p = &src.any_frame[(size_t(y) * w + x) * 4];
+                p[0] = x / float(w - 1);
+                p[1] = y / float(h - 1);
+                p[2] = float((x / 16 + y / 16) % 2);
+                p[3] = 1.f;
+            }
+        dst.any_frame.assign(src.any_frame.size(), 0.f);
+        src.any_frame_last = dst.any_frame_last = last;
+        for (mock::Clip *c : {&src, &dst}) {
+            c->props.set(kOfxImageEffectPropFrameRange, {0.0, double(last)});
+            c->props.set(kOfxImageEffectPropFrameRate, {fps});
+        }
+        f.inst->props.set(kOfxImageEffectPropFrameRate, {fps});
+        std::vector<float> out;
+        f.host.on_release = [&](const mock::Image &im) {
+            if (im.props.s(kOfxImagePropUniqueIdentifier).rfind(kOfxImageEffectOutputClipName, 0) == 0) out = im.px;
+        };
+        auto render = [&](double t) {
+            mock::PropSet in;
+            in.set(kOfxPropTime, {t});
+            in.set(kOfxImageEffectPropFieldToRender, {std::string(kOfxImageFieldNone)});
+            in.set(kOfxImageEffectPropRenderWindow, {0, 0, w, h});
+            in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
+            in.set(kOfxImageEffectPropSequentialRenderStatus, {0});
+            in.set(kOfxImageEffectPropInteractiveRenderStatus, {0});
+            in.set(kOfxImageEffectPropRenderQualityDraft, {0});
+            REQUIRE(f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in) == kOfxStatOK);
+            return out;
+        };
+        mock::Param *pp = f.param("host_preset");
+        pp->v[0] = f.choice_index(*pp, name);
+        REQUIRE(pp->v[0] > 0);
+        REQUIRE(f.changed("host_preset", 0) == kOfxStatOK);
+        const std::vector<int> frames = {20, 45, 90, 151, 230};
+        std::vector<std::vector<float>> sparse;
+        for (int n : frames) sparse.push_back(render(n));
+
+        // The per-frame reference for every keyed number.
+        std::ifstream in(std::string(NTSCRT_SOURCE_DIR) + "/presets/" + name + ".json", std::ios::binary);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        const json preset = ntscrt::digital::migrate::upgraded(json::parse(ss.str()));
+        const auto tl = ntscrt::timeline::parse(preset);
+        std::vector<json> looks;
+        for (int n = 0; n <= last; ++n) looks.push_back(ntscrt::timeline::look_at_frame(preset, tl, rules, n, fps));
+        size_t replaced = 0, sparse_keys = 0;
+        std::string any;
+        for (const auto &sp : schema["params"]) {
+            const std::string type = sp["type"];
+            if (type != "float" && type != "int") continue;
+            mock::Param *p = f.param(host_name(sp["id"]));
+            if (p->keys.size() < 2) continue;
+            sparse_keys += p->keys.size();
+            const std::string path = sp["path"];
+            for (int n : frames) {
+                const double ref = looks[size_t(n)].at(json::json_pointer(path)).get<double>();
+                const double got = keyed_at(*p, n);
+                if (std::fabs(ref - got) > 1e-9) MESSAGE("DIAG " << std::string(name) << " " << p->name << " @" << n << " ref " << ref << " sparse " << got);
+            }
+            p->keys.clear();
+            for (int n = 0; n <= last; ++n) {
+                const json::json_pointer ptr(path);
+                REQUIRE(looks[size_t(n)].contains(ptr));
+                double v = looks[size_t(n)].at(ptr).get<double>();
+                p->keys[double(n)] = {v};
+            }
+            ++replaced;
+            any = p->name;
+        }
+        CHECK(replaced > 0);
+        REQUIRE(f.changed(any, 0) == kOfxStatOK);  // keys changed: as a param edit would say
+        REQUIRE((f.host.action(f.plug, kOfxActionPurgeCaches, f.inst.get()) != kOfxStatFailed));
+        for (size_t k = 0; k < frames.size(); ++k) {
+            CAPTURE(frames[k]);
+            const std::vector<float> ref = render(frames[k]);
+            REQUIRE(ref.size() == sparse[k].size());
+            double sum = 0;
+            for (size_t i = 0; i < ref.size(); i += 4)
+                for (int c = 0; c < 3; ++c) sum += std::fabs(double(ref[i + c]) - sparse[k][i + c]);
+            const double mean = sum / (ref.size() / 4 * 3) * 255;
+            worst = std::max(worst, mean);
+            MESSAGE(std::string(name) << " frame " << frames[k] << ": mean diff " << mean << " (of 255) with " << sparse_keys
+                         << " sparse keys on " << replaced << " numbers");
+            CHECK(mean < 1.0);
+        }
+    }
+    MESSAGE("worst mean diff, sparse vs per-frame keys: " << worst << " of 255");
 }
 
 // ---- host protocol (getFramesNeeded, isIdentity, fields, abort, clip prefs) --------
