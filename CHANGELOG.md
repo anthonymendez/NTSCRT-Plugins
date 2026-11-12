@@ -262,6 +262,12 @@ written but not yet built.
   per change across threads), `test_ofx` (button, status line, detailed renders, a change made outside the
   host) and the Resolve test `debugall`; the mock-host and headless Resolve tests keep the switch in their own
   folder (`NTSCRT_SETTINGS_DIR`) and ignore the shell's `NTSCRT_DEBUG_LOG`.
+- Upstream sync tooling: `docs/dev/port-map.json` maps every upstream file to its kind and our targets;
+  `scripts/upstream_diff.py` reports what an upstream range needs (hand-ports, tests, presets, vendor pins);
+  `scripts/sync_upstream.py --to <tag>` does the mechanical sync (submodule, byte-identical presets, schema,
+  FxPlug ids, version strings; `--dry-run`); CI job `sync-check` (`scripts/check_sync.py`) fails when the schema,
+  presets, golden refs or vendor pins disagree with the upstream pin or the port map misses a file; the weekly
+  `upstream-watch` workflow keeps one `upstream-sync` issue open while upstream has a newer release.
 
 ## [0.4.0] - 2026-11-10
 

@@ -1,0 +1,85 @@
+# Weekly: is there an upstream NTSCRT release newer than our pin (core/params/schema.json)?
+#
+# If upstream's newest vX.Y.Z tag is ahead of the pin, scripts/upstream_diff.py writes the sync
+# report (hand-ports, tests, presets, vendor pins, commits) into ONE open issue labelled
+# "upstream-sync", titled "Upstream NTSCRT vX.Y.Z is available": created the first time, its title
+# and body updated on later runs. When the pin has caught up, the open issue gets a comment and is
+# closed. Doing the sync: docs/dev/UPSTREAM-SYNC.md.
+#
+# Run it by hand from the Actions tab ("upstream-watch" -> Run workflow).
+name: upstream-watch
+
+on:
+  schedule:
+    - cron: "23 7 * * 1"   # Mondays 07:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # Full upstream history + tags (the report diffs the pin against the newest tag).
+      - name: Upstream submodule and tags
+        run: |
+          git submodule update --init upstream/NTSCRT
+          git -C upstream/NTSCRT fetch --quiet --tags origin
+          git -C upstream/NTSCRT tag --list 'v*' --sort=-v:refname | head -n 5
+
+      - name: Compare the pin with upstream's newest release
+        id: cmp
+        run: |
+          python3 scripts/upstream_diff.py --latest-tag --max-chars 60000 \
+            --out "$RUNNER_TEMP/report.md" --github-output "$GITHUB_OUTPUT"
+          {
+            echo "## upstream-watch"
+            cat "$RUNNER_TEMP/report.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open, update or close the upstream-sync issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AHEAD: ${{ steps.cmp.outputs.ahead }}
+          TAG: ${{ steps.cmp.outputs.tag }}
+          FROM_NAME: ${{ steps.cmp.outputs.from_name }}
+          FROM: ${{ steps.cmp.outputs.from }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          label=upstream-sync
+          gh label create "$label" --color 1d76db --force \
+            --description "Upstream NTSCRT has a release newer than the pin" >/dev/null
+          num="$(gh issue list --label "$label" --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ "$AHEAD" = true ]; then
+            title="Upstream NTSCRT $TAG is available"
+            body="$RUNNER_TEMP/body.md"
+            {
+              echo "Upstream [NTSCRT](https://github.com/finnmckenty/NTSCRT) **$TAG** is newer than our pin **$FROM_NAME** (\`${FROM:0:7}\`)."
+              echo "Sync it with \`python scripts/sync_upstream.py --to $TAG --fetch\`, then the hand-ports below"
+              echo "([docs/dev/UPSTREAM-SYNC.md]($REPO_URL/blob/main/docs/dev/UPSTREAM-SYNC.md)). Updated by [upstream-watch]($RUN_URL)."
+              echo
+              cat "$RUNNER_TEMP/report.md"
+            } > "$body"
+            if [ -n "$num" ]; then
+              gh issue edit "$num" --title "$title" --body-file "$body"
+              echo "updated issue #$num: $title"
+            else
+              gh issue create --title "$title" --label "$label" --body-file "$body"
+            fi
+          elif [ -n "$num" ]; then
+            gh issue comment "$num" --body "The pin ($FROM_NAME, \`${FROM:0:7}\`) has caught up with upstream's newest release ($TAG). Closing. ([upstream-watch]($RUN_URL))"
+            gh issue close "$num"
+            echo "closed issue #$num"
+          else
+            echo "in sync with upstream $TAG; no open $label issue"
+          fi

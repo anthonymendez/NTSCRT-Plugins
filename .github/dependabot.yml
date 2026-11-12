@@ -24,6 +24,12 @@ updates:
 
   # vendor/* and upstream/NTSCRT. A submodule bump changes rendering (upstream/NTSCRT also
   # needs the schema/preset sync in docs/), so review these by hand; monthly is plenty.
+  # Expected: CI's sync-check job (scripts/check_sync.py) FAILS on these PRs until the sync is
+  # done: an upstream/NTSCRT bump needs scripts/sync_upstream.py + the hand-ports + golden refs
+  # (docs/dev/UPSTREAM-SYNC.md); a vendor/slang-shaders, vendor/ntsc-rs or vendor/librashader bump
+  # must match upstream's Vendor pins, SLANG_COMMIT, golden.yml and CMakeLists.txt. Use the PR as
+  # the reminder, or close it and sync by hand. (Upstream releases are also watched weekly by
+  # .github/workflows/upstream-watch.yml.)
   - package-ecosystem: gitsubmodule
     directory: /
     schedule:
