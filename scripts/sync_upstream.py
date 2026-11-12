@@ -10,8 +10,8 @@ Steps: refuse a dirty tree (--allow-dirty to re-run after fixing something); mov
 submodule to --to; copy upstream presets/ byte for byte (adds and updates; upstream deletions are
 reported, not deleted); regenerate core/params/schema.json (tools/gen_schema.py: its refusal of a
 breaking change stops the sync with its exit code); add FxPlug ids (fxplug/tools/update_param_ids.py);
-update the version strings (README "Synced with upstream NTSCRT vX", docs/params.md, the pin line in
-docs/dev/UPSTREAM-SYNC.md). Then prints the hand-port list (scripts/upstream_diff.py) and the
+update the version strings (README "Synced with upstream NTSCRT vX", docs/params.md, the pin lines in
+docs/dev/UPSTREAM-SYNC.md and docs/dev/AGENTS.md, tests/golden/manifest.json upstream_commit). Then prints the hand-port list (scripts/upstream_diff.py) and the
 manual steps left. Never commits or pushes: review `git status` / `git diff` and commit yourself.
 Stdlib only, Python 3.9+.
 """
@@ -37,8 +37,19 @@ VERSION_SITES = [
     ("README.md", r"(Synced with upstream NTSCRT )(v[0-9][\w.\-]*)(\.)", "README status line"),
     ("docs/params.md", r"(synced with upstream\s+NTSCRT )(v[0-9][\w.\-]*)()", "docs/params.md look-format line"),
 ]
-PIN_SITE = ("docs/dev/UPSTREAM-SYNC.md", r"(Current pin: \*\*)(v[0-9][\w.\-]*|[0-9a-f]{7,40})(\*\* \(`)([0-9a-f]{7,40})(`\))",
-            "pin line in docs/dev/UPSTREAM-SYNC.md")
+# (file, regex with groups (prefix)(version)(middle)(short sha)(suffix), what it is): version and sha replaced.
+PIN_SITES = [
+    ("docs/dev/UPSTREAM-SYNC.md", r"(Current pin: \*\*)(v[0-9][\w.\-]*|[0-9a-f]{7,40})(\*\* \(`)([0-9a-f]{7,40})(`\))",
+     "pin line in docs/dev/UPSTREAM-SYNC.md"),
+    ("docs/dev/AGENTS.md", r"(submodule, upstream )(v[0-9][\w.\-]*|[0-9a-f]{7,40})(, commit )([0-9a-f]{7,40})(;)",
+     "pin line in docs/dev/AGENTS.md"),
+]
+# (file, regex with groups (prefix)(full sha)(suffix), what it is): the full sha replaced.
+SHA_SITES = [
+    # render_golden.py records the commit it builds; this is the manifest's own note of it
+    # (check_sync.py compares it with the pin).
+    ("tests/golden/manifest.json", r'("upstream_commit": ")([0-9a-f]{40})(")', "tests/golden/manifest.json upstream_commit"),
+]
 
 
 def say(msg=""):
@@ -136,18 +147,30 @@ def update_versions(version, sha, dry):
             text = text[:m.start(2)] + version + text[m.end(2):]
             with open(p, "w", encoding="utf-8", newline="") as f:
                 f.write(text)
-    rel, rx, what = PIN_SITE
-    p = ROOT / rel
-    text = p.read_bytes().decode("utf-8")
-    m = re.search(rx, text)
-    if not m:
-        say("  WARNING: %s: no match for the %s; update it by hand" % (rel, what))
-    elif m.group(2) != version or m.group(4) != sha[:7]:
-        changed.append("%s: %s (%s) -> %s (%s) (%s)" % (rel, m.group(2), m.group(4), version, sha[:7], what))
-        if not dry:
-            text = text[:m.start(2)] + version + m.group(3) + sha[:7] + text[m.end(4):]
-            with open(p, "w", encoding="utf-8", newline="") as f:
-                f.write(text)
+    for rel, rx, what in PIN_SITES:
+        p = ROOT / rel
+        text = p.read_bytes().decode("utf-8")
+        m = re.search(rx, text)
+        if not m:
+            say("  WARNING: %s: no match for the %s; update it by hand" % (rel, what))
+        elif m.group(2) != version or m.group(4) != sha[:7]:
+            changed.append("%s: %s (%s) -> %s (%s) (%s)" % (rel, m.group(2), m.group(4), version, sha[:7], what))
+            if not dry:
+                text = text[:m.start(2)] + version + m.group(3) + sha[:7] + text[m.end(4):]
+                with open(p, "w", encoding="utf-8", newline="") as f:
+                    f.write(text)
+    for rel, rx, what in SHA_SITES:
+        p = ROOT / rel
+        text = p.read_bytes().decode("utf-8")
+        m = re.search(rx, text)
+        if not m:
+            say("  WARNING: %s: no match for the %s; update it by hand" % (rel, what))
+        elif m.group(2) != sha:
+            changed.append("%s: %s -> %s (%s)" % (rel, m.group(2)[:7], sha[:7], what))
+            if not dry:
+                text = text[:m.start(2)] + sha + text[m.end(2):]
+                with open(p, "w", encoding="utf-8", newline="") as f:
+                    f.write(text)
     return changed
 
 

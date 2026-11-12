@@ -58,8 +58,8 @@ port map's `retained_presets`); regenerates `core/params/schema.json` with `tool
 vendor/slang-shaders` (when the generator refuses a breaking change, the sync stops with its exit code: see
 section 4, fix it, then re-run with `--allow-dirty`; `--allow-breaking` is passed through, for use only before a
 first release); runs `fxplug/tools/update_param_ids.py` (new FxPlug ids, append-only); and updates the version
-strings (the README "Synced with upstream NTSCRT vX" line, the `docs/params.md` look-format line and the pin line
-at the top of this page). Then it prints the hand-port list and the manual steps left. It never commits or pushes.
+strings (the README "Synced with upstream NTSCRT vX" line, the `docs/params.md` look-format line, the pin lines
+at the top of this page and in `docs/dev/AGENTS.md`, and `tests/golden/manifest.json`'s `upstream_commit`). Then it prints the hand-port list and the manual steps left. It never commits or pushes.
 
 If upstream moved its `Vendor/slang-shaders` or `Vendor/ntsc-rs` pin, the report says so: bump ours to match
 (`vendor/slang-shaders` also needs `SLANG_COMMIT` in `tools/gen_schema.py` and the comment in
@@ -140,8 +140,8 @@ descriptors come from the committed `core/params/ntsc_descriptors.json`, so no R
 - **b.** a file in `presets/` differs from upstream's blob at the pin (raw bytes, so a flipped byte or a changed
   line ending counts; `.gitattributes` marks `presets/** -text`), upstream has a preset we lack, or we have one it
   doesn't (unless listed in `retained_presets`);
-- **c.** `schema.json`'s `upstream_ntscrt` or a `tests/golden/ref/*.json` `upstream_commit` isn't the submodule
-  commit, or the submodule checkout isn't the recorded gitlink;
+- **c.** `schema.json`'s `upstream_ntscrt`, `tests/golden/manifest.json`'s or a `tests/golden/ref/*.json` `upstream_commit`
+  isn't the submodule commit (the golden workflow records the commit it built), or the submodule checkout isn't the recorded gitlink;
 - **d.** the slang-shaders commit differs between the `vendor/slang-shaders` gitlink, `SLANG_COMMIT` in
   gen_schema.py, `schema.json`, `core/stages/crt/CMakeLists.txt` and upstream's `Vendor/slang-shaders`; or
   `vendor/ntsc-rs` differs from upstream's `Vendor/ntsc-rs`;

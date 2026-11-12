@@ -1,7 +1,7 @@
 {
   "version": 1,
   "note": "Golden references: each entry is rendered by UPSTREAM NTSCRT's crt-smoke (golden workflow, macOS) into ref/<id>.png + ref/<id>.json, and by ntscrt_core in test_golden. Inputs live in upstream/NTSCRT/TestAssets. Output size = input size. Editing this file re-runs the golden workflow; commit the artifact's files under tests/golden/ref/. Only setups where crt-smoke renders what the app renders are comparable: the chain input's height must divide the output height (else the app supersamples, ScanlineGrid, and crt-smoke doesn't), and ntsc must be a full preset (\"default\" = pure ntsc-rs defaults in crt-smoke but the app's house defaults in ntscrt_core). crt-smoke --frame N = ntscrt frame_index N - 1. See docs/TESTING.md. Nearest downscales use an odd ratio (320 -> 107): at an exact even ratio every sample point falls on a texel edge and D3D11 and Metal pick different neighbours (a one-pixel phase difference).",
-  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "upstream_commit": "8b260925bc05427ce94baaade647d9c7f4b0fc4e",
   "librashader_commit": "76462c03",
   "default_threshold": 2.0,
   "entries": [

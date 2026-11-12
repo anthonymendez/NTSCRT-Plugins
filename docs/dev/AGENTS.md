@@ -1,6 +1,6 @@
 # Working rules for parallel agents
 
-- Upstream source to port lives read-only in `upstream/NTSCRT` (submodule, upstream v0.20.0, commit c6ab639; see
+- Upstream source to port lives read-only in `upstream/NTSCRT` (submodule, upstream v0.21.0, commit 8b26092; see
   [UPSTREAM-SYNC.md](UPSTREAM-SYNC.md) for moving it). Read it; never edit it.
   Its own submodules (`Vendor/ntsc-rs`, `Vendor/slang-shaders`) are not checked out; `Vendor/ntscrs-capi` is.
 - Contracts: `core/include/ntscrt/ntscrt.h`, `core/stages/stages.h`, `core/gpu/gpu.h`, `core/src/internal.h`,
