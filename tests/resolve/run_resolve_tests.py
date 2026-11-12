@@ -1184,8 +1184,9 @@ class Suite:
 
     def t_gpupath(self):
         """Frames for the GPU-path A/B (--gpu-ab runs this test once with NTSCRT_OFX_GPU=0 and once
-        with the GPU path, then compares): Fusion comps at 1920x1080 (the default look: ntsc-rs, so the
-        picture comes down once; NTSC off: all on the GPU; Clean CRT; 8-bit and half-float sources;
+        with the GPU path, then compares): Fusion comps at 1920x1080 (the default look: NTSC on the GPU
+        by default, so all on the GPU; with NTSCRT_NTSC_GPU=0 ntsc-rs, the picture comes down once; NTSC
+        off: all on the GPU; Clean CRT; 8-bit and half-float sources;
         a title over transparency in Clip and Spill mode) and the effect on an Edit-page clip, each
         delivered as 16-bit PNGs, and the sources without the effect (gpupath-src-*: the A/B checks
         Resolve gave both sessions the same pictures). Every Fusion tool works in float: with CPU images
@@ -1245,6 +1246,9 @@ class Suite:
                     "frames for --gpu-ab")
 
     BENCH_LOOKS = (("default", None, ""), ("clean-crt", "Clean CRT", ""), ("ntsc-off", "(defaults)", "ntsc_enabled=0"))
+    # More looks --bench-looks can name: bundled presets with NTSC on.
+    BENCH_EXTRA_LOOKS = {"mild-vhs": ("Mild VHS", ""), "tracking-noise": ("Tracking Noise up", ""),
+                         "high-chroma": ("High Chroma static", "")}
     BENCH_SIZES = {"uhd": (3840, 2160), "1080p": (1920, 1080)}
 
     def t_bench(self):
@@ -1283,7 +1287,13 @@ class Suite:
             codec = next((c for d, c in codecs.items() if "NVIDIA" in d and "264" in d), None) or \
                 next((c for d, c in codecs.items() if "264" in d), None)
             fmt = ("mp4", codec) if codec else ("png", "RGB8")
-            variants = [("base", None, "")] + list(self.BENCH_LOOKS)
+            wanted = [x for x in self.a.bench_looks.split(",") if x]
+            known = {lab: (lab, lk, o) for lab, lk, o in self.BENCH_LOOKS}
+            known.update({lab: (lab, lk, o) for lab, (lk, o) in self.BENCH_EXTRA_LOOKS.items()})
+            unknown = [x for x in wanted if x not in known]
+            if unknown:
+                return self.record("bench", "fail", notes=f"unknown --bench-looks {unknown}: {sorted(known)}")
+            variants = [("base", None, "")] + [known[x] for x in wanted]
             for label, look, opts in variants:
                 for rep in range(self.a.bench_repeat):
                     retry(lambda: self.r.OpenPage("edit"), "open the Edit page")
@@ -1324,22 +1334,28 @@ class Suite:
                     p.DeleteRenderJob(job)
                     time.sleep(0.5)
                     text = self.log_since_rotated(log, mark)
-                    ms, paths, phases = [], {}, {}
+                    ms, paths, phases, ntsc = [], {}, {}, {}
                     for m in re.finditer(r" render #\d+ t=\S+ .*? ms=([\d.]+)(?: (\S+))?([^\r\n]*)", text):
                         ms.append(float(m.group(1)))
                         path = m.group(2) if m.group(2) and not m.group(2).startswith("look=") else "path=?"
                         paths[path] = paths.get(path, 0) + 1
                         for k, v in re.findall(r" (in|digital|ntsc|upload|downscale|glitch|crt|loop|readback|out)=([\d.]+)", m.group(3)):
                             phases.setdefault(k, []).append(float(v))
+                        r = re.search(r" ntsc_route=(gpu|cpu)", m.group(3))
+                        if r:
+                            ntsc[r.group(1)] = ntsc.get(r.group(1), 0) + 1
                     ms.sort()
                     q = lambda f: round(ms[min(len(ms) - 1, int(f * len(ms)))], 2) if ms else None  # noqa: E731
                     row = {"bench": self.a.bench_label, "size": f"{w}x{h}", "fps": self.a.bench_fps, "look": label,
                            "repeat": rep, "frames": n, "job": st.get("JobStatus"), "codec": "/".join(fmt),
                            "wall_s": round(wall, 2), "renders": len(ms), "ms_median": q(0.5), "ms_p95": q(0.95),
                            "paths": {k.replace("path=", ""): v for k, v in paths.items()},
+                           "ntsc_routes": ntsc,
+                           "ntsc_route_lines": sorted(set(re.findall(r" NTSC route: ([^\r\n]*)", text))),
                            "phase_mean_ms": {k: round(sum(v) / len(v), 2) for k, v in phases.items()},
                            "profile": bool(os.environ.get("NTSCRT_PROFILE")),
-                           "gpu_env": os.environ.get("NTSCRT_OFX_GPU", "")}
+                           "gpu_env": os.environ.get("NTSCRT_OFX_GPU", ""),
+                           "ntsc_gpu_env": os.environ.get("NTSCRT_NTSC_GPU", "")}
                     print("BENCH " + json.dumps(row), flush=True)
                     results.append(row)
         (self.out / "bench.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
@@ -1649,6 +1665,8 @@ def main():
     ap.add_argument("--bench-sizes", default="uhd,1080p", help="bench: comma-separated uhd, 1080p")
     ap.add_argument("--bench-fps", type=int, default=60, help="bench: project frame rate")
     ap.add_argument("--bench-repeat", type=int, default=1, help="bench: render jobs per look and size")
+    ap.add_argument("--bench-looks", default="default,clean-crt,ntsc-off",
+                    help="bench: comma-separated looks: default, clean-crt, ntsc-off, mild-vhs, tracking-noise, high-chroma")
     ap.add_argument("--bench-label", default="", help="bench: label copied into each JSON line (e.g. the build)")
     ap.add_argument("--gpu-ab", action="store_true",
                     help="with --headless: render the gpupath frames with NTSCRT_OFX_GPU=0 (CPU path) and with the GPU "
@@ -1771,7 +1789,9 @@ def gpu_ab(a):
                                        "gpu-download": count(gpu_log, r" path=gpu-download"),
                                        "gpu-cpuconvert": count(gpu_log, r" path=gpu-cpuconvert"),
                                        "cpu": count(gpu_log, r" path=cpu"), "fallback": count(gpu_log, r"cpu-fallback")},
-               "cpu_session_renders": {"cpu": count(cpu_log, r" path=cpu"), "gpu": count(cpu_log, r" path=gpu-")}}
+               "cpu_session_renders": {"cpu": count(cpu_log, r" path=cpu"), "gpu": count(cpu_log, r" path=gpu-")},
+               "ntsc_routes": {s: {"gpu": count(t, r" ntsc_route=gpu"), "cpu": count(t, r" ntsc_route=cpu")}
+                               for s, t in ((first, cpu_log), (second, gpu_log))}}
     # Informational: the sources themselves (they should match: Resolve rendered the same pictures), and
     # the int8 / float16 Fusion cases, where the GPU session's plug-in gets float images (Fusion converts
     # for GPU plug-ins) and so writes a half-float result where the CPU session's writes 8 / 16 bits.
