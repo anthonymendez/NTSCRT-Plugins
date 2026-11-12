@@ -17,12 +17,12 @@
     "240",
     "area",
     "--ntsc",
-    "../../../../../../../var/folders/2s/vty41l455yv698g4xkgfv7z00000gn/T/golden-ntsc-g7uzohus/flatgray-mediumvhs-crt-royale-down320area-f30.ntsc.json",
+    "../../../../../../../var/folders/2s/vty41l455yv698g4xkgfv7z00000gn/T/golden-ntsc-_bnlzeeh/flatgray-mediumvhs-crt-royale-down320area-f30.ntsc.json",
     "--ntsc-dylib",
     "Vendor/ntscrs-capi/ntscrs_capi.dylib",
     "--frame",
     "30"
   ],
-  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "upstream_commit": "8b260925bc05427ce94baaade647d9c7f4b0fc4e",
   "width": 640
 }

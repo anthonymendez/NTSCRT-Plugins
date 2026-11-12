@@ -20,7 +20,7 @@
     "240",
     "area",
     "--ntsc",
-    "../../../../../../../var/folders/2s/vty41l455yv698g4xkgfv7z00000gn/T/golden-ntsc-g7uzohus/testpattern-cleanvhs-crtglow_gauss-down320area.ntsc.json",
+    "../../../../../../../var/folders/2s/vty41l455yv698g4xkgfv7z00000gn/T/golden-ntsc-_bnlzeeh/testpattern-cleanvhs-crtglow_gauss-down320area.ntsc.json",
     "--ntsc-dylib",
     "Vendor/ntscrs-capi/ntscrs_capi.dylib",
     "--frame",
@@ -32,6 +32,6 @@
     "--set",
     "BLOOM_STRENGTH=0.1"
   ],
-  "upstream_commit": "c6ab639ef0a7b0a108b0f425c5685e04b7f544b8",
+  "upstream_commit": "8b260925bc05427ce94baaade647d9c7f4b0fc4e",
   "width": 640
 }
