@@ -342,6 +342,44 @@ def plugin_log_paths():
     return paths
 
 
+DEBUG_SWITCH_FILE = "debug-logging-all-effects.txt"  # hostparams/ntscrt_host/debug_switch.h
+
+
+def debug_switch_paths():
+    """(label, path) of every "Debug logging for all effects" switch file the plug-ins may read."""
+    if WIN:
+        base = Path(os.environ.get("LOCALAPPDATA", HOME / "AppData" / "Local")) / "NTSCRT"
+    else:
+        base = HOME / "Library" / "Logs" / "NTSCRT"
+    out = [("Resolve (OpenFX)", base / DEBUG_SWITCH_FILE)]
+    if os.environ.get("NTSCRT_SETTINGS_DIR"):
+        out.insert(0, ("NTSCRT_SETTINGS_DIR", Path(os.environ["NTSCRT_SETTINGS_DIR"]) / DEBUG_SWITCH_FILE))
+    if MAC:  # Final Cut's renderer keeps its own, in its sandbox container next to its log
+        try:
+            for d in sorted((HOME / "Library" / "Containers").glob("*NTSCRT*/Data/Library/Logs/NTSCRT")):
+                out.append((f"Final Cut (FxPlug, {d.parts[d.parts.index('Containers') + 1]})", d / DEBUG_SWITCH_FILE))
+        except OSError:
+            pass
+    return out
+
+
+def debug_switch(r):
+    """Report whether "Debug logging for all effects" (or NTSCRT_DEBUG_LOG) is on."""
+    lines = []
+    for label, p in debug_switch_paths():
+        try:
+            on = p.is_file()
+        except OSError:
+            on = False
+        lines.append(f"{label}: {'ON' if on else 'off'} ({p})")
+        if on:
+            r.note("info", f"debug logging for all NTSCRT effects is ON in {label}: every frame is logged in detail "
+                           f"(turn it off with the effect's button, or delete {p.name})")
+    env = os.environ.get("NTSCRT_DEBUG_LOG", "")
+    lines.append(f"NTSCRT_DEBUG_LOG in this shell: {env or '(unset)'}")
+    r.section("Debug logging for all effects", "\n".join(lines))
+
+
 def log_name(p):
     """Name in the zip: plugin-<folder>-<file>, plus the container for Final Cut logs."""
     parts = Path(p).parts
@@ -485,7 +523,8 @@ def main():
     r = Report(work)
     print(f"NTSCRT doctor ({platform.system()} {platform.release()})\n", flush=True)
     install = {}
-    for step in (system_info, app_versions, lambda rr: install.update(install_state(rr) or {}), collect_logs):
+    for step in (system_info, app_versions, lambda rr: install.update(install_state(rr) or {}), debug_switch,
+                 collect_logs):
         try:
             step(r)
         except Exception:

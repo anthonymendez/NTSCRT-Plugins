@@ -56,6 +56,7 @@ timeline's resolution from a script crashed Resolve 21.1.2, so other sizes are m
 | sizes | 1279×719, 1080×1920, 321×241 sources inside Fusion | renders, not black, lines up with the bypassed source |
 | speed | 1920×1080, every CRT preset | informational: ms per frame NTSCRT adds |
 | debug | *Debug logging* on for a few frames, then off; *Open logs folder* pressed (`SetInput`) | one detailed log line (timings, look) per frame, none after turning it off, the picture unchanged; the button press is logged and, headless, opens no window; Resolve still answers |
+| debugall | the effect's *Debug logging* off; *Turn on debug logging for all effects* pressed (`SetInput("host_debug_all", 1)`), a few frames rendered, pressed again, more frames | the switch file appears and goes, the status line follows; one detailed line marked `debug_by=all` per frame while on, none once off. Headless runs keep the switch in `--out` (`NTSCRT_SETTINGS_DIR`); otherwise the user's switch is put back as it was found |
 
 ## When something fails
 Open the diff image named in the report (differences ×8). For render errors, read the
