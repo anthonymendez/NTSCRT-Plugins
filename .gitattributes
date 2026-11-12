@@ -16,3 +16,6 @@
 *.zip binary
 *.dll binary
 *.dylib binary
+
+# Upstream presets are copied byte for byte (scripts/sync_upstream.py, checked by scripts/check_sync.py).
+presets/** -text
