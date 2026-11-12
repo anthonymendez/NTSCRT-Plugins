@@ -26,6 +26,10 @@ void set_source_budget(ntscrt_instance *inst, size_t bytes);
 // `recreate_fails`, making a new device fails too.
 void simulate_device_lost(ntscrt_instance *inst, bool recreate_fails = false);
 
+// The next `n` frames' GPU NTSC passes fail (an error that isn't a lost device):
+// those frames take ntsc-rs, and after 3 in a row the instance stays on it.
+void simulate_ntsc_gpu_errors(ntscrt_instance *inst, int n);
+
 // Where the last render call's time went, in ms of the calling thread's wall
 // time (benchmark: tests/core/bench_transfer.cpp). GPU work runs
 // asynchronously: gpu_stages is the time to submit it, the wait for it shows

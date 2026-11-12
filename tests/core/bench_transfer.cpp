@@ -19,8 +19,9 @@
 // (ntsc_off, Transparency: Let effect spill) and "crop" (ntsc_off, 4:3 crop).
 // "ntsc_gpu_passes" = the default look with the NTSC stages phase 1 of the GPU
 // port lacked turned off (docs/dev/NTSC-GPU.md); "preset:<name>" = the bundled
-// preset presets/<name>.json (e.g. "preset:Mild VHS"; not the Screen Loop ones).
-// Run with and without NTSCRT_NTSC_GPU=1 to compare ntsc-rs with the GPU port
+// preset presets/<name>.json (e.g. "preset:Mild VHS"); "screenloop:<name>" = the default look with the
+// Screen Loop preset presets/Screen Loop/<name>.json (e.g. "screenloop:7 copies slow luma").
+// Run with NTSCRT_NTSC_GPU=0 and without it to compare ntsc-rs with the GPU port
 // (the "ntsc" column is the NTSC stage's share of cpu_stg; "gpu%" the frames
 // that took the GPU route).
 // Frames are rendered back to back (fps only sets the frame rate the look's
@@ -233,6 +234,15 @@ int main(int argc, char **argv) {
                 "luma_noise": false, "chroma_noise": false, "chroma_delay_horizontal": 0,
                 "chroma_delay_vertical": 0, "vhs_edge_wave_enabled": false})");
             for (auto it = off.begin(); it != off.end(); ++it) b.look["ntsc"]["settings"][it.key()] = it.value();
+        } else if (n.rfind("screenloop:", 0) == 0) {
+            // The default look with the bundled Screen Loop preset presets/Screen Loop/<name>.json
+            b = look_from(nullptr);
+            const std::string file = n.substr(11);
+            b.feedback = json::parse(read_file(resources + "/presets/Screen Loop/" + file + ".json"), nullptr, false);
+            if (b.feedback.is_discarded()) {
+                std::fprintf(stderr, "cannot read %s/presets/Screen Loop/%s.json\n", resources.c_str(), file.c_str());
+                return 2;
+            }
         } else if (n == "clean_crt" || n.rfind("preset:", 0) == 0) {
             const std::string file = n == "clean_crt" ? std::string("Clean CRT") : n.substr(7);
             const std::string text = read_file(resources + "/presets/" + file + ".json");

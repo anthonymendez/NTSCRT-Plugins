@@ -42,9 +42,13 @@ endif()
 # ---- librashader (dynamic library, loaded at runtime; never linked, so its
 # Rust std never meets ntsc-rs's static one) ----
 set(lib_out ${res}/${lib_name})
+# Each command that writes ${lib_out} makes its directory first: nothing else orders it before
+# them (macOS CI: `lipo -create ... -output` ran before resources/ existed, intermittently).
+get_filename_component(lib_out_dir ${lib_out} DIRECTORY)
 set(NTSCRT_LIBRASHADER_BUILT ${lib_out} CACHE INTERNAL "librashader library assembled into the build resources dir")
 if(NTSCRT_LIBRASHADER_PREBUILT)
   add_custom_command(OUTPUT ${lib_out}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${lib_out_dir}
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NTSCRT_LIBRASHADER_PREBUILT} ${lib_out}
     DEPENDS ${NTSCRT_LIBRASHADER_PREBUILT}
     COMMENT "librashader (prebuilt) -> ${lib_out}")
@@ -86,6 +90,7 @@ else()
       list(APPEND slices ${cargo_dir}/${triple}/release/liblibrashader_capi.dylib)
     endforeach()
     add_custom_command(OUTPUT ${lib_out}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${lib_out_dir}
       ${cmds}
       COMMAND lipo -create ${slices} -output ${lib_out}
       COMMAND install_name_tool -id @rpath/librashader.dylib ${lib_out}
@@ -103,6 +108,7 @@ else()
       set(built ${cargo_dir}/release/liblibrashader_capi.so)
     endif()
     add_custom_command(OUTPUT ${lib_out}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${lib_out_dir}
       COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${cargo_dir} ${rustflags} ${NTSCRT_CARGO} ${cargo_args}
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${built} ${lib_out}
       WORKING_DIRECTORY ${NTSCRT_LIBRASHADER_DIR}

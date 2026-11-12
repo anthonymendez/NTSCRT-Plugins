@@ -1,7 +1,8 @@
 // Screen Loop through the C ABI on the GPU: whatever order the host asks for
 // frames in (cold seeks, scrubbing back and forth, playing on after a seek),
 // every frame is byte-identical to playing from frame 0 in order; the frame
-// after a seek continues instead of re-running; checkpoints change nothing.
+// after a seek continues instead of re-running; checkpoints change nothing;
+// NTSC on the GPU (the default on D3D11 hardware) renders what ntsc-rs renders.
 #include <doctest/doctest.h>
 
 #include <ntscrt/ntscrt.h>
@@ -87,6 +88,7 @@ struct Inst {
     ntscrt_instance *p = nullptr;
     Source src;
     std::string look, fb;
+    std::string timings;  // of the last render
     bool ok = false;
     Inst(std::string look_, std::string fb_) : look(std::move(look_)), fb(std::move(fb_)) {
         const std::string res = NTSCRT_BUILT_RESOURCES_DIR;
@@ -115,6 +117,7 @@ struct Inst {
         src.fetches = 0;
         const ntscrt_status st = ntscrt_render_cpu(p, &ra, &s, &d);
         CHECK_MESSAGE(st == NTSCRT_OK, ntscrt_last_error(p));
+        timings = ntscrt_last_timings(p);
         return out;
     }
 };
@@ -196,3 +199,49 @@ TEST_CASE("Screen Loop with a temporal CRT preset: no checkpoints, so none chang
     }
 }
 #endif
+
+TEST_CASE("Screen Loop: NTSC on the GPU renders what ntsc-rs renders, every bundled preset") {
+    // The default look (NTSC on); every Screen Loop preset; play, then cold seeks
+    // (history passes) on fresh instances. NTSCRT_NTSC_GPU=0 is the reference.
+    const char *presets[] = {"7 copies slow luma", "12 copies luma key", "15 copies color drift",
+                             "22 copies bottom left", "Bottom to top"};
+    const int64_t frames = 24;
+    const int64_t seeks[] = {23, 17, 9};
+    for (const char *preset : presets) {
+        CAPTURE(preset);
+        const std::string fb = feedback(preset, 8);
+        std::vector<std::vector<uint8_t>> ref;
+        std::vector<std::vector<uint8_t>> ref_seek;
+        set_env("NTSCRT_NTSC_GPU", "0");
+        {
+            Inst a("{}", fb);
+            if (!a.ok) {
+                set_env("NTSCRT_NTSC_GPU", nullptr);
+                return;
+            }
+            for (int64_t f = 0; f < frames; ++f) ref.push_back(a.render(f));
+            CHECK(a.timings.find("ntsc_route=cpu (NTSCRT_NTSC_GPU=0)") != std::string::npos);
+        }
+        set_env("NTSCRT_NTSC_GPU", nullptr);
+        bool gpu = false;
+        {
+            Inst b("{}", fb);
+            for (int64_t f = 0; f < frames; ++f) {
+                CAPTURE(f);
+                CHECK(b.render(f) == ref[size_t(f)]);
+                gpu = gpu || b.timings.find("ntsc_route=gpu") != std::string::npos;
+            }
+            MESSAGE((std::string(preset) + ": " + b.timings));
+        }
+        for (int64_t f : seeks) {
+            CAPTURE(f);
+            Inst c("{}", fb);
+            CHECK(c.render(f) == ref[size_t(f)]);  // history passes re-rendered
+            if (gpu) {
+                CHECK(c.timings.find("ntsc_loop=gpu:") != std::string::npos);
+                CHECK(c.timings.find(",cpu:0") != std::string::npos);
+            }
+            CHECK(c.render(f - 1) == ref[size_t(f - 1)]);
+        }
+    }
+}

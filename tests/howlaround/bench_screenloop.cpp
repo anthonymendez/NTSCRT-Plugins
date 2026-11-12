@@ -1,5 +1,5 @@
 // bench_screenloop — Screen Loop playback and seek timings over the C ABI.
-// Not a ctest test: run by hand.
+// Not a ctest test: run by hand. NTSCRT_NTSC_GPU=0 for the ntsc-rs route, unset for the default.
 //
 //   bench_screenloop [--w 1920] [--h 1080] [--preset "7 copies slow luma"] [--look JSON]
 //                    [--play 30] [--seek 600,1000] [--scrub] [--fps 30]
@@ -147,6 +147,9 @@ int main(int argc, char **argv) {
             fetches += src.fetches;
             if (t > worst) worst = t;
         }
+        const std::string tm = ntscrt_last_timings(inst);
+        const size_t r = tm.find(" ntsc_route=");
+        std::printf("ntsc route: %s\n", r == std::string::npos ? "-" : tm.substr(r + 12, tm.find(')', r) - r - 11).c_str());
         std::printf("play: frame 0 (run-up) %.0f ms; frames 1..%d %.1f ms/frame (worst %.0f), %.1f fetches/frame\n",
                     first, play - 1, play > 1 ? total / (play - 1) : 0.0, worst,
                     play > 1 ? double(fetches) / (play - 1) : 0.0);

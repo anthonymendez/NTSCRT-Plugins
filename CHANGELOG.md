@@ -79,6 +79,13 @@ written but not yet built.
 - The experimental GPU NTSC signal (`NTSCRT_NTSC_GPU=1`) now covers every ntsc-rs setting: noise, snow, head
   switching, tracking noise, chroma delay and edge wave too, still bit for bit the same pictures. All bundled
   presets and the default look run entirely on the GPU (Screen Loop, a Mac or a software GPU still use ntsc-rs).
+- **The NTSC signal now runs on the GPU by default** (Windows, Direct3D 11 GPU), with the same pictures as
+  ntsc-rs bit for bit, inside Screen Loop too. In Resolve on an RTX 5090 a 300-frame UHD render of the default
+  look takes 2.8 s instead of 17.9 s (the effect's own time per frame 3 ms instead of 50; a job without the
+  effect takes 2.4 s), *Mild VHS* 2.9 s instead of 13.4 s; with NVIDIA GPU frames nothing goes through the CPU any
+  more with NTSC on. Macs, Windows' software renderer and a GPU that fails the plug-in's exactness check keep
+  ntsc-rs; `NTSCRT_NTSC_GPU=0` brings ntsc-rs back anywhere (docs/ENVIRONMENT.md). The plug-in's log says once
+  per effect which one it uses and why (`NTSC route: ...`).
 
 ### Changed
 - **Glitch** and **Digital video** (with Datamosh) past the first minute of an effect look slightly different
@@ -248,6 +255,13 @@ written but not yet built.
   settings.
 
 ### Developer
+- GPU NTSC, phase 4 (docs/dev/NTSC-GPU.md): the default rule (`NTSCRT_NTSC_GPU` unset / `auto` / `1` / `0` /
+  `force`), Screen Loop's frame and history passes on the camera texture, `gpu-direct` host GPU frames with NTSC
+  on, a per-frame fallback to ntsc-rs on GPU errors (three in a row: ntsc-rs for the instance), a one-entry cache
+  of the plan and tables (the same frame again), ` ntsc_route=` / ` ntsc_cached=` / ` ntsc_loop=` /
+  ` ntsc_gpu_ms=` in the timings. `bench_transfer --looks screenloop:<preset>`, `run_resolve_tests.py
+  --bench-looks` (NTSC presets too) with NTSC route counts. CMake makes `resources/` before writing librashader
+  into it (an intermittent `lipo: can't create temporary output file` on macOS CI).
 - `make_previews_resolve.py` / `make_presets_gallery.py` render an animated preset's frames once and throw them
   away before the real capture: Resolve takes the keyframes the plug-in writes in pieces during the first
   render, so frames rendered before the last piece kept a half-keyed look (V Hold glitch differed from

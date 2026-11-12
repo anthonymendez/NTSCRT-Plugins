@@ -209,14 +209,18 @@ Building from source instead: see [Build from source](#build-from-source) below,
   values above 1.0 (HDR, super-whites) are clipped. On 16-bit / float timelines only the CRT shader's output is
   half-float; with the CRT shader off, or without a GPU, the output is 8-bit, so heavy grading on top can show
   banding.
-- **GPU frames on NVIDIA only:** with an NVIDIA GPU on Windows, Resolve's frames stay on the GPU (no copy
-  through the CPU, unless ntsc-rs / Digital video / Screen Loop need the picture); with AMD or Intel GPUs
-  (Resolve's OpenCL mode) and on macOS, Resolve hands the effect CPU frames as before (with the faster CPU
-  transfers: about half the time GPU frames save, e.g. a UHD *Clean CRT* frame costs ~15 ms instead of ~32 ms,
-  where GPU frames make it free). The default look is bound by ntsc-rs on the CPU (~50 ms per UHD frame,
-  ~13 ms at 1080p) either way. `NTSCRT_OFX_GPU=0` turns the GPU frames off
-  ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md), details and measurements in
-  [docs/dev/HOST-GPU.md](docs/dev/HOST-GPU.md)).
+- **Speed: which GPUs get what.** On Windows the NTSC signal runs on the GPU (the same pictures as ntsc-rs, bit
+  for bit), so the default look costs about as much as *Clean CRT*. With an **NVIDIA GPU** Resolve's frames also
+  stay on the GPU: a 300-frame UHD render of the default look takes ~2.8 s on an RTX 5090 (~2.4 s without the
+  effect; 0.5.0-rc.4: ~18 s), nothing goes through the CPU unless Digital video or Screen Loop need the picture.
+  With **AMD or Intel GPUs** (Resolve's OpenCL mode) Resolve hands the effect CPU frames: the NTSC signal still
+  runs on the GPU, but each frame goes to the GPU and back (~8 s for the same UHD render, measured with
+  `NTSCRT_OFX_GPU=0` on the RTX 5090; AMD and Intel GPUs themselves haven't been measured yet, and a GPU that
+  fails the plug-in's exactness check uses ntsc-rs). On **macOS** and without a GPU (Windows' software
+  renderer) the NTSC signal runs on ntsc-rs on the CPU (~50 ms per UHD frame, ~13 ms at 1080p, on a 16-core CPU).
+  `NTSCRT_NTSC_GPU=0` (ntsc-rs everywhere) and `NTSCRT_OFX_GPU=0` (CPU frames) turn either off
+  ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md); details and measurements in
+  [docs/dev/NTSC-GPU.md](docs/dev/NTSC-GPU.md) and [docs/dev/HOST-GPU.md](docs/dev/HOST-GPU.md)).
 - **Non-square pixels** (anamorphic media) are processed as square, with a warning on the effect.
 - **Installers aren't code-signed or notarized** yet (see the extra click under [Install](#install)).
 - **macOS:** the CI runs on a virtual GPU, so the heaviest CRT shader (*sim*) hasn't been run on real Mac

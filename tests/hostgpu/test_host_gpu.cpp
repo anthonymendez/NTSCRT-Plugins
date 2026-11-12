@@ -6,7 +6,8 @@
 //
 // Tolerance (docs/dev/HOST-GPU.md): every channel within 1/255 (+1e-5) of the CPU
 // path's value and at most 0.2% of the values different at all. In practice the
-// GPU path is exact except half-float output (GPU rounds to nearest even).
+// GPU path is exact except half-float output (GPU rounds to nearest even), with
+// NTSC on the GPU (the host GPU path's default) against ntsc-rs on the CPU path.
 #include <doctest/doctest.h>
 #include <ntscrt/ntscrt.h>
 
@@ -26,6 +27,15 @@
 #include "ntscrt_host/params.h"
 
 namespace {
+
+void set_env(const char *k, const char *v) {
+#ifdef _WIN32
+    _putenv_s(k, v ? v : "");
+#else
+    if (v) setenv(k, v, 1);
+    else unsetenv(k);
+#endif
+}
 
 uint16_t f2h(float x) {  // round to nearest; fine for test data in 0..1
     uint32_t f;
@@ -153,7 +163,12 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
     }
     const char *off = R"({"ntsc":{"enabled":false}})";
     const Case cases[] = {
-        {"default look (NTSC on: download route), float", look("{}"), NTSCRT_RGBA32F, Alpha::Opaque},
+        {"default look (NTSC on: direct route with GPU NTSC), float", look("{}"), NTSCRT_RGBA32F, Alpha::Opaque},
+        {"default look, crop 4:3", look(R"({"crop":{"enabled":true,"ratio":"4:3"}})"), NTSCRT_RGBA32F, Alpha::Opaque},
+        {"default look, render scale 0.5", look("{}"), NTSCRT_RGBA32F, Alpha::Opaque, 0.5},
+        {"default look, premultiplied, Clip (holes: CPU conversion)", look("{}"), NTSCRT_RGBA32F, Alpha::Premult},
+        {"default look, source smaller than the frame, Spill", look(R"({"alpha":{"mode":"spill"}})"), NTSCRT_RGBA32F,
+         Alpha::Opaque, 1.0, 9},
         {"Clean CRT (direct route), float", clean_crt, NTSCRT_RGBA32F, Alpha::Opaque},
         {"NTSC off (direct route), float", look(off), NTSCRT_RGBA32F, Alpha::Opaque},
         {"NTSC off, half float", look(off), NTSCRT_RGBA16F, Alpha::Opaque},
@@ -205,7 +220,10 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
             ra.render_scale = k.scale;
             ra.source_premultiplied = premult;
             ntscrt_image s = frame_src.cpu(), d = out_cpu.cpu();
+            // The reference: the CPU path with ntsc-rs (the host GPU path: the default NTSC route).
+            set_env("NTSCRT_NTSC_GPU", "0");
             const ntscrt_status cs = ntscrt_render_cpu(cpu, &ra, &s, &d);
+            set_env("NTSCRT_NTSC_GPU", nullptr);
             REQUIRE_MESSAGE(cs == NTSCRT_OK, ntscrt_last_error(cpu));
 
             auto dsrc = cuda.upload(src.mem.data(), src.mem.size());
@@ -228,6 +246,19 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
                                << df.max * 255 << "/255, " << df.off << " of " << df.n << " values differ");
                 CHECK(df.max <= 1.0 / 255 + 1e-5);
                 CHECK(double(df.off) <= 0.002 * double(df.n));
+                // Exact but for half-float output (the GPU rounds to nearest even), NTSC
+                // on the GPU included (bit-identical to ntsc-rs).
+                if (k.f != NTSCRT_RGBA16F) CHECK(df.off == 0);
+                // The route: no CPU picture unless a CPU stage (Digital video) or the hole
+                // filling needs it; NTSC on the GPU needs none.
+                const std::string tm = ntscrt_last_timings(gpu);
+                const std::string name = k.name;
+                const bool ntsc_gpu = tm.find("ntsc_route=gpu") != std::string::npos;
+                if (name.find("holes") != std::string::npos || (k.pad > 0 && name.find("Clip") != std::string::npos))
+                    CHECK(tm.find("path=gpu-cpuconvert") == 0);
+                else if (name.find("Digital") != std::string::npos) CHECK(tm.find("path=gpu-download") == 0);
+                else if (tm.find("ntsc_route=") == std::string::npos || ntsc_gpu) CHECK(tm.find("path=gpu-direct") == 0);
+                else CHECK(tm.find("path=gpu-download") == 0);  // NTSC on ntsc-rs (WARP, NTSCRT_NTSC_GPU=0)
             }
             cuda.MemFree(dsrc);
             cuda.MemFree(ddst);

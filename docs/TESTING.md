@@ -154,10 +154,15 @@ starting Resolve does the same for that session (see [ENVIRONMENT.md](ENVIRONMEN
 
 **GPU or CPU path.** On Windows with an NVIDIA GPU, Resolve (in its default CUDA mode) hands the effect its
 frames in GPU memory and they stay there; each logged frame says `path=gpu-direct`, `path=gpu-download`
-(ntsc-rs needs the picture on the CPU) or `path=gpu-cpuconvert`, and `path=cpu` when Resolve handed over CPU
-images (AMD / Intel GPUs, OpenCL mode, macOS). If a problem might come from that, start Resolve with
-`NTSCRT_OFX_GPU=0` (see [ENVIRONMENT.md](ENVIRONMENT.md)) and try again: the effect then always gets CPU images,
-as before 0.5.0. Resolve's Fusion page only notices the change after the plug-in is reinstalled or updated.
+(Digital video, Screen Loop or ntsc-rs need the picture on the CPU) or `path=gpu-cpuconvert`, and `path=cpu`
+when Resolve handed over CPU images (AMD / Intel GPUs, OpenCL mode, macOS). If a problem might come from that,
+start Resolve with `NTSCRT_OFX_GPU=0` (see [ENVIRONMENT.md](ENVIRONMENT.md)) and try again: the effect then always
+gets CPU images, as before 0.5.0. Resolve's Fusion page only notices the change after the plug-in is reinstalled
+or updated.
+
+**NTSC on the GPU or ntsc-rs.** The log says once per effect where the NTSC signal runs (`NTSC route: gpu (...)`
+or `NTSC route: cpu (why)`), and each logged frame `ntsc_route=gpu` / `ntsc_route=cpu`. If a problem might come
+from the GPU NTSC signal, start Resolve with `NTSCRT_NTSC_GPU=0` (ntsc-rs, as 0.5.0-rc.4) and compare.
 
 Where the logs are:
 - Resolve, Windows: `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log`

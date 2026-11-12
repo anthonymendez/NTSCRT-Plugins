@@ -46,10 +46,52 @@ std::string NtscGpuPlan::unsupported_names() const {
     return s;
 }
 
-bool ntsc_gpu_requested() {
+std::string ntsc_gpu_env_text() {
     const char *e = std::getenv("NTSCRT_NTSC_GPU");
-    return e && *e && std::strcmp(e, "0") != 0;
+    return e ? e : "";
 }
+
+NtscGpuEnv ntsc_gpu_env() {
+    const std::string e = ntsc_gpu_env_text();
+    if (e == "0") return NtscGpuEnv::Off;
+    if (e == "force") return NtscGpuEnv::Force;
+    if (e.empty() || e == "auto") return NtscGpuEnv::Auto;
+    return NtscGpuEnv::On;
+}
+
+bool ntsc_gpu_requested() { return ntsc_gpu_env() != NtscGpuEnv::Off; }
+
+bool cpu_ntsc_fuses() {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    // fearless_simd picks its AVX2 level only with FMA (and BMI, F16C, ...); its
+    // SSE4.2 level (4 lanes) has no FMA.
+    static const bool fuses = ntsc_gpu_simd_lanes() >= 8;
+    return fuses;
+#else
+    return true;  // NEON: mul_add is a fused multiply-add
+#endif
+}
+
+namespace {
+std::string adapter_description(gpu::Device &dev) {
+#ifdef _WIN32
+    if (dev.backend() != gpu::Backend::D3D11) return "";
+    auto *d = static_cast<ID3D11Device *>(dev.native_device());
+    if (!d) return "";
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> ad;
+    DXGI_ADAPTER_DESC desc{};
+    if (FAILED(d->QueryInterface(IID_PPV_ARGS(&dxgi))) || FAILED(dxgi->GetAdapter(&ad)) || FAILED(ad->GetDesc(&desc)))
+        return "";
+    char buf[256] = {};
+    WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, buf, int(sizeof buf), nullptr, nullptr);
+    return buf;
+#else
+    (void)dev;
+    return "";
+#endif
+}
+}  // namespace
 
 bool gpu_is_software(gpu::Device &dev) {
 #ifdef _WIN32
@@ -69,20 +111,33 @@ bool gpu_is_software(gpu::Device &dev) {
 #endif
 }
 
-bool ntsc_gpu_route(gpu::Device &dev, std::string *why) {
-    auto no = [&](const char *w) {
+bool ntsc_gpu_route(gpu::Device &dev, std::string *why, NtscGpu *g) {
+    auto no = [&](const std::string &w) {
         if (why) *why = w;
         return false;
     };
-    const char *e = std::getenv("NTSCRT_NTSC_GPU");
-    if (!e || !*e || std::strcmp(e, "0") == 0) return no("off (NTSCRT_NTSC_GPU unset)");
+    const NtscGpuEnv env = ntsc_gpu_env();
+    if (env == NtscGpuEnv::Off) return no("NTSCRT_NTSC_GPU=0");
     // Metal: the kernels compile for it (CI builds the library) but the route is
     // unverified there, and Metal compiles with fast math (no `precise`), which
     // the ntsc-rs parity of the IIR filters relies on.
     if (dev.backend() != gpu::Backend::D3D11) return no("not on Metal yet");
+    const bool force = env == NtscGpuEnv::Force;
     // On WARP (a CPU rasterizer) the shaders are slower than ntsc-rs itself.
-    const bool software_ok = std::strcmp(e, "force") == 0;
-    if (!software_ok && gpu_is_software(dev)) return no("software device (WARP): ntsc-rs is faster");
+    if (!force && gpu_is_software(dev)) return no("software device (WARP): ntsc-rs is faster");
+    const char *fma = g ? g->fma_mode() : "?";
+    // Neither fused mad() nor doubles: results may differ from ntsc-rs by a level.
+    if (!force && std::strcmp(fma, "mad-unfused") == 0)
+        return no("this GPU's mad() isn't fused and it has no doubles: not exact");
+    if (why) {
+        std::string w = env == NtscGpuEnv::Auto ? "auto" : env == NtscGpuEnv::Force ? "NTSCRT_NTSC_GPU=force"
+                                                                                    : "NTSCRT_NTSC_GPU=1";
+        const std::string ad = adapter_description(dev);
+        if (!ad.empty()) w += ": " + ad;
+        w += std::string(", fma ") + fma;
+        w += cpu_ntsc_fuses() ? ", CPU AVX2+FMA" : ", CPU without AVX2+FMA (its ntsc-rs doesn't fuse: may differ by a level)";
+        *why = w;
+    }
     return true;
 }
 
