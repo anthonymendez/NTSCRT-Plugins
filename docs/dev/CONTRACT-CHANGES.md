@@ -240,3 +240,19 @@ the core.
 
 **Reason.** Phases 2-3 of the GPU port of ntsc-rs (docs/dev/NTSC-GPU.md): every stage on the GPU; the tables'
 CPU time overlaps the picture's upload.
+
+## 2026-11-12 — agent X — `core/stages/ntsc/gpu/ntsc_gpu.h`, `core/src/testing.h` (private), timings text
+
+**Change.** `ntsc_gpu_route(dev, why, g = nullptr)` gains a defaulted `NtscGpu *` (its fused-`mad` probe takes
+part in the decision) and is **on by default** (unset / `auto` / `1`; `0` off; `force` also on software devices
+and on GPUs without fused `mad` or doubles); `NtscGpuEnv` / `ntsc_gpu_env()` / `ntsc_gpu_env_text()` and
+`cpu_ntsc_fuses()` are new; `ntsc_gpu_requested()` now means "not `0`". `NtscGpuPlan` gains a one-entry cache
+key (`Key`, `key_valid`, `cached`): `NtscStage::gpu_plan` returns the plan (and `gpu_tables` the tables) it
+already holds for the same settings, frame, seed, size, scale and stage mask. `testing::simulate_ntsc_gpu_errors`
+(fault injection). `ntscrt_last_timings` text: ` ntsc_route=gpu (<why>)` / ` ntsc_route=cpu (<why>)` on every
+frame with NTSC on (before: only with the variable set, without a reason for `gpu`), ` ntsc_cached=1`,
+` ntsc_loop=gpu:N,cpu:M` (Screen Loop history passes), ` ntsc_gpu_ms=` (with `NTSCRT_PROFILE=1`). The OpenFX
+plug-in logs the `ntsc_route` text once per instance when it changes. No C ABI change.
+
+**Reason.** Phase 4 of the GPU port (docs/dev/NTSC-GPU.md): GPU NTSC by default where it is exact, inside
+Screen Loop and on host GPU frames (`gpu-direct` with NTSC on).

@@ -32,11 +32,12 @@ Resolve's stream. GPU to GPU, on the same adapter (the core checks the LUIDs mat
 loaded from `nvcuda.dll` at run time with prototypes declared in the code: no CUDA toolkit is needed to build,
 nothing extra to install.
 
-| step | default look (ntsc-rs on): `gpu-download` | ntsc-rs, Digital video, Screen Loop off: `gpu-direct` |
+| step | Digital video or Screen Loop on, or NTSC on ntsc-rs: `gpu-download` | everything else (the default look included, NTSC on the GPU): `gpu-direct` |
 |---|---|---|
 | source | Resolve's CUDA buffer → registered D3D11 texture (GPU copy) | same |
 | convert | `hostgpu_in/convert_in`: float → the pipeline's 8-bit picture (alpha mode, premultiplication, row order, crop) | same, plus the look's crop |
 | CPU stages | the 8-bit picture comes down (¼ of the float frame's bytes), ntsc-rs / Digital video run, it goes up again | — |
+| NTSC on the GPU | (Screen Loop: on the camera texture, docs/dev/NTSC-GPU.md) | `NtscGpu::run` on the convert kernel's 8-bit picture: the same bytes the CPU path gives ntsc-rs |
 | Downscale, Glitch, CRT | GPU, as before | GPU |
 | output | `hostgpu_out/merge_out`: CRT result + the source's alpha (from the source texture) → the output texture in Resolve's format and row order → Resolve's CUDA buffer (GPU copy) | same |
 
@@ -52,8 +53,15 @@ into CPU memory and converted there, as on the CPU path. The output still goes b
 Ordering: `cuGraphicsMapResources` waits for the D3D11 work issued before it and `cuGraphicsUnmapResources`
 makes later D3D11 work wait for the CUDA copies issued before it, so neither side blocks the CPU; the render
 call returns without waiting for the final copy (Resolve's stream carries it, as `…CudaStreamSupported`
-requires). The CPU waits only where it reads: the 8-bit picture for ntsc-rs, the transparency flags in Clip
-mode, and fetches of other frames.
+requires). The CPU waits only where it reads: the 8-bit picture for ntsc-rs / Digital video / Screen Loop, the
+transparency flags in Clip mode, and fetches of other frames.
+
+With NTSC on (since phase 4 of docs/dev/NTSC-GPU.md, the default on D3D11 hardware) the frame stays
+`gpu-direct`: NTSC runs on the 8-bit picture `convert_in` writes, which is the picture the CPU path quantises
+before ntsc-rs (0 values different, `test_host_gpu`), so no `from_bgra8` variant for the host's format is needed.
+The plan's CPU tables are built on another thread while the copy and the convert kernel are queued. If the
+NTSC GPU route fails for a frame (`ntsc_route=cpu (GPU error: ...)`) that frame becomes `gpu-download` with
+ntsc-rs, as before.
 
 ### Why not OpenCL
 
@@ -113,10 +121,12 @@ half-float), so on 8-bit and half-float comps the effect now gets and writes flo
 ## Tests
 
 - `test_host_gpu` (core): the test acts as a CUDA host (device memory of the primary context, a non-blocking
-  stream, padded rows, bottom row first) and compares `ntscrt_render_host_gpu` with `ntscrt_render_cpu` over
-  three frames each: default look, NTSC off, half float, 8-bit, premultiplied and straight alpha in Clip and
-  Spill, render scale 0.5, crop, a source smaller than the frame, Digital video. Skipped without an NVIDIA
-  driver (CI).
+  stream, padded rows, bottom row first) and compares `ntscrt_render_host_gpu` (default NTSC route) with
+  `ntscrt_render_cpu` with `NTSCRT_NTSC_GPU=0` (ntsc-rs) over three frames each: default look (also cropped,
+  at render scale 0.5, with holes in Clip mode, a source smaller than the frame), NTSC off, half float, 8-bit,
+  premultiplied and straight alpha in Clip and Spill, render scale 0.5, crop, Digital video. 0 values differ
+  except half-float output, and each case checks its route (`gpu-direct` with NTSC on the GPU,
+  `gpu-cpuconvert` with holes, `gpu-download` with Digital video). Skipped without an NVIDIA driver (CI).
 - `test_ofx` "GPU render (fake CUDA host)": the mock OpenFX host hands the plug-in CUDA images
   (`kOfxImageEffectPropCudaEnabled`, a stream) and the same frames are compared with CPU-image renders: default
   look, NTSC off, alpha in both modes, render scale 0.5, a render window smaller than the frame, Digital video
@@ -194,3 +204,47 @@ off, GPU frames alone remove the effect's cost. With it on (default look, UHD) t
 ~5 ms per frame on the GPU path (the banded 8-bit download, buffers kept between frames: D 19.4 s, range
 19.35-20.4 over 5 runs, vs C 20.9 s, 18.9-21.9); at 1080p it's within noise. The CPU path (AMD / Intel, macOS,
 `NTSCRT_OFX_GPU=0`) gets the fast transfers' full gain. Raw results: `C:/ntb/w7s-bench/` on the test machine.
+
+## Speed with NTSC on the GPU (phase 4, 2026-11-12)
+
+The same bench (`--only bench --bench-repeat 3 --bench-looks default,clean-crt,ntsc-off,mild-vhs`, 300 frames,
+H.264 NVENC, 60 fps), one build (agent-x/ntsc-gpu-4), three Resolve sessions: **rc.4** = `NTSCRT_NTSC_GPU=0`
+(ntsc-rs: 0.5.0-rc.4's behaviour), **default** (NTSC on the GPU, host GPU frames), **CPU frames** = the default
+with `NTSCRT_OFX_GPU=0` (Resolve's CPU images, NTSC on the GPU inside: what AMD / Intel GPUs in OpenCL mode
+get, if they pass the exactness check). Median wall of 3 jobs; *ms/frame* = (median wall − the session's
+no-effect job: 2.35 s UHD, 1.35 s 1080p) / 300, in Resolve's ~0.5 s steps (≈1.7 ms per frame); *plug-in ms* =
+the median of the plug-in's own time per render (~307 renders per job).
+
+| UHD | rc.4: wall s (ms/frame) | default | CPU frames | plug-in ms rc.4 / default / CPU frames |
+|---|---|---|---|---|
+| default look | 17.87 (51.7) | **2.84 (1.6)** | 8.36 (20.0) | 50.5 / 3.2 / 13.2 |
+| *Mild VHS* | 13.37 (36.7) | **2.85 (1.7)** | 7.86 (18.4) | 36.0 / 2.0 / 11.4 |
+| *Clean CRT* | 2.35 (0) | 2.36 (0) | 7.86 (18.4) | 1.8 / 1.8 / 10.0 |
+| default, NTSC off | 2.84 (1.6) | 2.35 (0) | 7.86 (18.4) | 1.8 / 1.8 / 10.0 |
+
+| 1080p | rc.4: wall s (ms/frame) | default | CPU frames | plug-in ms rc.4 / default / CPU frames |
+|---|---|---|---|---|
+| default look | 6.85 (18.4) | **2.35 (3.3)** | 3.85 (8.4) | 15.7 / 1.5 / 4.4 |
+| *Mild VHS* | 5.35 (13.4) | **2.35 (3.3)** | 3.86 (8.4) | 11.2 / 1.3 / 3.8 |
+| *Clean CRT* | 2.35 (3.4) | 2.35 (3.3) | 3.86 (8.4) | 1.2 / 1.2 / 3.2 |
+| default, NTSC off | 2.34 (3.3) | 2.35 (3.3) | 3.86 (8.4) | 1.2 / 1.2 / 3.3 |
+
+The default look now costs what *Clean CRT* costs: at UHD the job ends one step after the no-effect job (rc.4:
+15.5 s after it), at 1080p in the same step as *Clean CRT* (the 1080p jobs' ~1 s over the no-effect job is
+there for every look, *Clean CRT* included). Routes: every render of the default session was `gpu-direct` with
+`ntsc_route=gpu` (307-308 per job), rc.4's NTSC jobs `gpu-download` with `ntsc_route=cpu (NTSCRT_NTSC_GPU=0)`,
+the CPU-frames session `cpu` with `ntsc_route=gpu`; one `NTSC route:` line per instance, `gpu (auto: NVIDIA
+GeForce RTX 5090, fma mad, CPU AVX2+FMA)`. With CPU frames the effect's cost is the transfers (as *Clean CRT*:
+the NTSC passes add ~1-3 ms of the plug-in's time).
+
+Phases with `NTSCRT_PROFILE=1` (a wait after each GPU phase and each NTSC pass, so slower; plug-in ms median
+7.7 UHD / 5.1 1080p for the default look), mean ms per render, default session:
+
+| phase | UHD default look | UHD *Mild VHS* | 1080p default look | 1080p *Mild VHS* |
+|---|---|---|---|---|
+| in (copy + convert kernel) | 1.05 | 1.09 | 0.65 | 0.60 |
+| ntsc (CPU tables + the passes, each waited for) | 6.62 | 2.17 | 4.47 | 1.42 |
+| Downscale / Glitch / CRT | 0.11 / 0.61 / 1.59 | 0.10 / 0.19 / 0.38 | 0.09 / 0.62 / 0.71 | 0.09 / 0.19 / 0.29 |
+| out (merge + copy) | 0.20 | 0.17 | 0.20 | 0.18 |
+
+Raw results: `C:/ntb/w11x-res/bench{A,B,C,P}/bench.jsonl` and `C:/ntb/w11x-resolve.log` on the test machine.

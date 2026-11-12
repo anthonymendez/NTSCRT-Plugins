@@ -1,8 +1,10 @@
 # NTSC on the GPU (ntsc-rs port)
 
-Status: **phases 1-3 of 4 done**, opt-in (`NTSCRT_NTSC_GPU=1`), Windows / D3D11 only. Every ntsc-rs pass runs on
-the GPU, bit-identical to ntsc-rs: all 25 bundled presets with NTSC on and the house look render entirely on it.
-The Rust path (ntsc-rs through `rust/ntscrs-capi`) stays the reference and the fallback forever.
+Status: **all 4 phases done; on by default** on Windows / D3D11 hardware devices (the rule: [The default
+rule](#the-default-rule)), Metal off. Every ntsc-rs pass runs on the GPU, bit-identical to ntsc-rs: all 25
+bundled presets with NTSC on, the house look and the 5 Screen Loop presets render entirely on it, on the CPU
+path, on host GPU frames (`gpu-direct`) and inside Screen Loop. `NTSCRT_NTSC_GPU=0` brings back ntsc-rs
+(0.5.0-rc.4). The Rust path (ntsc-rs through `rust/ntscrs-capi`) stays the reference and the fallback forever.
 
 At UHD the ntsc-rs step was ~38-48 ms of a ~55 ms frame and everything on the GPU ~2.5 ms. ntsc-rs has no GPU
 implementation, so this is a port of its effect, pass by pass, to compute shaders, with ntsc-rs's arithmetic:
@@ -13,7 +15,7 @@ on the GPUs it targets the port's output is **bit-identical** to ntsc-rs's (meas
 | 1 | Scaffolding, plane format, the general row IIR filter, CPU-made per-row tables, per-frame fallback, parity harness; every pass that is a row filter or per pixel / per row, **including the mandatory chroma modulation and all four demodulation filters**. |
 | 2 (done) | Composite / luma / chroma noise (Fbm simplex on the GPU from per-row seeds), snow (speckle event lists). |
 | 3 (done) | The VHS passes: head switching, tracking noise, chroma delay (`shift_row`), edge wave. |
-| 4 | Screen Loop (the `howl` path's NTSC passes), host-GPU frames (`gpu-direct` with NTSC on), Metal, default on. |
+| 4 (done) | Screen Loop (the frame's and every history pass's NTSC on the camera texture), host-GPU frames (`gpu-direct` with NTSC on), default on, the plan / table cache, the route in the log. Metal: still off (unverified). |
 
 ## Files
 
@@ -25,25 +27,42 @@ on the GPUs it targets the port's output is **bit-identical** to ntsc-rs's (meas
 | `core/stages/ntsc/gpu/ntsc_gpu.h/.cpp` | `NtscGpu` (the driver: textures, tables, dispatches), `NtscGpuPlan`, the route rule. |
 | `core/stages/ntsc/gpu/shaders/ntsc_gpu.slang` | The kernels. |
 | `core/stages/ntsc/ntsc.cpp` | `NtscStage::gpu_plan()` / `gpu_tables()` / `debug_planes()`: the same settings handling as `process()`. |
-| `core/src/ntscrt.cpp` `render_once` | The pipeline route. |
-| `tests/ntsc/test_ntsc_gpu.cpp` | Parity harness, coverage report, fallback tests, GPU and table timing. |
+| `core/src/ntscrt.cpp` | `ntsc_gpu_on` (the instance's route), `ntsc_gpu_run` (plan, tables, passes, fallback), `render_once` (the pipeline, Screen Loop hooks). |
+| `tests/ntsc/test_ntsc_gpu.cpp` | Parity harness, coverage report, fallback / error / cache tests, GPU and table timing. |
+| `tests/howlaround/test_howl_seek.cpp` | Screen Loop: the default (GPU) byte-identical to `NTSCRT_NTSC_GPU=0` for the 5 presets, play and cold seeks. |
+| `tests/hostgpu/test_host_gpu.cpp` | Host GPU frames with NTSC on: `gpu-direct`, 0 values different from the CPU path with ntsc-rs. |
 
 ## Data flow
 
 ```
-render_once (no Screen Loop, NTSCRT_NTSC_GPU set)
-  ntsc_gpu_route(dev)              env var, D3D11, not a software device   -> else Rust path
-  NtscStage::gpu_plan(.., false)   -> shim ntsc_gpu_plan: NtscGpuPlanInfo + passes + rows + out rows
-  plan.supported()                 every enabled stage implemented          -> else Rust path
-  async NtscStage::gpu_tables      -> row seeds, row shifts, speckle lists (CPU, while the picture uploads)
-  upload(img)                      the 8-bit picture after Digital (BGRA8)
-  NtscGpu::run(tex, plan)          from_bgra8 -> pass kernels -> to_bgra8 -> BGRA8 texture
-  -> Downscale -> Glitch -> CRT    (no CPU NTSC step, no second upload)
+render_once, NTSC on (every frame)
+  ntsc_gpu_on(inst)                the instance's route: ntsc_gpu_route(dev) once (again when NTSCRT_NTSC_GPU
+                                   changes or the device is replaced), off after 3 GPU errors in a row
+  no Screen Loop:
+    the source goes straight to the GPU (DirectSrc) unless Digital video is on: the host GPU frame's convert
+    kernel (gpu-direct) or the CPU picture converted into upload memory (CPU path); else the CPU picture
+    ntsc_gpu_run:
+      NtscStage::gpu_plan(.., false)   -> shim ntsc_gpu_plan (or the cached plan: same frame again)
+      plan.supported()                 every enabled stage implemented          -> else ntsc-rs
+      async NtscStage::gpu_tables      row seeds, row shifts, speckle lists (CPU, while the picture is made)
+      picture()                        the 8-bit picture (BGRA8 texture)
+      NtscGpu::run(tex, plan)          from_bgra8 -> pass kernels -> to_bgra8 -> BGRA8 texture
+    -> Downscale -> Glitch -> CRT      (no CPU NTSC step, no second upload)
+  Screen Loop:
+    camera = Howlaround::camera(upload(picture))   history passes (chain_input / chain_input_begin):
+                                                   ntsc_gpu_run on the camera texture, Downscale, Glitch
+    ntsc_gpu_run(camera) -> Downscale -> Glitch -> CRT, after_frame
+  any step failing (not a lost device): ntsc-rs on the CPU picture for this frame / pass, exactly as before
 ```
 
-The decision is per frame. The timings line (`ntscrt_last_timings`, the OFX debug log) gets
-` ntsc_route=gpu` (plus ` ntsc_tables_ms=<CPU time of the plan and tables>`, and with `NTSCRT_PROFILE=1`
-` ntsc_gpu=<pass>:<ms>,...`) or ` ntsc_route=cpu (<why>)` appended, only when the variable is set.
+The decision is per instance, the fallback per frame (and per Screen Loop pass). The timings line
+(`ntscrt_last_timings`, the OpenFX log) gets ` ntsc_route=gpu (<why>)` (plus ` ntsc_tables_ms=<CPU time of
+the plan and tables>`, ` ntsc_cached=1` when the cache kept them, and with `NTSCRT_PROFILE=1` ` ntsc_gpu_ms=<GPU
+time of the passes>` and ` ntsc_gpu=<pass>:<ms>,...`) or ` ntsc_route=cpu (<why>)` on every frame with NTSC
+on, and Screen Loop frames ` ntsc_loop=gpu:<history passes>,cpu:<passes>`. The OpenFX plug-in writes
+`instance #N NTSC route: <route> (<why>)` to its log when an instance's route text changes (once per
+instance, unless a setting or a failure changes it), e.g. `NTSC route: gpu (auto: NVIDIA GeForce RTX 5090,
+fma mad, CPU AVX2+FMA)`.
 
 ## Plane format
 
@@ -215,23 +234,42 @@ level wherever a value sits on an exact level (flat areas of 8-bit sources do), 
 Butterworth lowpass (`chroma_lowpass` *Light* at the house bandwidth scale 0.3: the cutoff clamps to the
 sampling rate, both poles at z = -1) amplifies rounding differences along the row.
 
-## The fallback rule
+## The default rule
 
-A frame takes the GPU route only when all of these hold, else it runs the Rust path exactly as without the
-variable (byte-identical: tested):
+An instance's NTSC frames take the GPU route when all of these hold (`ntsc_gpu_route`, decided on its first
+NTSC frame); otherwise they run the Rust path exactly as 0.5.0-rc.4 did (byte-identical: tested):
 
-1. `NTSCRT_NTSC_GPU` is `1` (or `force`); unset or `0` = off (the default until phase 4).
-2. The device is D3D11. **Metal is off whatever the variable**: the kernels compile for Metal (CI builds the
-   library: proof it compiles), but Metal compiles with fast math (Slang drops `precise` for Metal with a
-   warning), which the bit parity above relies on. Phase 4 verifies it (Metal's `fma()` is fused, so `ExactFma`
-   already maps to it).
-3. Not a software device (WARP: vendor 0x1414 / device 0x8c), unless `NTSCRT_NTSC_GPU=force`: on WARP the
-   kernels are slower than ntsc-rs itself.
-4. Every stage the frame's settings turn on is implemented (`NtscGpuPlan::supported`: `info.unsupported == 0`).
-   Since phase 3 that is every stage; what remains is one degenerate case (below) and
-   `NTSCRT_NTSC_GPU_CPU_STAGES=<stage>,...` (debugging: those stages count as unsupported; the reason then
-   names them, `not on the GPU yet: head_switching`).
-5. Not the Screen Loop path (phase 4), the plan / tables didn't throw.
+1. `NTSCRT_NTSC_GPU` is unset, `auto`, `1` or `force` (`0` = ntsc-rs always).
+2. The device is D3D11. **Metal is off whatever the variable**: the kernels compile and run on Metal (CI),
+   but Metal compiles with fast math (Slang drops `precise` for Metal with a warning), which the bit parity
+   above relies on, and the parity of the phase 2-3 kernels was never measured there.
+3. Not a software device (WARP: vendor 0x1414 / device 0x8c), unless `force`: on WARP the kernels are slower
+   than ntsc-rs itself.
+4. The device does ntsc-rs's fused multiply-adds exactly: the fused-`mad` probe passes (`fma mad`) or the
+   device has doubles (`fma double`, the `*_x` kernels), unless `force` (`mad-unfused` would differ from
+   ntsc-rs by a level here and there).
+
+The CPU: ntsc-rs fuses its multiply-adds only on AVX2+FMA (fearless_simd's x86-64-v3 level, which requires FMA)
+and NEON. On an older x86 CPU (its SSE4.2 level) ntsc-rs's `mul_add` is a separate multiply and add, so there
+the GPU (always fused, with that CPU's SIMD width from `ntsc_gpu_simd_lanes`) differs from that machine's
+ntsc-rs by up to a level in places, as WARP-with-plain-`mad` did before the probe. **The GPU is used there
+anyway**: the project's references (golden images, the bundled presets' look) come from AVX2+FMA machines, so
+on such a CPU neither route reproduces them bit for bit; the GPU's arithmetic is the one the references were
+made with (fused), and such CPUs (pre-2013 Intel, pre-2015 AMD) are where ntsc-rs is slowest. The reason in the log says so (`CPU without AVX2+FMA (its ntsc-rs doesn't fuse: may differ by a
+level)`); `NTSCRT_NTSC_GPU=0` keeps such a machine on its own ntsc-rs. (Not measured: no such CPU here.)
+
+Per frame, a frame on an instance whose route is on still takes ntsc-rs when:
+
+5. A stage its settings turn on isn't implemented (`NtscGpuPlan::supported`: `info.unsupported == 0`): since
+   phase 3 every stage is, so this is one degenerate case (below) and `NTSCRT_NTSC_GPU_CPU_STAGES=<stage>,...`
+   (debugging: those stages count as unsupported; the reason then names them, `not on the GPU yet:
+   head_switching`).
+6. The plan / tables / kernels throw (bad settings, a kernel that doesn't compile, a driver error) and the
+   device isn't lost: that frame (or Screen Loop pass) on ntsc-rs, `ntsc_route=cpu (GPU error: ...)`. After
+   **3 such frames in a row** the instance stays on ntsc-rs (`GPU error 3 frames in a row (last: ...): ntsc-rs
+   for this instance from now on`, logged once); a changed `NTSCRT_NTSC_GPU` decides again. A lost device
+   throws on as before: `render_impl` replaces the device and renders the frame again (the new device's
+   instance decides its route again).
 
 One case is left to ntsc-rs on purpose although the GPU could do it: `chroma_vert_blend` on a field of one row
 (pictures 1-3 rows tall, depending on the field mode). ntsc-rs slices two rows of that field's scratch buffer
@@ -283,7 +321,7 @@ Every ntsc-rs setting and where it runs on the GPU:
 | `vhs_chroma_vert_blend` | yes (not on a 1-row field: ntsc-rs panics there, left to it) |
 | `chroma_lowpass_out` | yes |
 | `scale_settings` (`bandwidth_scale`, `vertical_scale`, `scale_with_video_size`), render scale | yes (CPU side) |
-| any of the above inside Screen Loop | phase 4 |
+| any of the above inside Screen Loop | yes (phase 4) |
 
 Bundled presets (the 29 looks in `presets/`, 25 with NTSC on; `test_ntsc_gpu` prints this with
 `NTSCRT_NTSC_GPU_VERBOSE=1`) that run entirely on the GPU:
@@ -292,10 +330,10 @@ Bundled presets (the 29 looks in `presets/`, 25 with NTSC on; `test_ntsc_gpu` pr
 |---|---|
 | 1 | *Mild VHS* (1 of 25) |
 | 2 | *Mild VHS* (every other preset also uses a phase-3 stage) |
-| 3 (now) | all 25, and the house look |
-| 4 | the 5 Screen Loop presets too |
+| 3 | all 25, and the house look |
+| 4 (now) | the 5 Screen Loop presets too (the frame and every history pass), by default |
 
-## Speed
+## Speed (phases 2-3, opt-in route)
 
 `bench_transfer --sizes 3840x2160,1920x1080 --formats rgba32f,rgba8 --looks "default,preset:Tracking Noise up,preset:High
 Chroma static,preset:Mild VHS" --frames 100 --warmup 20`, with and without `NTSCRT_NTSC_GPU=1`, with and without
@@ -390,28 +428,121 @@ tile goes back coalesced; or fuse consecutive filters on the same plane into one
 5. Check the CPU you compare against: ntsc-rs fuses only on AVX2+FMA / NEON (`fearless_simd::Level`), and its
    SIMD width (`ntsc_gpu_simd_lanes`) decides the noise coordinates and the shift formulas.
 
-## What phase 4 must do
+## Phase 4: Screen Loop, host GPU frames, default on
 
-- **Screen Loop.** The `howl` path's NTSC (`h.chain_input` / `chain_input_begin` in `render_once`: today
-  download -> ntsc-rs -> upload; with the GPU, NTSC on the camera texture directly, no download, no worker
-  threads). The same `NtscStage::gpu_plan` / `gpu_tables` / `NtscGpu::run` apply; the plan only needs the
-  frame's context.
-- **Host-GPU frames** (`host_gpu.cpp`: NTSC on => `gpu-download` today): with every stage on the GPU, a frame
-  whose other stages are GPU stages can stay on the GPU (`gpu-direct`); only the 8-bit conversion of the host
-  frame (`from_bgra8` reads BGRA8) is in the way: a variant of `from_bgra8` that reads the host texture's
-  format and quantises to bytes as `to_bgra8` (the pipeline's picture is 8-bit before ntsc-rs today) does it.
-- **Default on.** Every preset is exact on D3D11 hardware; what's left before the default flips is phase 4's
-  Resolve benchmarks and Metal. The CPU tables cost 0.5 ms (house look, UHD; 1.5 ms while the upload runs beside them) per frame (built while the picture uploads,
-  so mostly hidden); snow is the expensive one (`rng.jump()` and a `cosf` per value, ~1 us per transient), so a
-  look with heavy snow costs CPU time even on the GPU route. A one-entry cache of the tables keyed by
-  (settings, frame, size, scale, seed) would make re-renders of the same frame (scrubbing a paused timeline)
-  free; not done.
-- **Metal.** Verify the bit parity with `fma()`; Slang ignores `precise` on Metal, so check whether
-  `-fno-fast-math`-style compile options are needed for the `precise` sums (phase 1's report-only numbers:
-  max 1 level, 0.19% of values different). The noise and the shifts rely on `precise` and fused `fma` too.
-- **Performance.** All 22 stages take 3.0 ms of GPU time (1.06 ms at 1080p) at UHD on the RTX 5090 (one thread per row is still the IIR
-  filters' cost; the per-pixel passes are cheap). The phase-1 ideas (groupshared row tiles, fusing consecutive
-  filters on a plane) still apply; the shifts each copy their plane to the scratch plane first (~0.03 ms each at
-  UHD), which a kernel that reads the row into groupshared memory could avoid.
-- Every phase: extend `test_ntsc_gpu`'s cases, keep the tolerance rule per case, keep `NTSCRT_NTSC_GPU` unset
-  = byte-identical, and add the CHANGELOG line.
+**Screen Loop.** Upstream's order with the loop on is crop -> upload -> camera -> NTSC -> upload -> Downscale
+-> Glitch -> CRT, and the loop's own history passes (`HowlHooks::chain_input` / `chain_input_begin`: the
+run-up, the frames before a seek) run the same chain on each pass's camera picture. Before phase 4 every one
+of them downloaded the camera picture, ran ntsc-rs (history passes two at a time on worker threads, each on
+its own `NtscStage`) and uploaded the result. Now `ntsc_gpu_run` runs on the camera texture itself (BGRA8, the
+scene's format): `from_bgra8` reads the same bytes the download gave ntsc-rs, so the result is the same; the
+pass's plan uses the pass's look and counters (`at(p.ntsc_frame - 1, pin)`, as ntsc-rs got), its own plan
+object (`howl_plan`, so the frame's cache entry survives), tables built synchronously (no upload to hide them
+behind). `chain_input_begin` queues the pass's NTSC on the GPU at once (it reads the camera before Howlaround
+reuses it) and leaves Downscale and Glitch to the second half, so they still run in frame order. A pass that
+can't take the GPU (route off, an error) takes the old CPU job, so the two kinds can mix in one run. Checkpoints
+hold TV pictures only and need nothing new. Proof (`test_howl_seek` "NTSC on the GPU renders what ntsc-rs
+renders"): the 5 Screen Loop presets (window 8 frames, default look), 24 frames played and cold seeks to frames
+23, 17 and 9 (history re-rendered, every pass on the GPU: `ntsc_loop=gpu:N,cpu:0`) on fresh instances, each
+frame byte-identical to `NTSCRT_NTSC_GPU=0` playing from frame 0; the existing seek = play tests pass on the
+default route unchanged; `bench_transfer --dump` with `screenloop:7 copies slow luma` and `screenloop:22 copies
+bottom left` is byte-identical at UHD and 1080p, float and 8-bit.
+
+**Host GPU frames.** NTSC no longer keeps a frame off the direct source (`DirectSrc`): with NTSC on and
+Digital video and Screen Loop off, `render_once` takes the direct picture (host GPU: `convert_in` on the host's
+texture, `gpu-direct`; CPU path: the host picture converted straight into upload memory) and runs NTSC on it.
+That 8-bit picture is the one the CPU path quantises before ntsc-rs (the convert kernel is exact against
+`to_bgra8`: docs/dev/HOST-GPU.md), so no `from_bgra8` variant for the host's format is needed. The plan's size
+is known before the picture (the look's crop rectangle), so the tables are built while the copy and convert are
+queued. When the GPU route fails for a frame, the CPU picture is made the usual way (`gpu-download` on host GPU
+frames) and ntsc-rs runs on it. Proof: `test_host_gpu` (default look, also cropped, at render scale 0.5, with
+holes in Clip mode, a source smaller than the frame, 8-bit, half float: `gpu-direct` / `gpu-cpuconvert`, 0
+values different from the CPU path with ntsc-rs except half-float output's known rounding).
+
+**The plan / table cache.** `NtscStage::gpu_plan` keeps a one-entry cache in the `NtscGpuPlan` it fills: key =
+ntsc-rs's effective settings JSON, the NTSC frame counter, the seed offset, width, height, scale, stage mask
+and `NTSCRT_NTSC_GPU_CPU_STAGES`. A hit (a paused timeline rendering the same frame again, an Inspector edit of
+a non-NTSC parameter) returns at once and `gpu_tables` keeps the tables (`ntsc_cached=1` in the timings); any
+failure clears the key. Measured (`test_ntsc_gpu` with `NTSCRT_NTSC_GPU_VERBOSE=1`, UHD, the house look + snow
+0.6): 6.9 ms of plan and tables on a miss, 0.04 ms on a hit (the house look alone: 0.3-1.5 ms, below).
+
+**`NTSCRT_PROFILE=1`**: the `ntsc` phase then includes the GPU time of the passes (a wait after each), and the
+timings add ` ntsc_gpu_ms=<sum of the passes>` and ` ntsc_gpu=<pass>:<ms>,...`.
+
+### Phase 4 numbers (RTX 5090 + Ryzen 9 9950X3D, 2026-11-12)
+
+**Pixels.** Nothing changes by design, and nothing changed: every self-golden baseline passes unchanged
+(`ctest` with `NTSCRT_GOLDEN_STRICT=1`, none regenerated); `bench_transfer --dump` (20 frames, the last one
+compared) is byte-identical between `NTSCRT_NTSC_GPU=0` and the default for the house look, *Mild VHS*,
+*Tracking Noise up*, *High Chroma static*, *Webcam (low quality)* (Digital video), `screenloop:7 copies slow
+luma` and `screenloop:22 copies bottom left`, at 3840x2160 and 1920x1080, `rgba32f` and `rgba8` (28 of 28),
+and the first five also against main's build before phase 4 (ntsc-rs; 20 of 20); in Resolve `--gpu-ab` (the
+default route in both sessions, host GPU frames against CPU frames) 0 values differ on every checked image.
+
+**Core** (`bench_transfer --sizes 3840x2160,1920x1080 --formats rgba32f,rgba8 --frames 100 --warmup 20`, the
+CPU path (`ntscrt_render_cpu`, OpenFX layout), median of 3 runs of the per-frame medians, ms; "profiled" =
+`NTSCRT_PROFILE=1`, a wait after each GPU phase and each NTSC pass; "tables" = `ntsc_tables_ms`, the CPU time
+of the plan and its tables on their thread, while the picture converts / uploads beside them):
+
+| Look | Size | Format | Frame, ntsc-rs | Frame, default | saved | `ntsc` phase, ntsc-rs / default | profiled frame, ntsc-rs / default | profiled `ntsc`, ntsc-rs / default | GPU time of the passes (profiled) | tables |
+|---|---|---|---|---|---|---|---|---|---|---|
+| house | 3840x2160 | rgba32f | 55.0 | **11.2** | 43.8 | 43.8 / 0.32 | 55.0 / 13.7 | 43.5 / 5.32 | 4.50 | 2.23 |
+| house | 3840x2160 | rgba8 | 50.0 | **7.1** | 42.9 | 43.5 / 0.30 | 50.0 / 9.4 | 43.4 / 5.25 | 4.45 | 1.00 |
+| house | 1920x1080 | rgba32f | 15.4 | **3.3** | 12.1 | 12.4 / 0.23 | 15.8 / 5.6 | 12.4 / 3.25 | 2.61 | 0.50 |
+| house | 1920x1080 | rgba8 | 15.4 | **2.5** | 12.9 | 12.5 / 0.21 | 15.4 / 4.8 | 12.5 / 3.25 | 2.63 | 0.41 |
+| Mild VHS | 3840x2160 | rgba32f | 39.9 | **9.4** | 30.5 | 28.7 / 0.09 | 40.5 / 10.4 | 29.0 / 2.21 | 1.73 | 0.06 |
+| Mild VHS | 3840x2160 | rgba8 | 35.0 | **5.1** | 29.9 | 28.8 / 0.07 | 35.4 / 6.2 | 28.8 / 2.22 | 1.74 | 0.05 |
+| Mild VHS | 1920x1080 | rgba32f | 11.5 | **2.5** | 9.0 | 8.4 / 0.06 | 11.6 / 3.7 | 8.3 / 1.20 | 0.98 | 0.04 |
+| Mild VHS | 1920x1080 | rgba8 | 10.8 | **1.7** | 9.2 | 8.6 / 0.06 | 10.8 / 2.9 | 8.3 / 1.19 | 0.97 | 0.03 |
+| Tracking Noise up | 3840x2160 | rgba32f | 54.8 | **11.2** | 43.6 | 43.5 / 0.33 | 55.5 / 13.7 | 43.7 / 5.34 | 4.50 | 2.23 |
+| Tracking Noise up | 3840x2160 | rgba8 | 49.9 | **7.1** | 42.8 | 43.4 / 0.33 | 50.1 / 9.3 | 43.4 / 5.20 | 4.44 | 1.05 |
+| Tracking Noise up | 1920x1080 | rgba32f | 15.6 | **3.3** | 12.3 | 12.6 / 0.23 | 16.3 / 5.5 | 12.7 / 3.20 | 2.60 | 0.47 |
+| Tracking Noise up | 1920x1080 | rgba8 | 15.0 | **2.5** | 12.5 | 12.4 / 0.21 | 16.3 / 4.8 | 12.5 / 3.24 | 2.60 | 0.39 |
+| Webcam (low quality) (Digital, NTSC off) | 3840x2160 | rgba32f | 19.4 | 19.2 | - | - | 19.7 / 19.6 | - | - | - |
+| Webcam (low quality) | 3840x2160 | rgba8 | 16.2 | 16.0 | - | - | 16.5 / 16.5 | - | - | - |
+| Webcam (low quality) | 1920x1080 | rgba32f | 6.4 | 6.2 | - | - | 6.5 / 6.5 | - | - | - |
+| Webcam (low quality) | 1920x1080 | rgba8 | 5.9 | 5.9 | - | - | 6.1 / 6.0 | - | - | - |
+
+Every NTSC frame of the default rows took the GPU route (100/100), the Digital look none (NTSC off: unchanged,
+as expected). Against phase 3's opt-in route (13.0 / 9.0 / 3.9 / 3.2 ms for the house look) the default is
+faster again because NTSC no longer keeps the frame off the direct source: the host picture is converted
+straight into upload memory (no CPU picture, no separate upload). Where the UHD house-look frame's 11.2 ms go
+now (unprofiled phases): float -> 8-bit conversion into upload memory 2.1, NTSC submission 0.3, readback (with
+the wait for the GPU: NTSC ~3 ms, Downscale, Glitch, CRT) 4.4, half-float -> float conversion out 4.3: the CPU
+path's float conversions are most of what is left, which host GPU frames remove (in Resolve below).
+
+**Screen Loop** (`bench_screenloop --play 60 --seek 600`, the default look, a moving 8-bit source generated per
+fetch; median of 3 runs; "seek" = a fresh instance rendering frame 600 cold: the run-up and the window's
+history, 360 source fetches of which the bench's own source generation takes 1.4 s at 1080p, 4.2-6.7 s at
+UHD):
+
+| Preset | Size | play, ms/frame: ntsc-rs / default | first frame (run-up), ms | seek to 600, ms | next frame after the seek, ms |
+|---|---|---|---|---|---|
+| 7 copies slow luma | 1920x1080 | 18.2 / **4.0** | 1756 / 779 | 6333 / **3208** | 19.8 / 5.3 |
+| 7 copies slow luma | 3840x2160 | 62.6 / **12.4** | 5779 / 1050 | 24846 / **10032** | 66.9 / 14.0 |
+| Bottom to top | 1920x1080 | 18.2 / **3.9** | 1307 / 681 | 5798 / **3121** | 19.3 / 5.4 |
+| Bottom to top | 3840x2160 | 60.7 / **12.3** | 3818 / 884 | 22600 / **9891** | 60.9 / 14.0 |
+
+**Resolve** (docs/dev/HOST-GPU.md "Speed with NTSC on the GPU": 300-frame render-queue jobs, RTX 5090, CUDA
+mode, 3 runs): the default look at UHD **17.87 s -> 2.84 s** per job (51.7 -> 1.6 ms per frame over the
+2.35 s no-effect job; the plug-in's own time 50.5 -> 3.2 ms), *Mild VHS* 13.37 -> 2.85 s, at 1080p 6.85 ->
+2.35 s (= *Clean CRT*); with CPU frames (`NTSCRT_OFX_GPU=0`, NTSC still on the GPU) 8.36 s at UHD. Every
+render took `gpu-direct` with `ntsc_route=gpu`.
+
+
+## What's next
+
+- **Metal.** Still off. Verify the bit parity with `fma()` on Apple GPUs; Slang ignores `precise` on Metal, so
+  check whether `-fno-fast-math`-style compile options are needed for the `precise` sums (phase 1's report-only
+  numbers: max 1 level, 0.19% of values different), and run `test_ntsc_gpu -s` (or with
+  `NTSCRT_NTSC_GPU_VERBOSE=1`) on a Mac for the phase 2-3 stages' numbers. Then the rule's Metal line goes.
+- **Other GPUs.** Only the RTX 5090 (fused `mad`) and WARP (`double`) are measured. AMD and Intel GPUs fuse
+  `mad` too as far as known, which the probe checks per device, but the parity tests have not run on them.
+- **Performance.** All 22 stages take ~3 ms of GPU time at UHD on the RTX 5090; the IIR filters (one thread
+  per row) are most of it. The phase-1 ideas (groupshared row tiles, fusing consecutive filters on a plane)
+  still apply; the shifts each copy their plane to the scratch plane first (~0.03 ms each at UHD), which a
+  kernel that reads the row into groupshared memory could avoid. The CPU tables (0.3-1.5 ms at UHD, snow the
+  expensive one) are hidden behind the upload / convert; with heavy snow they could become the frame's
+  critical path.
+- Every change: extend `test_ntsc_gpu`'s cases, keep the tolerance rule per case, keep `NTSCRT_NTSC_GPU=0`
+  byte-identical to ntsc-rs, and add the CHANGELOG line.
