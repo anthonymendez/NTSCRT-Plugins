@@ -167,3 +167,30 @@ time. With ntsc-rs on (the default look) ntsc-rs's ~48 ms on the CPU at UHD domi
 output readback and conversion (~11 ms of the plug-in's time) and Resolve's own float transfers to and from
 CPU memory (the rest of the ~20 ms per frame the wall time drops by), while the input side is a wash (the
 8-bit download costs about what the CPU conversion did).
+
+## Speed with the fast transfers (both branches combined, 2026-11-12)
+
+The same bench (`--only bench`, 300 frames, H.264 NVENC, 60 fps), 3 interleaved runs per build (5 for the UHD
+GPU-path rows), separate builds of each: A = v0.5.0-rc.3 (+ the bench's test-preset hook), B = fast transfers
+only, C = host GPU frames only, D = both (and D with each switch off). *ms/frame* = (median wall − the median
+no-effect job, 2.86 s UHD / 1.34 s 1080p) / 300. Resolve reports job ends in steps of about 0.5 s (≈1.7 ms per
+frame here), so differences under ~2 ms/frame are noise; the GPU-path *Clean CRT* jobs finish a step *before*
+the no-effect job (shown as 0).
+
+| UHD, ms/frame (wall s) | A | B | C | D | D, `NTSCRT_OFX_GPU=0` | D, `NTSCRT_FAST_TRANSFER=0` |
+|---|---|---|---|---|---|---|
+| default look | 83.5 (27.9) | 70.0 (23.9) | 60.0 (20.9) | 55.0 (19.4) | 68.3 (23.4) | 63.4 (21.9) |
+| Clean CRT | 31.7 (12.4) | 15.0 (7.4) | 0 (2.35) | 0 (2.35) | 15.0 (7.4) | 0 (2.35) |
+| default, NTSC off | 31.7 (12.4) | 15.0 (7.4) | 0 (2.35) | 0 (2.35) | 15.0 (7.4) | 0 (2.36) |
+
+| 1080p, ms/frame (wall s) | A | B | C | D | D, `NTSCRT_OFX_GPU=0` | D, `NTSCRT_FAST_TRANSFER=0` |
+|---|---|---|---|---|---|---|
+| default look | 23.4 (8.36) | 21.8 (7.87) | 18.3 (6.84) | 18.4 (6.86) | 21.8 (7.87) | 18.4 (6.86) |
+| Clean CRT | 11.7 (4.85) | 6.7 (3.36) | 3.4 (2.35) | 3.4 (2.35) | 8.4 (3.85) | 3.3 (2.34) |
+| default, NTSC off | 10.0 (4.35) | 6.7 (3.36) | 3.3 (2.34) | 3.4 (2.35) | 6.7 (3.35) | 3.4 (2.35) |
+
+The gains don't add up: once the frame stays on the GPU there is little transfer left to speed up. With ntsc-rs
+off, GPU frames alone remove the effect's cost. With it on (default look, UHD) the fast transfers still save
+~5 ms per frame on the GPU path (the banded 8-bit download, buffers kept between frames: D 19.4 s, range
+19.35-20.4 over 5 runs, vs C 20.9 s, 18.9-21.9); at 1080p it's within noise. The CPU path (AMD / Intel, macOS,
+`NTSCRT_OFX_GPU=0`) gets the fast transfers' full gain. Raw results: `C:/ntb/w7s-bench/` on the test machine.

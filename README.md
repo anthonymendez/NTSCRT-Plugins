@@ -211,8 +211,11 @@ Building from source instead: see [Build from source](#build-from-source) below,
   banding.
 - **GPU frames on NVIDIA only:** with an NVIDIA GPU on Windows, Resolve's frames stay on the GPU (no copy
   through the CPU, unless ntsc-rs / Digital video / Screen Loop need the picture); with AMD or Intel GPUs
-  (Resolve's OpenCL mode) and on macOS, Resolve hands the effect CPU frames as before. `NTSCRT_OFX_GPU=0` turns
-  the GPU frames off ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md), details in
+  (Resolve's OpenCL mode) and on macOS, Resolve hands the effect CPU frames as before (with the faster CPU
+  transfers: about half the time GPU frames save, e.g. a UHD *Clean CRT* frame costs ~15 ms instead of ~32 ms,
+  where GPU frames make it free). The default look is bound by ntsc-rs on the CPU (~50 ms per UHD frame,
+  ~13 ms at 1080p) either way. `NTSCRT_OFX_GPU=0` turns the GPU frames off
+  ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md), details and measurements in
   [docs/dev/HOST-GPU.md](docs/dev/HOST-GPU.md)).
 - **Non-square pixels** (anamorphic media) are processed as square, with a warning on the effect.
 - **Installers aren't code-signed or notarized** yet (see the extra click under [Install](#install)).

@@ -134,6 +134,14 @@ written but not yet built.
   the default look ~55 ms instead of ~69 ms (most of it is the NTSC signal), 1080p *Clean CRT* ~2.1 ms instead
   of ~4.8 ms (median of 300 frames; Ryzen 9 9950X3D, RTX 5090). `NTSCRT_FAST_TRANSFER=0` brings back the old
   path for comparison.
+- **Rendering speed in Resolve, both of the above together** (300-frame render-queue jobs, Windows, RTX 5090,
+  Ryzen 9 9950X3D, Resolve Studio 21.1.2 in CUDA mode; time the effect adds over the same job without it,
+  median of 3-5 runs): UHD default look 83 -> 55 ms per frame (the faster transfers alone 70, GPU frames
+  alone 60); UHD *Clean CRT* and NTSC off 32 -> nothing measurable (transfers alone 15; the job takes as long as
+  without the effect, to Resolve's half-second job timing); 1080p default look 23 -> 18 ms, *Clean CRT* 12 -> 3 ms. On the GPU path the faster
+  transfers still help where the frame comes down to the CPU (the 8-bit picture for ntsc-rs, titles in
+  *Clip* mode); AMD / Intel GPUs and macOS, which get CPU frames, get the faster transfers. Pictures are
+  the same as 0.5.0-rc.3's, byte for byte on the CPU path.
 - **Screen Loop seeks:** the loop keeps checkpoints of what it has rendered (every 30 frames and at each window
   start, within 256 MB of GPU memory per effect, `NTSCRT_SCREENLOOP_CHECKPOINT_MB`), so a jump back, or to a
   frame near one rendered before, resumes from the closest one instead of re-running the loop from its window
@@ -224,6 +232,10 @@ written but not yet built.
   settings.
 
 ### Developer
+- `make_previews_resolve.py` / `make_presets_gallery.py` render an animated preset's frames once and throw them
+  away before the real capture: Resolve takes the keyframes the plug-in writes in pieces during the first
+  render, so frames rendered before the last piece kept a half-keyed look (V Hold glitch differed from
+  `ntscrt-cli` in about two runs of three, on v0.5.0-rc.3 too, CPU and GPU path alike).
 - `test_ofx` keeps its log, "debug logging for all effects" switch and preset files in names of its own per
   process: copies running at once (two build dirs' ctest, parallel agents) failed each other's log and switch
   checks (in 4 parallel copies, every run failed; now none of 20).
