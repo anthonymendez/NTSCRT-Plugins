@@ -227,3 +227,16 @@ gains `ntsc` (informational, part of `cpu_stages`). No ABI change of the core.
 **Reason.** Phase 1 of the GPU port of ntsc-rs (docs/dev/NTSC-GPU.md): the pipeline asks the stage for the
 frame's plan and runs it on the GPU when every pass is implemented; the parity harness compares the two paths
 pass by pass.
+
+## 2026-11-12 — agent W — `core/stages/stages.h` (NtscStage), `rust/ntscrs-capi` C ABI
+
+**Change.** `NtscStage::gpu_plan` gains a defaulted last parameter `bool tables = true` and `NtscStage` a
+method `void gpu_tables(NtscGpuPlan &) const` (the plan's row seeds, row shifts and speckle lists; with
+`tables = false` the caller adds them, e.g. on another thread). `NtscGpuPlan` (`ntsc_gpu.h`) gains the tables
+and their frame arguments. The shim implements `ntsc_gpu_row_shifts` / `ntsc_gpu_speckles` (stubs before;
+layouts unchanged, `NtscGpuRowShift::transient_intensity` renamed `intensity` with a per-stage meaning), adds
+`ntsc_gpu_simd_lanes`, pass kinds 9-12, `NTSC_GPU_SEEDS_TRACKING` and `NTSC_GPU_SHIFT_NONE`. No ABI change of
+the core.
+
+**Reason.** Phases 2-3 of the GPU port of ntsc-rs (docs/dev/NTSC-GPU.md): every stage on the GPU; the tables'
+CPU time overlaps the picture's upload.

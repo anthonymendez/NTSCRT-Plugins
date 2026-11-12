@@ -76,6 +76,9 @@ written but not yet built.
   colour passes so far (the bundled *Mild VHS* runs entirely on it: about 3.5 ms instead of 40 ms of ntsc-rs per
   UHD frame on an RTX 5090); frames that use the noise or VHS-distortion passes, Screen Loop, a Mac or a
   software GPU stay on ntsc-rs. See docs/dev/NTSC-GPU.md.
+- The experimental GPU NTSC signal (`NTSCRT_NTSC_GPU=1`) now covers every ntsc-rs setting: noise, snow, head
+  switching, tracking noise, chroma delay and edge wave too, still bit for bit the same pictures. All bundled
+  presets and the default look run entirely on the GPU (Screen Loop, a Mac or a software GPU still use ntsc-rs).
 
 ### Changed
 - **Glitch** and **Digital video** (with Datamosh) past the first minute of an effect look slightly different
