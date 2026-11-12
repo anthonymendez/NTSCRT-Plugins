@@ -167,6 +167,16 @@ migrated). NTSCRT-Plugins extensions, all optional:
   `hostparams/src/params.cpp` (scripts that parse it follow); bundled presets can be listed without a core
   instance (`ntscrt::host::bundled_presets_json(resource_dir)`, same JSON as `ntscrt_bundled_presets_json`).
   No ABI change. FxPlug's hidden *Base Look* / *Base Screen Loop* params (ids 8, 9) are kept but no longer read.
+- 2026-11-11, agent R (host GPU frames), `ntscrt.h`: appended `ntscrt_host_gpu_api`, `ntscrt_host_gpu`,
+  `ntscrt_gpu_image`, the status `NTSCRT_ERR_HOST_GPU` (6, a macro so the enum is untouched),
+  `ntscrt_host_gpu_supported`, `ntscrt_render_host_gpu`, `ntscrt_host_gpu_read` / `_write` and
+  `ntscrt_last_timings` (ABI version unchanged: additive; existing functions unchanged). Reason: Resolve hands
+  OpenFX plug-ins CUDA (Windows) / Metal (macOS) images when they ask; rendering them without a trip through CPU
+  memory needs the core to copy GPU to GPU into its own device (docs/dev/HOST-GPU.md). `core/src/ntscrt.cpp`:
+  `render_once` takes an optional direct GPU source (used when no CPU stage is on) and times its phases; the
+  shared renderer and the instance's GPU state are reachable from other façade files through the new private
+  `core/src/facade.h`; `ntscrt_instance` gains the bridge and the phase times. New files only otherwise
+  (`core/src/host_gpu*.{h,cpp,mm}`, `phase_times.h`, `core/src/shaders/hostgpu_*.slang`, `tests/hostgpu/`).
 
 ## 2026-11-12 — agent Q (fast transfer) — `core/gpu/gpu.h`, `core/stages/stages.h`
 
@@ -188,3 +198,18 @@ buffer before converting it, an intermediate CPU picture before every upload (an
 touches the frame), allocations per frame. `write` / `read` let the façade convert straight into upload memory
 and straight out of readback memory; `cuts` tells it when the crop would change the picture (then the CPU
 picture is needed). No ABI change; pixels are byte-identical (docs: CHANGELOG, `bench_transfer --dump`).
+
+## 2026-11-12 — agent S (both combined) — `core/src/facade.h`, `core/src/phase_times.h` (private)
+
+**Change.** One direct-source abstraction and one phase clock for both: `facade::DirectSrc` (source size,
+whether it applies the crop itself, and `make(dev, mode, look, alpha, pool)` returning the picture texture or
+nullptr to fall back to `get_src`) replaces agent Q's `DirectSrc::put` and agent R's `DirectFn`; the CPU path's
+(`crops` false: used only when the crop cuts nothing; not with `NTSCRT_FAST_TRANSFER=0`) and the host GPU
+path's (`crops` true) are two instances of it. `PhaseTimes` (`phase_times.h`) is exclusive (nested scopes count
+in the innermost phase), gains `loop` (Screen Loop's camera) and `readback` (GPU -> CPU with its wait, split out
+of `out`) and the call's total; `ntscrt_last_timings` prints it and `testing::last_phases` sums it into agent Q's
+benchmark phases. `fast_transfer()`, `readback_bands()` and `for_row_blocks()` moved to `facade::` so
+`host_gpu.cpp` uses the banded `read` for its 8-bit download (`gpu-download`) and its transparent-frame read
+(`gpu-cpuconvert`). No ABI change.
+
+**Reason.** Both branches added a direct source and a phase clock at the same place in `render_once`.

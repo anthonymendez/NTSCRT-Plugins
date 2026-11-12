@@ -22,6 +22,8 @@
 #include "../stages/digital/parallel.h"
 #include "../stages/stages.h"
 #include "embedded_schema.h"
+#include "facade.h"
+#include "host_gpu.h"
 #include "pixel_convert.h"
 #include "testing.h"
 
@@ -132,47 +134,6 @@ size_t crop_hash(const json &look) {
     return c == look.end() ? 0 : std::hash<std::string>{}(c->dump());
 }
 
-// Wall time of one render call by phase (testing::PhaseTimes): time goes to
-// the current phase; a Phase scope switches to its own and back, so nested
-// scopes (Screen Loop's hooks) count once, in the innermost phase.
-enum PhaseId { kOther = -1, kConvertIn, kCpuStages, kUpload, kGpuStages, kReadback, kConvertOut, kPhases };
-struct PhaseClock {
-    using Clock = std::chrono::steady_clock;
-    double ms[kPhases] = {};
-    int cur = kOther;
-    Clock::time_point start, last;
-    void begin() {
-        std::fill(std::begin(ms), std::end(ms), 0.0);
-        cur = kOther;
-        start = last = Clock::now();
-    }
-    void to(int phase) {
-        const auto now = Clock::now();
-        if (cur != kOther) ms[cur] += std::chrono::duration<double, std::milli>(now - last).count();
-        last = now;
-        cur = phase;
-    }
-    testing::PhaseTimes result() const {
-        testing::PhaseTimes p;
-        p.convert_in = ms[kConvertIn];
-        p.cpu_stages = ms[kCpuStages];
-        p.upload = ms[kUpload];
-        p.gpu_stages = ms[kGpuStages];
-        p.readback = ms[kReadback];
-        p.convert_out = ms[kConvertOut];
-        p.total = std::chrono::duration<double, std::milli>(last - start).count();
-        return p;
-    }
-};
-struct Phase {
-    PhaseClock &c;
-    int prev;
-    Phase(PhaseClock &clock, int phase) : c(clock), prev(clock.cur) { c.to(phase); }
-    ~Phase() { c.to(prev); }
-    Phase(const Phase &) = delete;
-    Phase &operator=(const Phase &) = delete;
-};
-
 }  // namespace
 
 struct ntscrt_instance {
@@ -205,8 +166,10 @@ struct ntscrt_instance {
     LookStore looks;
     std::vector<uint8_t> spare_px;  // last frame's picture buffers, reused (fast_transfer)
     std::vector<float> spare_alpha;
-    PhaseClock clock;  // the last render call's phases (testing::last_phases)
-    testing::PhaseTimes phases;
+    // Host GPU frames (host_gpu.cpp): the bridge to the host's GPU memory, made
+    // on the first such render.
+    std::unique_ptr<hostgpu::Bridge> bridge;
+    PhaseTimes times;  // where the last render call's time went (ntscrt_last_timings, testing::last_phases)
 };
 
 namespace {
@@ -226,6 +189,7 @@ gpu::Backend pick_backend(ntscrt_gpu_backend b) {
 
 void drop_gpu(ntscrt_instance *inst) {
     // The stages and pooled textures belong to the device: they go first.
+    inst->bridge.reset();
     inst->tex_pool.clear();
     inst->howl.reset();
     inst->howl_crt.reset();
@@ -308,7 +272,20 @@ void simulate_device_lost(ntscrt_instance *inst, bool recreate_fails) {
     inst->test_lose_device = true;
     inst->test_recreate_fails = recreate_fails;
 }
-PhaseTimes last_phases(ntscrt_instance *inst) { return inst ? inst->phases : PhaseTimes{}; }
+PhaseTimes last_phases(ntscrt_instance *inst) {
+    PhaseTimes p;
+    if (!inst) return p;
+    const auto &t = inst->times;
+    using P = ntscrt::PhaseTimes;
+    p.convert_in = t.ms[P::In];
+    p.cpu_stages = t.ms[P::Digital] + t.ms[P::Ntsc];
+    p.upload = t.ms[P::Upload];
+    p.gpu_stages = t.ms[P::Downscale] + t.ms[P::Glitch] + t.ms[P::Crt] + t.ms[P::Loop];
+    p.readback = t.ms[P::Readback];
+    p.convert_out = t.ms[P::Out];
+    p.total = t.total_ms;
+    return p;
+}
 }  // namespace ntscrt::testing
 
 extern "C" {
@@ -390,18 +367,10 @@ namespace {
 //          device exists, else `cpu_img` (CPU stages only, out_w x out_h).
 //          `alpha` is NULL when it doesn't line up with the result (crop on).
 //          raw_w x raw_h: the source picture's size.
-using SourceFn = std::function<void(ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode)>;
-using EmitFn = std::function<void(const std::shared_ptr<gpu::Texture> &out_gpu, const ImageBGRA8 &cpu_img,
-                                  int raw_w, int raw_h, const std::vector<float> *alpha, AlphaMode mode)>;
-// Optional, for frames no CPU stage touches (no Digital, NTSC, crop or Screen
-// Loop): the source (w x h) converted straight into the upload texture
-// (`put`, as get_src would convert it), without a CPU picture in between.
-// put returns false when it couldn't (Clip mode with transparent pixels needs
-// the CPU picture's hole filling): get_src then runs as usual.
-struct DirectSrc {
-    int w = 0, h = 0;
-    std::function<bool(gpu::Device &dev, gpu::Texture &t, std::vector<float> &alpha, AlphaMode mode)> put;
-};
+// direct:  optional, the source straight on the GPU (facade::DirectSrc).
+using facade::DirectSrc;
+using facade::EmitFn;
+using facade::SourceFn;
 
 // Looks at other frames during one render call. Entries are dropped oldest
 // frame first past kMax, so a reference from look_at stays valid for at least
@@ -420,18 +389,18 @@ bool crt_shader_on(const json &look) {
 // hosts (the shader's last pass, supersampling and placement keep their
 // precision instead of being quantized to 1/255), BGRA8 for 8-bit ones.
 // Everything before the CRT stage stays 8-bit: that's where the look is defined.
-gpu::Format output_format(bool high_precision_host) {
+}  // namespace
+gpu::Format facade::output_format(bool high_precision_host) {
     static const bool force8 = [] {
         const char *e = std::getenv("NTSCRT_OUTPUT_8BIT");
         return e && *e && *e != '0';
     }();
     return high_precision_host && !force8 ? gpu::Format::RGBA16F : gpu::Format::BGRA8;
 }
-
 // NTSCRT_FAST_TRANSFER=0: the 0.5.0-rc.3 transfer path (A/B testing): upload
 // from the CPU picture with upload(), read back into a buffer with download()
 // and convert from there, new picture buffers every frame.
-bool fast_transfer() {
+bool facade::fast_transfer() {
     static const bool on = [] {
         const char *e = std::getenv("NTSCRT_FAST_TRANSFER");
         return !(e && *e == '0');
@@ -444,7 +413,7 @@ bool fast_transfer() {
 // PCIe 5: 1-4 bands are as fast as each other, more get slower: smaller
 // conversion jobs on the thread pool. On slower links the overlap helps more.)
 // NTSCRT_READBACK_BANDS=N sets the count (1 = no overlap).
-int readback_bands(size_t bytes) {
+int facade::readback_bands(size_t bytes) {
     static const int forced = [] {
         const char *e = std::getenv("NTSCRT_READBACK_BANDS");
         return e && *e ? std::atoi(e) : 0;
@@ -453,18 +422,11 @@ int readback_bands(size_t bytes) {
     return int(std::clamp<size_t>(bytes / (size_t(16) << 20), 1, 8));
 }
 
-// fn(y) for each of h rows of row_bytes: on the thread pool when large
-// (blocks of rows, so each task is a decent memcpy).
-template <class Fn> void for_row_blocks(int h, size_t row_bytes, Fn &&fn) {
-    if (size_t(h) * row_bytes < (size_t(1) << 20)) {
-        for (int y = 0; y < h; ++y) fn(y);
-        return;
-    }
-    constexpr int kRows = 8;
-    digital::parallel_for((h + kRows - 1) / kRows, [&](int b) {
-        for (int y = b * kRows, e = std::min(h, y + kRows); y < e; ++y) fn(y);
-    });
-}
+namespace {
+using facade::fast_transfer;
+using facade::for_row_blocks;
+using facade::output_format;
+using facade::readback_bands;
 
 // out_fmt: output_format() for the host picture; used when the CRT shader is
 // on (its bypass is an 8-bit picture anyway, kept exactly as before).
@@ -473,6 +435,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
                           gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit,
                           const DirectSrc *direct_src) {
     const json &look = *look_p;
+    PhaseTimes &pt = inst->times;
     const std::string_view look_text = args->look_json ? args->look_json : "{}";
     const AlphaMode mode = alpha_mode(look);
     const bool premult = args->source_premultiplied != 0;
@@ -511,7 +474,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         if (!im) return nullptr;
         ImageBGRA8 raw, cropped;
         {
-            Phase ph(inst->clock, kConvertIn);
+            PhaseScope ps(pt, PhaseTimes::In);
             to_bgra8(*im, raw, nullptr, mode, premult);
         }
         if (args->release_source) args->release_source(args->user, im);
@@ -536,17 +499,17 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         }
     } keep{inst, img, alpha};
     if (fast_transfer()) alpha = std::move(inst->spare_alpha);
-    // The source goes straight into the upload texture (below) when nothing
-    // on the CPU needs the picture.
-    const bool direct = direct_src && fast_transfer() && inst->dev && !inst->test_lose_device &&
+    // The source goes straight onto the GPU (direct_src->make, below) when no
+    // CPU stage needs the picture.
+    const bool direct = direct_src && inst->dev && !inst->test_lose_device &&
                         !inst->howl->active(args->feedback_json ? &feedback : nullptr) &&
                         !inst->digital.active(look) && !inst->ntsc.active(look) &&
-                        !Crop::cuts(look, direct_src->w, direct_src->h);
+                        (direct_src->crops || !Crop::cuts(look, direct_src->w, direct_src->h));
     auto convert_source = [&] {
         ImageBGRA8 raw;
         if (fast_transfer()) raw.px = std::move(inst->spare_px);
         {
-            Phase ph(inst->clock, kConvertIn);
+            PhaseScope ps(pt, PhaseTimes::In);
             get_src(raw, alpha, mode);
         }
         raw_w = raw.width;
@@ -555,27 +518,36 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         if (fast_transfer() && raw.px.capacity() > inst->spare_px.capacity()) inst->spare_px = std::move(raw.px);
     };
     if (direct) {
-        raw_w = img.width = direct_src->w;  // (no pixels: img is only read on the CPU-only path)
+        // No pixels in img (only read on the CPU-only path); its size becomes the
+        // direct picture's (the crop's) once made.
+        raw_w = img.width = direct_src->w;
         raw_h = img.height = direct_src->h;
     } else {
         convert_source();
     }
-    const std::vector<float> *aligned_alpha = img.width == raw_w && img.height == raw_h ? &alpha : nullptr;
+    // The source alpha, when it lines up with the result (no crop).
+    auto aligned_alpha = [&]() -> const std::vector<float> * {
+        return img.width == raw_w && img.height == raw_h ? &alpha : nullptr;
+    };
 
     if (!inst->dev) {
         // No GPU: CPU stages only (degraded, but never a black frame).
-        {
-            Phase ph(inst->clock, kCpuStages);
-            if (inst->digital.active(look)) inst->digital.process(img, ctx);
-            if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
+        if (inst->digital.active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Digital);
+            inst->digital.process(img, ctx);
         }
+        if (inst->ntsc.active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Ntsc);
+            inst->ntsc.process(img, ctx);
+        }
+        PhaseScope ps(pt, PhaseTimes::Out);
         if (img.width != out_w || img.height != out_h) {
             // Cropped: placed like the CRT bypass would, so all of dst is written.
             ImageBGRA8 boxed;
             letterbox(img, out_w, out_h, boxed);
             emit(nullptr, boxed, raw_w, raw_h, nullptr, mode);
         } else {
-            emit(nullptr, img, raw_w, raw_h, aligned_alpha, mode);
+            emit(nullptr, img, raw_w, raw_h, aligned_alpha(), mode);
         }
         if (!inst->gpu_gone.empty()) return fail(inst, NTSCRT_ERR_GPU, inst->gpu_gone);
         return NTSCRT_OK;
@@ -604,7 +576,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
     //   Screen Loop on:  crop -> upload -> camera -> download -> NTSC -> upload -> Downscale
     //                    -> Glitch -> CRT; Digital is OFF whenever Screen Loop is on.
     auto upload = [&](const ImageBGRA8 &im) {
-        Phase ph(inst->clock, kUpload);
+        PhaseScope ps(pt, PhaseTimes::Upload, &dev);
         auto t = acquire({im.width, im.height, gpu::Format::BGRA8, false, false});  // only ever read
         if (fast_transfer()) {
             // Straight into the GPU's upload memory, rows copied on the thread pool.
@@ -620,7 +592,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         return t;
     };
     auto download = [&](const gpu::Texture &t) {
-        Phase ph(inst->clock, kReadback);
+        PhaseScope ps(pt, PhaseTimes::Readback);
         ImageBGRA8 im;
         im.resize(t.desc().width, t.desc().height);
         dev.download(t, im.px.data(), ptrdiff_t(im.width) * 4);  // waits for the work before it
@@ -652,7 +624,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             const auto pin = look_ptr(p.frame);
             FrameContext cn = at(p.ntsc_frame - 1, pin);  // ntsc_frame(cn) == p.ntsc_frame
             if (inst->ntsc.active(*pin)) {
-                Phase ph(inst->clock, kCpuStages);
+                PhaseScope ps(pt, PhaseTimes::Ntsc);
                 inst->ntsc.process(im, cn);
             }
             return gpu_half(im, pin, p);
@@ -702,50 +674,74 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         };
         inst->howl->set_hooks(std::move(h));  // lambdas capture this call's locals: re-set every render
 
-        Phase ph(inst->clock, kGpuStages);  // upload / download / NTSC inside switch phases
-        auto cam = inst->howl->camera(upload(img), feedback, ctx);
+        std::shared_ptr<gpu::Texture> cam;
+        {
+            // The loop's own uploads, readbacks and NTSC passes count as theirs.
+            PhaseScope ps(pt, PhaseTimes::Loop, &dev);
+            cam = inst->howl->camera(upload(img), feedback, ctx);
+        }
         ImageBGRA8 im = download(*cam);
         if (inst->ntsc.active(look)) {
-            Phase pc(inst->clock, kCpuStages);
+            PhaseScope ps(pt, PhaseTimes::Ntsc);
             inst->ntsc.process(im, ctx);
         }
-        chain = inst->downscale->run(upload(im), ctx);
-        if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
+        auto up = upload(im);
+        {
+            PhaseScope ps(pt, PhaseTimes::Downscale, &dev);
+            chain = inst->downscale->run(up, ctx);
+        }
+        up.reset();
+        if (inst->glitch->active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Glitch, &dev);
+            chain = inst->glitch->run(chain, ctx);
+        }
+        PhaseScope ps(pt, PhaseTimes::Loop, &dev);
         inst->howl->after_frame(*chain, feedback, ctx);  // feeds the loop the chain input
     } else {
-        {
-            Phase ph(inst->clock, kCpuStages);
-            if (inst->digital.active(look)) inst->digital.process(img, ctx);
-            ctx.line_height = inst->digital.active(look) ? digital::chain_line_height(look) : 1;  // One field
-            if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
+        if (inst->digital.active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Digital);
+            inst->digital.process(img, ctx);
         }
-        std::shared_ptr<gpu::Texture> up;
+        ctx.line_height = inst->digital.active(look) ? digital::chain_line_height(look) : 1;  // One field
+        if (inst->ntsc.active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Ntsc);
+            inst->ntsc.process(img, ctx);
+        }
+        std::shared_ptr<gpu::Texture> pic;
         if (direct) {
-            up = acquire({raw_w, raw_h, gpu::Format::BGRA8, false, false});
-            bool ok;
-            {
-                Phase ph(inst->clock, kConvertIn);
-                ok = direct_src->put(dev, *up, alpha, mode);
-            }
-            if (!ok) {  // needs the hole filling: the usual way
-                up.reset();
-                convert_source();
+            PhaseScope ps(pt, PhaseTimes::In, &dev);
+            pic = direct_src->make(dev, mode, look, alpha, facade::PoolFn(acquire));
+            if (pic) {
+                img.width = pic->desc().width;
+                img.height = pic->desc().height;
             }
         }
-        if (!up) up = upload(img);
-        Phase ph(inst->clock, kGpuStages);
-        chain = inst->downscale->run(up, ctx);
-        if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
+        if (!pic) {
+            if (direct) convert_source();  // needs the hole filling: the usual way
+            pic = upload(img);
+        }
+        {
+            PhaseScope ps(pt, PhaseTimes::Downscale, &dev);
+            chain = inst->downscale->run(pic, ctx);
+        }
+        pic.reset();
+        if (inst->glitch->active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Glitch, &dev);
+            chain = inst->glitch->run(chain, ctx);
+        }
     }
     const gpu::Format fmt = crt_shader_on(look) ? out_fmt : gpu::Format::BGRA8;
     auto out = acquire({out_w, out_h, fmt, true, true});
     {
-        Phase ph(inst->clock, kGpuStages);
+        PhaseScope ps(pt, PhaseTimes::Crt, &dev);
         inst->crt->render(*chain, *out, ctx);
     }
     chain.reset();
     // No finish() here: emit's download (or the Metal path's own finish) waits.
-    emit(out, img, raw_w, raw_h, aligned_alpha, mode);
+    {
+        PhaseScope ps(pt, PhaseTimes::Out);
+        emit(out, img, raw_w, raw_h, aligned_alpha(), mode);
+    }
     inst->device_resets = 0;  // a good GPU frame
 
     // The CRT shader couldn't run: the frame shows the picture without it.
@@ -790,28 +786,44 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
 
 }  // namespace
 
+ntscrt_status facade::render(ntscrt_instance *inst, const ntscrt_render_args *args, int out_w, int out_h,
+                             gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit,
+                             const DirectSrc *direct) {
+    return render_impl(inst, args, out_w, out_h, out_fmt, get_src, emit, direct);
+}
+ntscrt_status facade::fail(ntscrt_instance *inst, ntscrt_status s, std::string msg) {
+    return ::fail(inst, s, std::move(msg));
+}
+gpu::Device *facade::device(ntscrt_instance *inst) { return inst->dev.get(); }
+std::unique_ptr<hostgpu::Bridge> &facade::bridge(ntscrt_instance *inst) { return inst->bridge; }
+PhaseTimes &facade::times(ntscrt_instance *inst) { return inst->times; }
+
 extern "C" {
+
+const char *ntscrt_last_timings(ntscrt_instance *inst) { return inst ? inst->times.text.c_str() : ""; }
 
 ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args *args, const ntscrt_image *src,
                                 ntscrt_image *dst) {
     if (!inst || !args || !src || !dst || !src->data || !dst->data) return NTSCRT_ERR_INVALID_ARG;
     const bool premult = args->source_premultiplied != 0;
     const bool high = dst->format == NTSCRT_RGBA16 || dst->format == NTSCRT_RGBA16F || dst->format == NTSCRT_RGBA32F;
-    inst->clock.begin();
+    PhaseTimes &pt = inst->times;
+    pt.clear("cpu");
     struct Done {  // the phases, however render_impl returns
-        ntscrt_instance *i;
-        ~Done() {
-            i->clock.to(kOther);
-            i->phases = i->clock.result();
-        }
-    } done{inst};
-    const DirectSrc direct{src->width, src->height,
-                           [&](gpu::Device &dev, gpu::Texture &t, std::vector<float> &alpha, AlphaMode mode) {
+        PhaseTimes &t;
+        ~Done() { t.finish(); }
+    } done{pt};
+    // The host picture converted straight into upload memory (not with
+    // NTSCRT_FAST_TRANSFER=0: the CPU picture is always made then).
+    const DirectSrc direct{src->width, src->height, false,
+                           [&](gpu::Device &dev, AlphaMode mode, const json &, std::vector<float> &alpha,
+                               const facade::PoolFn &pool) -> std::shared_ptr<gpu::Texture> {
+                               auto t = pool({src->width, src->height, gpu::Format::BGRA8, false, false});
                                bool ok = true;
-                               dev.write(t, [&](uint8_t *rows, ptrdiff_t pitch) {
+                               dev.write(*t, [&](uint8_t *rows, ptrdiff_t pitch) {
                                    ok = to_bgra8_rows(*src, rows, pitch, &alpha, mode, premult);
                                });
-                               return ok;
+                               return ok ? t : nullptr;
                            }};
     return render_impl(
         inst, args, dst->width, dst->height, output_format(high),
@@ -821,7 +833,6 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
         [&](const std::shared_ptr<gpu::Texture> &out, const ImageBGRA8 &cpu_img, int raw_w, int raw_h,
             const std::vector<float> *alpha, AlphaMode mode) {
             if (!out) {
-                Phase ph(inst->clock, kConvertOut);
                 from_bgra8(cpu_img, alpha, *dst, mode, premult);
                 return;
             }
@@ -832,11 +843,11 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
                 // (no copy of the result), the next bands' transfer meanwhile.
                 const bool f16 = out->desc().format == gpu::Format::RGBA16F;
                 const int w = out->desc().width;
-                Phase ph(inst->clock, kReadback);
+                PhaseScope ps(pt, PhaseTimes::Readback);
                 inst->dev->read(
                     *out,
                     [&](const uint8_t *rows, ptrdiff_t pitch, int y0, int y1) {
-                        Phase pc(inst->clock, kConvertOut);
+                        PhaseScope pc(pt, PhaseTimes::Out);
                         if (f16) from_rgba16f_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
                         else from_bgra8_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
                     },
@@ -847,10 +858,9 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
                 std::vector<uint16_t> &px = inst->result16;
                 px.resize(size_t(dst->width) * dst->height * 4);  // fully overwritten by the download
                 {
-                    Phase ph(inst->clock, kReadback);
+                    PhaseScope ps(pt, PhaseTimes::Readback);
                     inst->dev->download(*out, px.data(), ptrdiff_t(dst->width) * 8);
                 }
-                Phase ph(inst->clock, kConvertOut);
                 from_rgba16f(px.data(), dst->width, dst->height, same ? alpha : nullptr, *dst, mode, premult);
                 return;
             }
@@ -859,13 +869,12 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
             result.height = dst->height;
             result.px.resize(size_t(dst->width) * dst->height * 4);  // fully overwritten by the download
             {
-                Phase ph(inst->clock, kReadback);
+                PhaseScope ps(pt, PhaseTimes::Readback);
                 inst->dev->download(*out, result.px.data(), ptrdiff_t(dst->width) * 4);
             }
-            Phase ph(inst->clock, kConvertOut);
             from_bgra8(result, same ? alpha : nullptr, *dst, mode, premult);
         },
-        &direct);
+        fast_transfer() ? &direct : nullptr);
 }
 
 // Metal path (FxPlug): host textures in and out, on the device given at create.
@@ -940,6 +949,11 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         else dev.finish();
     };
     const gpu::Format df = dst->desc().format;
+    inst->times.clear("metal-texture");
+    struct Done {
+        ntscrt_instance *i;
+        ~Done() { i->times.finish(); }
+    } done{inst};
     return render_impl(inst, args, dw, dh, output_format(df == gpu::Format::RGBA16F || df == gpu::Format::RGBA32F),
                        get_src, emit);
 }

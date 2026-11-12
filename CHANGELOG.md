@@ -21,6 +21,14 @@ Installs are now checked against the release's checksums. Still Resolve-only: th
 written but not yet built.
 
 ### Added
+- **Frames stay on the GPU in Resolve on NVIDIA GPUs (Windows):** the effect now takes Resolve's frames in GPU
+  memory (CUDA) instead of having Resolve copy each one to the CPU and back. With ntsc-rs off (e.g. *Clean CRT*)
+  nothing goes through the CPU any more; with it on (the default look) only the 8-bit picture ntsc-rs works on
+  comes down. A UHD render of *Clean CRT* went from 12 s to under 3 s for 300 frames (as fast as without the
+  effect), the default look from 28 s to 22 s (ntsc-rs's CPU time is the rest). Same pictures as before, bit
+  for bit; on the Fusion page, 8-bit and half-float comps now get the CRT shader's
+  half-float result. AMD / Intel GPUs and macOS keep using CPU frames; `NTSCRT_OFX_GPU=0` turns it off
+  (docs/ENVIRONMENT.md). The plug-in's log says which path each frame took.
 - **Animated presets:** choosing *Glitch pop*, *15 second glitches* or another bundled look with upstream
   timeline keys now plays its animation. The keys become keyframes, evaluated as the NTSCRT app does (easing,
   step snapping, held toggles): on each moving control a key where its curve bends (Resolve draws straight lines
@@ -216,6 +224,16 @@ written but not yet built.
   settings.
 
 ### Developer
+- Host GPU frames (docs/dev/HOST-GPU.md): `ntscrt_render_host_gpu`, `ntscrt_host_gpu_read` / `_write`,
+  `ntscrt_host_gpu_supported` and `ntscrt_last_timings` in the C ABI (additions only). CUDA images are copied
+  GPU to GPU into the core's D3D11 device (textures registered with the host's CUDA context; the driver API is
+  loaded from `nvcuda.dll`, no CUDA toolkit); Metal written, compiled in CI, offered only with
+  `NTSCRT_OFX_GPU=1` until it has run on a Mac. Every log line has the render's path and phases
+  (`NTSCRT_PROFILE=1` separates GPU phases). Tests: `test_host_gpu` and `test_ofx` act as CUDA hosts and
+  compare against the CPU path (skipped without an NVIDIA driver); `run_resolve_tests.py --gpu-ab` compares a
+  CPU-path and a GPU-path Resolve session; `--only bench` is an Edit-page benchmark (300-frame render jobs, UHD
+  and 1080p, JSON lines). The Resolve runner copies the bundle with a fresh modification time so Resolve
+  describes it again.
 - Tests for long timelines: `test_ofx` applies *5 second blips* an hour into a 60 fps timeline on a mock
   Adjustment Clip (Resolve's made-up 0..1999 range) and on a clip starting at frame 216000 (keyframes, apply
   time, first render, Glitch edit, playback and seeks against renders after a purge), compares the edits an hour

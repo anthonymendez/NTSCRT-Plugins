@@ -24,6 +24,7 @@
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -196,6 +197,87 @@ bool wrap_padded(OFX::Image &im, const OfxRectI &r, ntscrt_image &out, std::vect
         uint8_t *dst = buf.data() + size_t(r.y2 - 1 - y) * size_t(out.row_bytes) + size_t(x1 - r.x1) * pb;
         std::memcpy(dst, src, size_t(x2 - x1) * pb);
     }
+    return true;
+}
+
+// ---- host GPU frames (OpenFX CUDA / Metal render) ---------------------------
+// NTSCRT_OFX_GPU=0 (or off): don't offer GPU render to the host, so it hands over
+// CPU images as before (A/B tests, a problem with a driver). NTSCRT_OFX_GPU=1 also
+// offers Metal on macOS, which is off by default until it has run on a Mac (CUDA is
+// on by default). Read at load.
+int gpu_env() {  // -1 unset, 0 off, 1 on
+    static const int v = [] {
+        const char *e = std::getenv("NTSCRT_OFX_GPU");
+        if (!e || !*e) return -1;
+        const std::string s(e);
+        return (s == "0" || s == "off" || s == "OFF" || s == "false") ? 0 : 1;
+    }();
+    return v;
+}
+bool gpu_render_allowed() { return gpu_env() != 0; }
+bool offer_gpu(ntscrt_host_gpu_api api) {
+    if (gpu_env() == 0 || !ntscrt_host_gpu_supported(api)) return false;
+    return api == NTSCRT_HOST_GPU_CUDA || gpu_env() == 1;
+}
+
+// The host's GPU API for this render, if it handed over GPU images.
+ntscrt_host_gpu host_gpu_of(const OFX::RenderArguments &args) {
+    ntscrt_host_gpu h{NTSCRT_HOST_GPU_NONE, nullptr};
+    if (args.isEnabledCudaRender) h = {NTSCRT_HOST_GPU_CUDA, args.pCudaStream};
+    else if (args.isEnabledMetalRender) h = {NTSCRT_HOST_GPU_METAL, args.pMetalCmdQ};
+    else if (args.isEnabledOpenCLRender) h = {NTSCRT_HOST_GPU_OPENCL, args.pOpenCLCmdQ};
+    return h;
+}
+const char *api_name(ntscrt_host_gpu_api a) {
+    switch (a) {
+    case NTSCRT_HOST_GPU_CUDA: return "cuda";
+    case NTSCRT_HOST_GPU_METAL: return "metal";
+    case NTSCRT_HOST_GPU_OPENCL: return "opencl";
+    default: return "cpu";
+    }
+}
+
+// An OFX image in GPU memory as the core's ntscrt_gpu_image: the whole image
+// (its bounds), memory order bottom row first. false: not RGBA / unsupported
+// depth / rows not positively strided.
+bool gpu_view(OFX::Image &im, ntscrt_gpu_image &out) {
+    if (im.getPixelComponents() != OFX::ePixelComponentRGBA) return false;
+    const ntscrt_pixel_format f = to_format(im.getPixelDepth());
+    if (int(f) < 0 || !im.getPixelData() || im.getRowBytes() <= 0) return false;
+    const OfxRectI b = im.getBounds();
+    if (b.x2 <= b.x1 || b.y2 <= b.y1) return false;
+    out = ntscrt_gpu_image{b.x2 - b.x1, b.y2 - b.y1, ptrdiff_t(im.getRowBytes()), f, 1, im.getPixelData(), 0};
+    return true;
+}
+
+// A GPU image (bounds b) read into CPU memory and padded / cut to `r` like
+// wrap_padded: `out` views `buf` (top row first).
+bool read_gpu_padded(ntscrt_instance *inst, const ntscrt_host_gpu &host, OFX::Image &im, const OfxRectI &r,
+                     ntscrt_image &out, std::vector<uint8_t> &buf) {
+    ntscrt_gpu_image g{};
+    if (!gpu_view(im, g) || r.x2 <= r.x1 || r.y2 <= r.y1) return false;
+    const size_t pb = pixel_bytes(g.format);
+    std::vector<uint8_t> whole(size_t(g.width) * g.height * pb);
+    ntscrt_image w{g.width, g.height, ptrdiff_t(size_t(g.width) * pb), g.format, whole.data()};
+    if (ntscrt_host_gpu_read(inst, &host, &g, &w) != NTSCRT_OK) return false;
+    const OfxRectI b = im.getBounds();
+    out.width = r.x2 - r.x1;
+    out.height = r.y2 - r.y1;
+    out.format = g.format;
+    out.row_bytes = ptrdiff_t(size_t(out.width) * pb);
+    if (r.x1 == b.x1 && r.y1 == b.y1 && r.x2 == b.x2 && r.y2 == b.y2) {
+        buf = std::move(whole);
+        out.data = buf.data();
+        return true;
+    }
+    buf.assign(size_t(out.height) * size_t(out.row_bytes), 0);
+    out.data = buf.data();
+    const int x1 = std::max(r.x1, b.x1), x2 = std::min(r.x2, b.x2);
+    const int y1 = std::max(r.y1, b.y1), y2 = std::min(r.y2, b.y2);
+    for (int y = y1; y < y2 && x1 < x2; ++y)  // y: OFX row (bottom-up); both buffers are top-down
+        std::memcpy(buf.data() + size_t(r.y2 - 1 - y) * size_t(out.row_bytes) + size_t(x1 - r.x1) * pb,
+                    whole.data() + size_t(b.y2 - 1 - y) * size_t(w.row_bytes) + size_t(x1 - b.x1) * pb,
+                    size_t(x2 - x1) * pb);
     return true;
 }
 }  // namespace
@@ -847,8 +929,10 @@ private:
     // NTSCRT_OFX_TEST_PRESET_FILE names exists, a development copy (NTSCRT_OFX_DEV_BUNDLE)
     // applies the bundled look its first line names to each new effect whose Preset menu is
     // still "(none)", as if chosen there with the playhead at the time on its second line
-    // (default 0); a third line "guards=1" adds guard keys (preset_keys).
-    // tests/resolve/run_resolve_tests.py (test "position") writes it.
+    // (default 0); a third line "guards=1" adds guard keys (preset_keys). The third line may
+    // also hold "<param name>=<number>" words set after the look (bool / int / float / choice
+    // index), and the first line may be "(defaults)": no look, just those values.
+    // tests/resolve/run_resolve_tests.py (tests "position", "bench") writes it.
     void apply_test_preset() {
         const char *e = std::getenv("NTSCRT_OFX_TEST_PRESET_FILE");
         if (!e || !*e || !dev_copy()) return;
@@ -862,6 +946,31 @@ private:
             int cur = 0;
             preset_->getValue(cur);
             if (cur != 0) return;
+            const auto overrides = [&] {
+                std::istringstream words(opts);
+                std::string w, said;
+                while (words >> w) {
+                    const auto eq = w.find('=');
+                    if (eq == std::string::npos || w.compare(0, eq, "guards") == 0) continue;
+                    auto it = by_name_.find(w.substr(0, eq));
+                    if (it == by_name_.end()) continue;
+                    const double v = std::atof(w.c_str() + eq + 1);
+                    OFX::Param *q = params_[it->second];
+                    switch (g_.schema.params[it->second].type) {
+                    case PType::Bool: static_cast<OFX::BooleanParam *>(q)->setValue(v != 0); break;
+                    case PType::Int: static_cast<OFX::IntParam *>(q)->setValue(int(v)); break;
+                    case PType::Float: static_cast<OFX::DoubleParam *>(q)->setValue(v); break;
+                    case PType::Choice: static_cast<OFX::ChoiceParam *>(q)->setValue(int(v)); break;
+                    default: continue;
+                    }
+                    said += " " + w;
+                }
+                return said;
+            };
+            if (name == "(defaults)") {
+                dlog::write("instance #" + std::to_string(id_) + " test preset file: defaults with" + overrides());
+                return;
+            }
             for (size_t i = 0; i < g_.looks.size(); ++i) {
                 if (g_.looks[i].name != name || g_.looks[i].format) continue;
                 const double t = when.empty() ? 0.0 : std::atof(when.c_str());
@@ -870,11 +979,13 @@ private:
                 preset_->setValue(int(i + 1));
                 applying_ = false;
                 apply_preset(g_.looks[i].data, t, opts.find("guards=1") != std::string::npos);
+                const std::string set = overrides();
                 std::ostringstream o;
                 o.setf(std::ios::fixed);
                 o.precision(1);
                 o << "instance #" << id_ << " test preset file: applied \"" << name << "\" at t=" << t << " in "
-                  << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() << " ms";
+                  << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() << " ms"
+                  << (set.empty() ? "" : "; set" + set);
                 dlog::write(o.str());
                 return;
             }
@@ -1154,6 +1265,8 @@ private:
     bool had_error_ = false;
     int id_ = 0;
     long renders_ = 0, failures_ = 0;
+    std::string gpu_fallback_said_;  // the last reason the GPU path fell back to the CPU, logged once
+    bool gpu_first_logged_ = false;  // the first GPU render's details logged
     static int &instance_count() { static int n = 0; return n; }
     friend struct RenderCtx;
 };
@@ -1176,6 +1289,9 @@ struct RenderCtx {
     // (the core has no abort callback; a fetch is the slow part of a history
     // re-run). The stages that ran on missing frames are flushed afterwards.
     bool aborted = false;
+    // GPU render: fetched frames are in the host's GPU memory too; they're read
+    // into CPU memory (the core's temporal stages take CPU frames).
+    ntscrt_host_gpu gpu{NTSCRT_HOST_GPU_NONE, nullptr};
 
     static const ntscrt_image *fetch(void *u, int64_t frame) {
         auto *c = static_cast<RenderCtx *>(u);
@@ -1194,7 +1310,12 @@ struct RenderCtx {
             std::unique_ptr<OFX::Image> im(c->fx->src_->fetchImage(t));
             if (!im) return nullptr;
             Live l{std::move(im), std::make_unique<ntscrt_image>(), {}};
-            if (!wrap_padded(*l.image, c->frame, *l.view, l.padded)) return nullptr;
+            if (c->gpu.api != NTSCRT_HOST_GPU_NONE) {
+                if (!read_gpu_padded(c->fx->inst_, c->gpu, *l.image, c->frame, *l.view, l.padded)) return nullptr;
+                l.image.reset();  // the copy is all the core reads
+            } else if (!wrap_padded(*l.image, c->frame, *l.view, l.padded)) {
+                return nullptr;
+            }
             const ntscrt_image *key = l.view.get();
             c->live[key] = std::move(l);
             return key;
@@ -1249,9 +1370,15 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
 
     OfxRectI win = dst->getBounds();
     const auto t0 = std::chrono::steady_clock::now();
+    // GPU render (the host passed CUDA / Metal memory): the images are only described
+    // here; the core copies them GPU to GPU. Otherwise CPU images, as always.
+    const ntscrt_host_gpu host = host_gpu_of(args);
+    const bool on_gpu = host.api != NTSCRT_HOST_GPU_NONE;
     ntscrt_image s{}, d{};
+    ntscrt_gpu_image gs{}, gd{};
     std::vector<uint8_t> src_padded;
-    if (!wrap(*dst, win, d) || !wrap_padded(*src, win, s, src_padded)) {
+    if (on_gpu ? !(gpu_view(*dst, gd) && gpu_view(*src, gs))
+               : (!wrap(*dst, win, d) || !wrap_padded(*src, win, s, src_padded))) {
         report_error("NTSCRT: unsupported image format or bounds");
         OFX::throwSuiteStatusException(kOfxStatErrImageFormat);
     }
@@ -1270,6 +1397,7 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
 
     const TimeRange range = host_range(args.time);
     RenderCtx ctx{this, range.origin, range.last, win, {}};
+    ctx.gpu = host;
 
     // Non-square pixels: the stages (Downscale height, crop ratios, CRT fit)
     // assume square ones, so an anamorphic source renders squeezed. Said once.
@@ -1311,7 +1439,50 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     if (ctx.animated) note_current_look(args.time, look);
     const size_t builds_before = look_builds_;
     const auto t_core = std::chrono::steady_clock::now();
-    ntscrt_status st = ntscrt_render_cpu(inst_, &ra, &s, &d);
+    ntscrt_status st;
+    std::string path;  // which path rendered: the core's (ntscrt_last_timings) plus the fallback, if any
+    if (!on_gpu) {
+        st = ntscrt_render_cpu(inst_, &ra, &s, &d);
+    } else {
+        const OfxRectI sb = src->getBounds();
+        if (!gpu_first_logged_) {
+            gpu_first_logged_ = true;
+            std::ostringstream o;
+            o << "instance #" << id_ << " first GPU render: " << api_name(host.api) << " queue=" << host.queue
+              << " src data=" << gs.data << " row_bytes=" << gs.row_bytes << " bounds=" << dlog::rect(sb)
+              << " dst data=" << gd.data << " row_bytes=" << gd.row_bytes << " bounds=" << dlog::rect(win)
+              << " depth=" << dlog::depth_name(src->getPixelDepth()) << " render window=" << dlog::rect(args.renderWindow);
+            dlog::write(o.str());
+        }
+        st = ntscrt_render_host_gpu(inst_, &ra, &host, &gs, sb.x1 - win.x1, sb.y1 - win.y1, &gd);
+        if (st == NTSCRT_ERR_HOST_GPU) {
+            // The GPU path can't be used here: the CPU path, the host's GPU images
+            // read into CPU memory and the result written back.
+            const std::string why = ntscrt_last_error(inst_);
+            if (why != gpu_fallback_said_) {
+                dlog::write("instance #" + std::to_string(id_) + " GPU path unavailable, rendering on the CPU path (" +
+                            api_name(host.api) + " images copied through CPU memory): " + why);
+                gpu_fallback_said_ = why;
+            }
+            const size_t pb = pixel_bytes(gd.format);
+            std::vector<uint8_t> out(size_t(gd.width) * gd.height * pb);
+            d = ntscrt_image{gd.width, gd.height, ptrdiff_t(size_t(gd.width) * pb), gd.format, out.data()};
+            if (!read_gpu_padded(inst_, host, *src, win, s, src_padded)) {
+                report_error(std::string("NTSCRT: can't read the host's GPU image: ") + ntscrt_last_error(inst_));
+                OFX::throwSuiteStatusException(kOfxStatFailed);
+            }
+            st = ntscrt_render_cpu(inst_, &ra, &s, &d);
+            if (st == NTSCRT_OK || st == NTSCRT_ERR_GPU || st == NTSCRT_ERR_MISSING_RESOURCE ||
+                st == NTSCRT_ERR_SOURCE_UNAVAILABLE) {
+                if (ntscrt_host_gpu_write(inst_, &host, &d, &gd) != NTSCRT_OK) {
+                    report_error(std::string("NTSCRT: can't write the host's GPU image: ") + ntscrt_last_error(inst_));
+                    OFX::throwSuiteStatusException(kOfxStatFailed);
+                }
+            }
+            path = std::string(api_name(host.api)) + "->cpu-fallback ";
+        }
+    }
+    path += ntscrt_last_timings(inst_);
     if (ctx.aborted) {
         // Frames were skipped: the Digital stream / Screen Loop history built
         // on stand-ins must not be reused. The host discards this frame.
@@ -1335,7 +1506,8 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
           << " src=" << dlog::rect(src->getBounds()) << " depth=" << dlog::depth_name(src->getPixelDepth())
           << " premult=" << ra.source_premultiplied << " status=" << int(st)
           << (st != NTSCRT_OK ? std::string(degraded ? " degraded=" : " error=") + err : std::string()) << " ms="
-          << std::chrono::duration_cast<std::chrono::milliseconds>(t_done - t0).count();
+          << std::fixed << std::setprecision(1) << std::chrono::duration<double, std::milli>(t_done - t0).count()
+          << std::defaultfloat << std::setprecision(6) << ' ' << path;
         if (debug) {
             // Per-phase timings (fetch = host images, look = reading every param, core = all stages)
             // and the look: in full whenever it changes, otherwise its hash.
@@ -1409,6 +1581,12 @@ void NtscrtFactory::describe(OFX::ImageEffectDescriptor &desc) {
         o << "NTSCRT " << NTSCRT_VERSION_STRING << (NtscrtFactory::is_dev_copy() ? " (dev copy, NTSCRT_OFX_DEV_BUNDLE)" : "")
           << " loaded; resources " << globals().res_dir << "; host "
           << (h ? h->hostName + " (" + h->hostLabel + ") " + h->versionLabel : std::string("?"));
+        if (h)
+            o << "; host GPU render: CUDA " << h->supportsCudaRender << " (streams " << h->supportsCudaStream
+              << "), OpenCL " << h->supportsOpenCLRender << ", Metal " << h->supportsMetalRender
+              << "; offered: " << (gpu_render_allowed() ? "" : "none (NTSCRT_OFX_GPU=0)")
+              << (offer_gpu(NTSCRT_HOST_GPU_CUDA) ? "CUDA" : "") << (offer_gpu(NTSCRT_HOST_GPU_METAL) ? "Metal" : "")
+              << (gpu_render_allowed() && !offer_gpu(NTSCRT_HOST_GPU_CUDA) && !offer_gpu(NTSCRT_HOST_GPU_METAL) ? "none" : "");
         dlog::write(o.str());
     }
     desc.setLabels("NTSCRT", "NTSCRT", "NTSCRT analog TV / VHS / CRT");
@@ -1438,10 +1616,16 @@ void NtscrtFactory::describe(OFX::ImageEffectDescriptor &desc) {
     // Glitch receiver and Screen Loop continue instead of re-simulating), but
     // correct in any order. Hosts without sequential rendering ignore it.
     desc.getPropertySet().propSetInt(kOfxImageEffectInstancePropSequentialRender, 2, false);
-    // GPU paths come later (Wave 2+): CPU only for now.
+    // GPU render: the host may hand over its CUDA (Windows) / Metal (macOS) images; the
+    // core copies them GPU to GPU into its own D3D11 / Metal device (ntscrt_render_host_gpu,
+    // docs/dev/HOST-GPU.md). Not OpenCL: an OpenCL context made by the host can't share
+    // the core's textures. NTSCRT_OFX_GPU=0 offers nothing (CPU images, as before 0.5.0).
+    const bool cuda = offer_gpu(NTSCRT_HOST_GPU_CUDA);
+    const bool metal = offer_gpu(NTSCRT_HOST_GPU_METAL);  // opt-in (NTSCRT_OFX_GPU=1) until run on a Mac
     desc.setSupportsOpenCLBuffersRender(false);
-    desc.setSupportsCudaRender(false);
-    desc.setSupportsMetalRender(false);
+    desc.setSupportsCudaRender(cuda);
+    desc.setSupportsCudaStream(cuda);  // work goes on the host's stream; render returns without waiting
+    desc.setSupportsMetalRender(metal);
 }
 
 namespace {

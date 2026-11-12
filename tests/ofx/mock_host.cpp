@@ -1,5 +1,6 @@
 #include "mock_host.h"
 
+#include <ofxGPURender.h>
 #include <ofxMemory.h>
 #include <ofxMessage.h>
 #include <ofxMultiThread.h>
@@ -373,6 +374,15 @@ OfxStatus clipGetImage(OfxImageClipHandle ch, OfxTime t, const OfxRectD *, OfxPr
     p.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
     p.set(kOfxImagePropPixelAspectRatio, {1.0});
     p.set(kOfxImagePropData, {static_cast<void *>(im->px.data())});
+    im->output = c->name == kOfxImageEffectOutputClipName;
+    if (current() && current()->gpu) {
+        im->dev = current()->gpu->up(im->px);
+        if (!im->dev) {
+            delete im;
+            return kOfxStatErrMemory;
+        }
+        p.set(kOfxImagePropData, {im->dev});
+    }
     p.set(kOfxImagePropBounds, {0, 0, c->width, c->height});
     p.set(kOfxImagePropRegionOfDefinition, {0, 0, c->width, c->height});
     p.set(kOfxImagePropRowBytes, {int(c->width * 4 * sizeof(float))});
@@ -387,6 +397,10 @@ OfxStatus clipReleaseImage(OfxPropertySetHandle h) {
     if (it == g_images.end()) return kOfxStatErrBadHandle;
     Image *im = it->second;
     g_images.erase(it);
+    if (im->dev && current() && current()->gpu) {
+        if (im->output) current()->gpu->down(im->dev, im->px);
+        current()->gpu->free(im->dev);
+    }
     if (current() && current()->on_release) current()->on_release(*im);
     delete im;
     return kOfxStatOK;
@@ -535,6 +549,12 @@ Host::Host() {
     h.set(kOfxImageEffectPropSetableFrameRate, {0});
     h.set(kOfxImageEffectPropSetableFielding, {0});
     h.set(kOfxImageEffectInstancePropSequentialRender, {0});
+    // Like Resolve on Windows: CUDA render with streams (images stay on the CPU unless a
+    // test sets Host::gpu and kOfxImageEffectPropCudaEnabled on a render).
+    h.set(kOfxImageEffectPropCudaRenderSupported, {std::string("true")});
+    h.set(kOfxImageEffectPropCudaStreamSupported, {std::string("true")});
+    h.set(kOfxImageEffectPropOpenCLRenderSupported, {std::string("false")});
+    h.set(kOfxImageEffectPropMetalRenderSupported, {std::string("false")});
     h.set(kOfxParamHostPropSupportsStringAnimation, {0});
     h.set(kOfxParamHostPropSupportsCustomInteract, {0});
     h.set(kOfxParamHostPropSupportsChoiceAnimation, {0});
