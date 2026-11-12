@@ -6,6 +6,7 @@
 #include "ntscrt_host/params.h"
 #include "../../core/stages/digital/migrate.h"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -33,13 +34,31 @@ size_t idx(const std::string &id) {
     FAIL("no param " << id);
     return 0;
 }
-// Value of a param's keyframes at frame n the way a host evaluates them at a key
-// frame (keys sit on every frame for numeric params, steps for the others).
-json keyed_value(const std::vector<std::pair<int64_t, json>> &keys, int64_t n) {
-    json v = keys.front().second;
-    for (const auto &[f, x] : keys)
-        if (f <= n) v = x;
-    return v;
+// Value of a param's keyframes at frame n as a host interpolating linearly gives it.
+json keyed_value(size_t i, const std::vector<std::pair<int64_t, json>> &keys, double n) {
+    return interpolated_key_value(schema().params[i], keys, n);
+}
+// The same keys through a smooth spline (Fusion's default: Bezier handles a third of the way to the
+// neighbouring keys, along the line between the keys either side), for numbers.
+json spline_value(size_t i, const std::vector<std::pair<int64_t, json>> &keys, double n) {
+    const ParamDef &p = schema().params[i];
+    if (p.type == PType::Bool || p.type == PType::Choice || p.type == PType::Color || keys.size() < 2)
+        return keyed_value(i, keys, n);
+    auto hi = std::lower_bound(keys.begin(), keys.end(), n, [](const auto &k, double x) { return double(k.first) < x; });
+    if (hi == keys.begin() || hi == keys.end() || double(hi->first) == n) return keyed_value(i, keys, n);
+    const size_t b = size_t(hi - keys.begin()), a = b - 1;
+    auto t = [&](size_t k) { return double(keys[k].first); };
+    auto v = [&](size_t k) { return keys[k].second.get<double>(); };
+    auto slope = [&](size_t k) {
+        const size_t l = k == 0 ? k : k - 1, r = k + 1 >= keys.size() ? k : k + 1;
+        return t(r) == t(l) ? 0.0 : (v(r) - v(l)) / (t(r) - t(l));
+    };
+    const double h = t(b) - t(a), u = (n - t(a)) / h;
+    const double h00 = 2 * u * u * u - 3 * u * u + 1, h10 = u * u * u - 2 * u * u + u, h01 = -2 * u * u * u + 3 * u * u,
+                 h11 = u * u * u - u * u;
+    const double x = h00 * v(a) + h10 * h * slope(a) + h01 * v(b) + h11 * h * slope(b);
+    if (p.type == PType::Int) return json(int64_t(std::llround(x)));
+    return json(x);
 }
 // json equality with numbers equal to 1e-9 (presets carry 0.029 and 0.028999999999999998).
 bool near(const json &a, const json &b) {
@@ -57,17 +76,29 @@ bool near(const json &a, const json &b) {
     }
     return a == b;
 }
-// The look a host holding `pk` sends at frame n.
-json host_look(const PresetKeys &pk, const json &preset, int64_t n) {
+// The look a host holding `pk` sends at frame n (spline: interpolating like Fusion).
+json host_look(const PresetKeys &pk, const json &preset, int64_t n, bool spline = false) {
     const Schema &s = schema();
     json look, fb;
     build_look(s, [&](size_t i) {
         auto it = pk.keys.find(i);
-        if (it != pk.keys.end() && !it->second.empty()) return keyed_value(it->second, n);
+        if (it != pk.keys.end() && !it->second.empty())
+            return spline ? spline_value(i, it->second, double(n)) : keyed_value(i, it->second, double(n));
         return s.params[i].def;
     }, look, fb);
     (void)preset;
     return look;
+}
+std::vector<std::string> animated_presets() {
+    std::vector<std::string> names;
+    for (const auto &e : std::filesystem::directory_iterator(std::string(NTSCRT_SOURCE_DIR) + "/presets")) {
+        if (e.path().extension() != ".json") continue;
+        const std::string n = e.path().stem().string();
+        const json j = read_preset(n);
+        if (j.contains("timeline") && !j["timeline"].value("keys", json::array()).empty()) names.push_back(n);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 // The look the host would send if its params held `look` (preset_value of every param).
 json as_host_look(const json &look) {
@@ -141,13 +172,7 @@ TEST_CASE("animated preset -> host keyframes match the upstream evaluation") {
     const Schema &s = schema();
     const double fps = 24;
     // every bundled look with timeline keys (all of them must be playable by the host)
-    std::vector<std::string> names;
-    for (const auto &e : std::filesystem::directory_iterator(std::string(NTSCRT_SOURCE_DIR) + "/presets")) {
-        if (e.path().extension() != ".json") continue;
-        const std::string n = e.path().stem().string();
-        const json j = read_preset(n);
-        if (j.contains("timeline") && !j["timeline"].value("keys", json::array()).empty()) names.push_back(n);
-    }
+    const std::vector<std::string> names = animated_presets();
     CHECK(names.size() >= 16);
     for (const std::string &name : names) {
         CAPTURE(name);
@@ -155,35 +180,96 @@ TEST_CASE("animated preset -> host keyframes match the upstream evaluation") {
         const PresetKeys pk = preset_keys(s, preset, fps, 120);
         REQUIRE(pk.animated());
         CHECK(pk.pass == int64_t(std::llround(preset["timeline"]["duration"].get<double>() * fps)));
-        CHECK(pk.frames == 120);
+        CHECK(pk.first == 0);
+        CHECK(pk.frames <= 120);
+        CHECK(pk.frames >= std::min<int64_t>(120, pk.pass));
         size_t moving = 0, total = 0;
         for (const auto &[i, k] : pk.keys) {
             REQUIRE_FALSE(k.empty());
             CHECK(k.front().first == 0);
             total += k.size();
-            if (k.size() > 1) ++moving;
-            const ParamDef &p = s.params[i];
-            if (k.size() > 1 && p.type != PType::Bool && p.type != PType::Choice) CHECK(k.size() == 120);
-            CHECK_FALSE(p.feedback);
+            if (k.size() > 1) {
+                ++moving;
+                CHECK(k.back().first <= pk.frames - 1);
+                CHECK(k.size() <= size_t(pk.frames));
+            }
+            CHECK_FALSE(s.params[i].feedback);
         }
-        MESSAGE(name << ": " << moving << " params move, " << total << " keyframes over 120 frames");
+        MESSAGE(name << ": " << moving << " params move, " << total << " keyframes over " << pk.frames << " frames");
         CHECK(moving > 0);
-        // Several frames, including a second pass: the host's look == the upstream
-        // evaluation at that frame's normalized time, as the host params hold it.
+        // Every frame, including a second pass: the host's look == the upstream evaluation at
+        // that frame's normalized time, as the host params hold it, within the keys' tolerance.
         json first = host_look(pk, preset, 0);
         bool changed = false;
-        for (int64_t n : {int64_t(0), int64_t(1), pk.pass / 3, pk.pass / 2, pk.pass - 1, pk.pass, pk.pass + 7, int64_t(119)}) {
-            if (n >= pk.frames) continue;
+        for (int64_t n = 0; n < pk.frames; ++n) {
             CAPTURE(n);
             const json want = as_host_look(preset_look_at_frame(s, preset, n, fps));
+            std::string where;
             const json got = host_look(pk, preset, n);
-            CHECK_MESSAGE(near(got, want), json::diff(want, got).dump());
+            CHECK_MESSAGE(within_key_tolerance(s, got, want, &where), where);
             if (!near(got, first)) changed = true;
         }
         CHECK(changed);
         // Past the keyed stretch the last key holds.
-        CHECK(host_look(pk, preset, 500) == host_look(pk, preset, 119));
+        CHECK(host_look(pk, preset, 500) == host_look(pk, preset, pk.frames - 1));
     }
+}
+
+// Sparse keys (0.5.0-rc.3): far fewer than one per frame, and the same look within the
+// stated tolerance for every bundled animated preset at common frame rates, for hosts that
+// interpolate linearly (Resolve's Edit and Fusion pages, the mock host), and with guard keys
+// also for smooth splines, anywhere in a long effect.
+TEST_CASE("animated preset: sparse keys follow the per-frame curve at every frame") {
+    const Schema &s = schema();
+    size_t sparse = 0, dense = 0;
+    for (const std::string &name : animated_presets()) {
+        const json preset = read_preset(name);
+        for (double fps : {23.976, 25.0, 30.0, 60.0}) {
+            CAPTURE(name);
+            CAPTURE(fps);
+            const PresetKeys pk = preset_keys(s, preset, fps, 0, 216079);  // unknown length, an hour in
+            // With guard keys, for hosts with smooth splines (none of the plug-ins' hosts so far).
+            const PresetKeys guarded = preset_keys(s, preset, fps, 0, 216079, true);
+            REQUIRE(pk.animated());
+            CHECK(pk.first % pk.pass == 0);
+            CHECK(pk.first <= 216079);
+            CHECK(216079 < pk.first + pk.frames);
+            CHECK(pk.frames % pk.pass == 0);
+            CHECK(pk.frames <= kMaxKeyedFrames);
+            size_t here = 0, by_type[5] = {0, 0, 0, 0, 0};
+            for (const auto &[i, k] : pk.keys)
+                if (k.size() > 1) {
+                    sparse += k.size();
+                    here += k.size();
+                    by_type[int(s.params[i].type)] += k.size();
+                    dense += size_t(pk.frames);
+                }
+            // About kMaxPresetKeys keys (one pass, whatever it takes, at least).
+            CHECK((here <= size_t(kMaxPresetKeys + 64) || pk.frames == pk.pass));
+            if (fps == 60.0)
+                MESSAGE(name << " @60: " << here << " keys over " << pk.frames << " frames (pass " << pk.pass
+                             << "); bool " << by_type[0] << " int " << by_type[1] << " float " << by_type[2]
+                             << " choice " << by_type[3]);
+            // Two passes at the start of the stretch (and the frame before it: the first values hold)
+            // and the last frames of it.
+            auto check = [&](const PresetKeys &k, bool spline, double factor) {
+                std::vector<int64_t> frames;
+                for (int64_t n = k.first - 1; n < k.first + std::min<int64_t>(k.frames, 2 * k.pass); ++n) frames.push_back(n);
+                for (int64_t n = k.first + k.frames - 5; n < k.first + k.frames; ++n) frames.push_back(n);
+                for (int64_t n : frames) {
+                    CAPTURE(n);
+                    const json want = as_host_look(preset_look_at_frame(s, preset, std::max(n, k.first), fps));
+                    std::string where;
+                    CHECK_MESSAGE(within_key_tolerance(s, host_look(k, preset, n, spline), want, &where, factor),
+                                  (spline ? "spline " : "linear ") << where);
+                }
+            };
+            check(pk, false, 1.0);
+            check(guarded, true, 2.0);
+        }
+    }
+    MESSAGE("sparse keys: " << sparse << " instead of " << dense << " (one per frame)");
+    CHECK(sparse * 6 < dense);
 }
 
 TEST_CASE("animated preset: direct evaluation of a linear segment") {
@@ -193,7 +279,8 @@ TEST_CASE("animated preset: direct evaluation of a linear segment") {
     const PresetKeys pk = preset_keys(schema(), preset, 24, 96);
     const size_t ci = idx("ntsc.composite_preemphasis");
     REQUIRE(pk.keys.count(ci));
-    for (int64_t n : {3, 10, 20, 30, 40, 47, 50, 70}) {
+    CHECK(pk.keys.at(ci).size() < 96 / 2);
+    for (int64_t n = 0; n < 96; ++n) {
         CAPTURE(n);
         const double t = double(n % 48) / 47.0;
         size_t a = 0;
@@ -206,7 +293,7 @@ TEST_CASE("animated preset: direct evaluation of a linear segment") {
             const double va = keys[a]["ntsc"]["composite_preemphasis"], vb = keys[a + 1]["ntsc"]["composite_preemphasis"];
             want = va + (vb - va) * (t - ta) / (tb - ta);
         }
-        CHECK(keyed_value(pk.keys.at(ci), n).get<double>() == doctest::Approx(want).epsilon(1e-9));
+        CHECK(keyed_value(ci, pk.keys.at(ci), double(n)).get<double>() == doctest::Approx(want).epsilon(1e-9));
     }
 }
 
@@ -215,12 +302,31 @@ TEST_CASE("presets without keys are not animated; Screen Loop presets never") {
     CHECK_FALSE(preset_keys(s, read_preset("Clean VHS"), 24, 100).animated());
     CHECK_FALSE(preset_keys(s, read_preset("Wavy loop"), 24, 100).animated());  // timeline on, no keys
     CHECK_FALSE(preset_keys(s, read_preset("Screen Loop/Bottom to top"), 24, 100).animated());
-    // unknown effect length: one pass
-    const PresetKeys pk = preset_keys(s, read_preset("Glitch pop"), 30, 0);
-    CHECK(pk.frames == pk.pass);
+    // unknown effect length: whole passes from the origin, or around the playhead
+    const json gp = read_preset("Glitch pop");
+    PresetKeys pk = preset_keys(s, gp, 30, 0);
     CHECK(pk.pass == 60);
-    // very long effects: capped
-    CHECK(preset_keys(s, read_preset("Glitch pop"), 30, 100000).frames == kMaxKeyedFrames);
+    CHECK(pk.first == 0);
+    const int64_t stretch = pk.frames;  // as many passes as kMaxPresetKeys allows
+    CHECK(stretch % 60 == 0);
+    CHECK(stretch > 10 * 60);
+    CHECK(stretch <= kMaxKeyedFrames);
+    pk = preset_keys(s, gp, 30, 0, 108000 + 75);  // an hour into a 30 fps timeline
+    CHECK(pk.first == (108075 - stretch / 4) / 60 * 60);
+    CHECK(pk.frames == stretch);
+    // very long effects: capped, from the start while the playhead is in the first stretch
+    pk = preset_keys(s, gp, 30, 100000, 100);
+    CHECK(pk.first == 0);
+    CHECK(pk.frames == stretch);
+    // ... and around it later on, never past the effect's end
+    pk = preset_keys(s, gp, 30, 100000, 99990);
+    CHECK(pk.first % 60 == 0);
+    CHECK(pk.first + pk.frames == 100000);
+    CHECK(pk.frames > stretch - 60);
+    // short effects: all of it
+    pk = preset_keys(s, gp, 30, 150, 140);
+    CHECK(pk.first == 0);
+    CHECK(pk.frames == 150);
 }
 
 TEST_CASE("choice applies: Horizontal resolution sets the width, a hand edit demotes it to Custom") {

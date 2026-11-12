@@ -146,20 +146,52 @@ bool is_feedback_preset(const json &j);  // "kind": "ntscrt-video-feedback"
 std::optional<json> preset_value(const ParamDef &p, const json &preset, bool feedback_preset);
 
 // An animated look (upstream timeline keys) as host keyframes.
+//
+// The timeline plays from the effect's first frame (frame offset 0, the "origin") and loops
+// every `pass` frames. The keyed stretch is [first, first + frames): whole passes from a pass
+// boundary (so it plays the loop in phase with the origin), as many as kMaxPresetKeys keys allow
+// (at least one, at most kMaxKeyedFrames frames), covering the frame `at` (the playhead when the
+// preset is applied) and starting at the origin when that fits. Before it the timeline's first values hold, after it its last ones.
+//
+// Keys are sparse: numbers get a key where the per-frame curve bends (a piecewise-linear fit,
+// within kKeyTolerance of the curve's swing, half a step for finely stepped CRT values, exact
+// for integers and wherever the value holds), for hosts that interpolate linearly between keys
+// (Resolve's Edit and Fusion pages: measured by tests/resolve "position"; FxPlug: keys made with
+// linear segments). Bools and choices get keys where the value changes (old value the frame
+// before, new one on it).
 struct PresetKeys {
     int64_t pass = 0;    // frames one timeline pass spans at the host rate (0 = not animated)
-    int64_t frames = 0;  // frames keyed from the effect's first frame
+    int64_t first = 0;   // first keyed frame (offset from the effect's first frame, a multiple of pass)
+    int64_t frames = 0;  // frames keyed from `first`
     // Per look param the preset sets (param index): (frame offset from the effect's first
-    // frame, value). One (0, v) entry = holds still: set v without keyframes. Bools and
-    // choices get keys where the value changes (old value the frame before, new one on it),
-    // the others one on every frame (exact whatever the host interpolates between keys).
+    // frame, value). One (0, v) entry = holds still: set v without keyframes.
     std::map<size_t, std::vector<std::pair<int64_t, json>>> keys;
     bool animated() const { return pass > 0; }
 };
 constexpr int64_t kMaxKeyedFrames = 3600;  // longest stretch keyed (the last values then hold)
+// Keys a preset writes, about: the stretch is as many whole passes as fit (at least one). Writing
+// keys costs the host time (Resolve: ~50 us each headless, more with its interface), 0.5.0-rc.2's
+// 97,200 for one preset froze Resolve's interface for about a minute.
+constexpr int64_t kMaxPresetKeys = 3000;
+constexpr double kKeyTolerance = 0.005;     // sparse keys: max deviation, as a fraction of a value's swing
 // fps: the host frame rate; available: frames from the effect's first frame to its last
-// (<= 0 = unknown: one pass). Not animated (pass 0) without timeline keys.
-PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available);
+// (<= 0 = unknown length); at: the frame to cover (offset from the first frame).
+// Not animated (pass 0) without timeline keys.
+// guards: also key the frames either side of each bend, for hosts that interpolate numbers with
+// smooth splines (Resolve's Edit and Fusion pages and FxPlug's linear segments don't need them).
+PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available, int64_t at = 0,
+                       bool guards = false);
+// The value a host interpolating linearly between `keys` (sorted by frame) gives at frame n
+// (held before the first / after the last; bools and choices step). Tests and diagnostics.
+json interpolated_key_value(const ParamDef &p, const std::vector<std::pair<int64_t, json>> &keys, double n);
+// How far sparse keys may put param p's value from the per-frame curve (factor x the
+// guarantee for linear interpolation: kKeyTolerance of the param's display span, half a
+// step for stepped CRT values, 0 for integers, bools and choices).
+double key_tolerance(const ParamDef &p, double factor = 1.0);
+// Do two looks (or feedbacks) agree within key_tolerance(factor) on every param's value, and
+// exactly everywhere else? `where` says the first difference.
+bool within_key_tolerance(const Schema &s, const json &a, const json &b, std::string *where = nullptr,
+                          double factor = 1.0);
 // The look the timeline gives frame n of the effect (the preset upgraded, keys applied).
 json preset_look_at_frame(const Schema &s, const json &preset, int64_t n, double fps);
 
@@ -173,7 +205,8 @@ struct PresetPlan {
     PresetKeys look;             // look.keys: every look param presets set (see above)
     std::vector<std::pair<size_t, json>> feedback;  // Screen Loop params: (index, value)
 };
-PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t available);
+PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t available, int64_t at = 0,
+                       bool guards = false);
 
 // ---- choice "applies", Digital video formats -------------------------------
 // Values a Digital video format's (or an option's) "applies" map writes: (param, value).

@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "../../src/sim_segment.h"
 #include "parallel.h"
 #include "video1.h"
 
@@ -178,6 +179,11 @@ int Timing::frameOfCapture(int c) const {
 FrameKind Timing::kind(int c, double datamosh, uint64_t seedMix) const {
     if (intraOnly()) return FrameKind::IntraOnly;
     if (c % keyframeEvery != 0) return FrameKind::Predicted;
+    // The first keyframe of each history segment after the first (core/src/sim_segment.h)
+    // is never dropped: a datamosh can't make the stream reach back further than that.
+    if (c > 0 && sim_segment_start(frameOfCapture(c), sourceFPS) >
+                     sim_segment_start(frameOfCapture(c - keyframeEvery), sourceFPS))
+        return FrameKind::Key;
     return codec::dropsKey(c / keyframeEvery, datamosh, seedMix) ? FrameKind::DroppedKey : FrameKind::Key;
 }
 

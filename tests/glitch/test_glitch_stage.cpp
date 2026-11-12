@@ -12,6 +12,7 @@
 #include <string>
 #include <tuple>
 
+#include "src/sim_segment.h"
 #include "stages/glitch/glitch_cpu.h"
 
 using namespace ntscrt;
@@ -440,4 +441,41 @@ TEST_CASE("strongly glitched presets change the image") {
     }
     json clean = load_preset("Clean CRT");
     CHECK_FALSE(GlitchCpuStage().active(clean));
+}
+
+// ---- history segments (core/src/sim_segment.h) -------------------------------------------
+
+TEST_CASE("an hour in, the receiver simulates from the start of its minute only") {
+    // 30 fps: segments of 1800 frames; 01:00:00:00 = 108000 is a boundary.
+    CHECK(ntscrt::sim_segment_frames(30) == 1800);
+    CHECK(ntscrt::sim_segment_frames(29.97) == 1800);
+    CHECK(ntscrt::sim_segment_frames(59.94) == 3600);
+    CHECK(ntscrt::sim_segment_start(108079, 30) == 108000);
+    CHECK(ntscrt::sim_segment_start(1799, 30) == 0);
+    CHECK(ntscrt::sim_segment_start(-5, 30) == 0);
+    History h{30, [](double t) {
+                  return std::map<std::string, double>{{"vertical_hold", 0.3 + 0.2 * std::sin(t)},
+                                                       {"signal_strength", 0.6}};
+              }};
+    GlitchTimeline t;
+    auto far = t.plan_for(h.ctx(108079), W, A);
+    CHECK(t.steps_frames_last() == 79);  // not 108079
+    // The same frame however it is reached: a seek from elsewhere, playing on from the boundary, a re-run.
+    GlitchTimeline seeker;
+    seeker.plan_for(h.ctx(2000), W, A);
+    CHECK(seeker.plan_for(h.ctx(108079), W, A).rows == far.rows);
+    GlitchTimeline player;
+    GlitchFieldPlan last;
+    for (int64_t f = 108000; f <= 108079; ++f) last = player.plan_for(h.ctx(f), W, A);
+    CHECK(last.rows == far.rows);
+    // A segment plays as the first one does: frame 79 of it equals frame 79 of the effect when the
+    // settings are the same there (constant ones).
+    json look = look_with({{"vertical_hold", 0.5}, {"signal_strength", 0.4}});
+    GlitchTimeline a, b;
+    CHECK(a.plan_for(ctx_for(look, 108079), W, A).rows == b.plan_for(ctx_for(look, 79), W, A).rows);
+    // Frames before 1800 are upstream's history from frame 0, unchanged.
+    GlitchTimeline c;
+    ReceiverSimulator sim(ReceiverRaster(W, A));
+    sim.resimulate(1000.0 / 30, 1.0 / 30, [&](double) { return GlitchSettings::from_look(look); });
+    CHECK(c.plan_for(ctx_for(look, 1000), W, A).rows == sim.plan().rows);
 }

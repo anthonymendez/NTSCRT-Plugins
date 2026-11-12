@@ -1,7 +1,7 @@
 // ofx_host_sim.h — what ofx/ntscrt_ofx.cpp does with the shared param model, on a
-// simulated OpenFX host (one value per param, keyframes as a frame -> value map:
-// the plug-in keys numbers on every frame and steps at changes, so reading the last
-// key at or before a frame is what any host interpolation gives on whole frames).
+// simulated OpenFX host (one value per param, keyframes as a frame -> value map,
+// interpolated linearly between keys, stepped for bools and choices, as Resolve's
+// Edit page and the mock host do).
 // Used by the OpenFX regression test and the cross-host test.
 #pragma once
 
@@ -30,9 +30,8 @@ struct OfxHost {
     }
     json at(size_t i, int64_t n) const {
         if (keys[i].empty()) return val[i];
-        auto it = keys[i].upper_bound(n);
-        if (it == keys[i].begin()) return it->second;
-        return std::prev(it)->second;
+        const std::vector<std::pair<int64_t, json>> k(keys[i].begin(), keys[i].end());
+        return interpolated_key_value(s.params[i], k, double(n));
     }
     // ntscrt_ofx.cpp set_value: a keyed param gets a key at t, else its value.
     void set_value(size_t i, const json &v, int64_t t = 0) {

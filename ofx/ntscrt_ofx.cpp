@@ -95,6 +95,27 @@ std::string resource_dir() {
     return u8(bin.parent_path().parent_path() / "Resources");
 }
 
+// Is this the copy inside NTSCRT_OFX_DEV_BUNDLE (a development build, see NtscrtFactory)?
+bool dev_copy() {
+    static const bool v = [] {
+        const char *e = std::getenv("NTSCRT_OFX_DEV_BUNDLE");
+        if (!e || !*e) return false;
+        try {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const fs::path dev = fs::weakly_canonical(fs::u8path(e), ec);
+            const fs::path res = fs::weakly_canonical(fs::u8path(resource_dir()), ec);
+            auto d = dev.native(), r = res.native();
+            std::transform(d.begin(), d.end(), d.begin(), [](auto c) { return decltype(c)(c < 128 ? std::tolower(int(c)) : int(c)); });
+            std::transform(r.begin(), r.end(), r.begin(), [](auto c) { return decltype(c)(c < 128 ? std::tolower(int(c)) : int(c)); });
+            return !d.empty() && r.compare(0, d.size(), d) == 0;
+        } catch (...) {
+            return false;
+        }
+    }();
+    return v;
+}
+
 // Schema + bundled presets, shared by describe and every instance (indices of
 // the preset choice params must match between them).
 struct Globals {
@@ -367,10 +388,12 @@ public:
               << (inst_ ? "ok" : "FAILED to initialise");
             if (inst_ && *ntscrt_last_error(inst_)) o << " (" << ntscrt_last_error(inst_) << ")";
             o << "; debug logging for all effects " << dlog::all_state(dlog::debug_all())
-              << (env_debug_log() ? "; NTSCRT_DEBUG_LOG set: this instance logs in detail" : "");
+              << (env_debug_log() ? "; NTSCRT_DEBUG_LOG set: this instance logs in detail" : "")
+              << ";" << host_ranges_text();
             dlog::write(o.str());
         }
         update_dependents(0.0);
+        apply_test_preset();
     }
     ~NtscrtEffect() override {
         if (inst_) ntscrt_destroy(inst_);
@@ -426,11 +449,11 @@ public:
     // hosts that only deliver declared frames (or pre-render them) give us
     // what fetch_source asks for. Only the current frame when they're off.
     void getFramesNeeded(const OFX::FramesNeededArguments &args, OFX::FramesNeededSetter &frames) override {
-        const OfxRangeD range = source_frame_range();
-        const double t = std::clamp(args.time, range.min, range.max);
+        const TimeRange range = host_range(args.time);
+        const double t = std::clamp(args.time, range.origin, range.last);
         // No field information here: cover both readings of a half-frame time
         // (a field render of floor(t), a retimed frame llround(t)).
-        const int64_t n = frame_of(t, range.min, true), n_hi = frame_of(t, range.min, false);
+        const int64_t n = frame_of(t, range.origin, true), n_hi = frame_of(t, range.origin, false);
         int64_t first = n;
         if (temporal_sources_possible(t)) {
             std::string look, fb;
@@ -445,8 +468,8 @@ public:
             ra.seed = render_seed(seed);
             if (ntscrt_source_frames_needed(&ra, &first) != NTSCRT_OK) first = n;
         }
-        const OfxRangeD need{std::min(args.time, range.min + double(first)),
-                             std::max(args.time, range.min + double(std::max(n, n_hi)))};
+        const OfxRangeD need{std::min(args.time, range.origin + double(first)),
+                             std::max(args.time, range.origin + double(std::max(n, n_hi)))};
         if (frames_needed_logged_ < 5 || dlog::verbose()) {
             ++frames_needed_logged_;
             std::ostringstream o;
@@ -585,6 +608,62 @@ public:
         if (r.max <= r.min) r = {0.0, 1e9};  // unknown: frame numbers = host time
         return r;
     }
+    // Everything the host says about where the effect sits in time, for the log.
+    std::string host_ranges_text() {
+        std::ostringstream o;
+        auto range = [&](const char *what, auto get) {
+            try {
+                OfxRangeD r = get();
+                o << ' ' << what << '=' << r.min << ".." << r.max;
+            } catch (...) {
+                o << ' ' << what << "=?";
+            }
+        };
+        range("src_range", [&] { return src_->getFrameRange(); });
+        range("src_unmapped", [&] { return src_->getUnmappedFrameRange(); });
+        range("out_range", [&] { return dst_->getFrameRange(); });
+        range("effect_range", [&] {
+            OfxRangeD r;
+            r.min = getPropertySet().propGetDouble(kOfxImageEffectPropFrameRange, 0, false);
+            r.max = getPropertySet().propGetDouble(kOfxImageEffectPropFrameRange, 1, false);
+            return r;
+        });
+        range("timeline", [&] {
+            OfxRangeD r{0, 0};
+            timeLineGetBounds(r.min, r.max);
+            return r;
+        });
+        try {
+            o << " timeline_now=" << timeLineGetTime();
+        } catch (...) {
+        }
+        try {
+            o << " duration=" << getEffectDuration();
+        } catch (...) {
+            o << " duration=?";
+        }
+        try {
+            o << " fps=" << source_frame_rate();
+        } catch (...) {
+        }
+        return o.str();
+    }
+    // Where the effect's frames are counted from, and its last frame, for host time t.
+    // The source clip's frame range when t lies in it (Fusion, Resolve's clips on the Edit
+    // page: times from 0 at the clip's start). Resolve gives an Adjustment Clip (and other
+    // effects without media) timeline times, an hour or more in, with a made-up range of
+    // 0..1999: then frame numbers are host times (origin 0) and the length is unknown. The
+    // stages bound their histories wherever frame 0 is (core/src/sim_segment.h).
+    struct TimeRange {
+        double origin = 0, last = 1e12;
+        bool known = false;
+    };
+    TimeRange host_range(double t) {
+        const OfxRangeD r = source_frame_range();
+        TimeRange out;
+        if (r.max - r.min < 1e8 && t >= r.min - 1 && t <= r.max + 1) out = {r.min, r.max, true};
+        return out;
+    }
     OFX::PreMultiplicationEnum source_premultiplication() {
         return optional_prop([&] { return src_->getPreMultiplication(); }, OFX::eImagePreMultiplied);
     }
@@ -649,13 +728,21 @@ public:
         const bool reported = keys_dirty_.exchange(false);
         uint64_t sig = 0;
         bool unknown = false;
+        std::vector<char> keyed(params_.size(), 0);
         for (size_t i = 0; i < params_.size(); ++i) {
             try {
-                if (int n = static_cast<OFX::ValueParam *>(params_[i])->getNumKeys())
+                if (int n = static_cast<OFX::ValueParam *>(params_[i])->getNumKeys()) {
                     sig = (sig ^ (uint64_t(i) << 32 | uint32_t(n))) * 0x100000001B3ull + 1;
+                    keyed[i] = 1;
+                }
             } catch (...) {
                 unknown = true;  // can't tell: assume animated
+                keyed[i] = 1;
             }
+        }
+        if (keyed != keyed_) {
+            keyed_ = std::move(keyed);
+            ++look_gen_;  // the cached held values below may be stale
         }
         if (sig != keys_sig_ && !reported && keys_counted_) {
             ++look_gen_;
@@ -678,10 +765,20 @@ public:
         }
         auto it = look_cache_.find(t);
         if (it != look_cache_.end()) return it->second;
-        std::string look, fb;
-        look_at_time(t, look, fb);
+        // Only keyed params can differ from one frame to the next: the others are read
+        // once per param state (held_) and only the keyed ones at t. An Adjustment Clip
+        // an hour in asked for a look per frame of the hour, ~170 us each (0.5.0-rc.2).
+        if (held_gen_ != gen) {
+            held_.assign(params_.size(), json());
+            held_gen_ = gen;
+        }
+        const Built b = build_look(g_.schema, [&](size_t i) {
+            if (i < keyed_.size() && keyed_[i]) return value_at(i, t);
+            if (held_[i].is_null()) held_[i] = value_at(i, t);
+            return held_[i];
+        });
         ++look_builds_;
-        return look_cache_.emplace(t, std::move(look)).first->second;
+        return look_cache_.emplace(t, b.look.dump()).first->second;
     }
     // Under mu_, with the current frame's freshly built look: remembered for
     // the next frames' history lookups. A cached look for the same time that
@@ -746,6 +843,48 @@ public:
     }
 
 private:
+    // Testing Resolve's Edit page, where scripts can't set OpenFX params: while the file
+    // NTSCRT_OFX_TEST_PRESET_FILE names exists, a development copy (NTSCRT_OFX_DEV_BUNDLE)
+    // applies the bundled look its first line names to each new effect whose Preset menu is
+    // still "(none)", as if chosen there with the playhead at the time on its second line
+    // (default 0); a third line "guards=1" adds guard keys (preset_keys).
+    // tests/resolve/run_resolve_tests.py (test "position") writes it.
+    void apply_test_preset() {
+        const char *e = std::getenv("NTSCRT_OFX_TEST_PRESET_FILE");
+        if (!e || !*e || !dev_copy()) return;
+        try {
+            std::ifstream f(std::filesystem::u8path(e));
+            std::string name, when, opts;
+            if (!f || !std::getline(f, name)) return;
+            std::getline(f, when);
+            std::getline(f, opts);
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+            int cur = 0;
+            preset_->getValue(cur);
+            if (cur != 0) return;
+            for (size_t i = 0; i < g_.looks.size(); ++i) {
+                if (g_.looks[i].name != name || g_.looks[i].format) continue;
+                const double t = when.empty() ? 0.0 : std::atof(when.c_str());
+                const auto t0 = std::chrono::steady_clock::now();
+                applying_ = true;
+                preset_->setValue(int(i + 1));
+                applying_ = false;
+                apply_preset(g_.looks[i].data, t, opts.find("guards=1") != std::string::npos);
+                std::ostringstream o;
+                o.setf(std::ios::fixed);
+                o.precision(1);
+                o << "instance #" << id_ << " test preset file: applied \"" << name << "\" at t=" << t << " in "
+                  << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() << " ms";
+                dlog::write(o.str());
+                return;
+            }
+            dlog::write("instance #" + std::to_string(id_) + " test preset file: no bundled look \"" + name + "\"");
+        } catch (...) {
+            applying_ = false;
+            dlog::write("instance #" + std::to_string(id_) + " test preset file: failed");
+        }
+    }
+
     // "Debug logging for all effects" pressed: flip the global switch (every instance in every
     // project notices within a second) and say so in the log.
     void toggle_debug_all() {
@@ -831,18 +970,22 @@ private:
     // Applies a preset (bundled or a loaded file) as the shared model plans it
     // (ntscrt::host::plan_preset): a look preset replaces the look, so every param
     // presets set loses its keyframes; an animated preset (upstream timeline keys)
-    // then gets host keyframes: the timeline's duration in seconds from the effect's
-    // first frame at the source's frame rate, repeated until the effect ends (at most
-    // kMaxKeyedFrames; the last value holds after that). See docs/params.md.
-    void apply_preset(const json &preset, double t) {
-        const OfxRangeD range = source_frame_range();
-        const bool known = range.max - range.min < 1e8;  // source_frame_range's "unknown" fallback
-        const int64_t available = known ? int64_t(std::llround(range.max - range.min)) + 1 : 0;
-        const PresetPlan plan = plan_preset(g_.schema, preset, source_frame_rate(), available);
+    // then gets sparse host keyframes: the timeline loops every duration seconds from
+    // the effect's first frame (host_range), keyed for a stretch of whole loops around
+    // the playhead t (about kMaxPresetKeys keys, at most kMaxKeyedFrames frames; outside it the
+    // first / last values hold).
+    // See docs/params.md.
+    void apply_preset(const json &preset, double t, bool guards = false) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const TimeRange range = host_range(t);
+        const int64_t available = range.known ? int64_t(std::llround(range.last - range.origin)) + 1 : 0;
+        const PresetPlan plan =
+            plan_preset(g_.schema, preset, source_frame_rate(), available, frame_of(t, range.origin, false), guards);
         applying_ = true;
         beginEditBlock(plan.replaces_look ? "NTSCRT preset" : "NTSCRT Screen Loop preset");
         try {
-            size_t keyed = 0;
+            size_t keyed = 0, params = 0;
+            std::string sample;
             for (const auto &[i, entries] : plan.look.keys) {
                 try {
                     static_cast<OFX::ValueParam *>(params_[i])->deleteAllKeys();
@@ -851,15 +994,29 @@ private:
                 if (entries.size() == 1) {
                     set_value(i, entries.front().second, t);  // holds still: no keyframe
                 } else {
-                    for (const auto &[n, v] : entries) set_key(i, v, range.min + double(n));
+                    for (const auto &[n, v] : entries) set_key(i, v, range.origin + double(n));
                     keyed += entries.size();
+                    ++params;
+                    if (sample.empty() && g_.schema.params[i].type == PType::Float) {
+                        // One param's keys in the log: how the host interpolates them can be checked.
+                        std::ostringstream k;
+                        k << g_.schema.params[i].name << ":";
+                        for (size_t j = 0; j < entries.size() && j < 40; ++j)
+                            k << (j ? "," : "") << range.origin + double(entries[j].first) << "=" << entries[j].second.dump();
+                        sample = k.str();
+                    }
                 }
             }
             for (const auto &[i, v] : plan.feedback) set_value(i, v, t);
             if (plan.look.animated()) {
                 std::ostringstream o;
-                o << "instance #" << id_ << " animated preset: " << plan.look.pass << " frames per pass, "
-                  << plan.look.frames << " frames keyed from t=" << range.min << ", " << keyed << " keyframes";
+                o << "instance #" << id_ << " animated preset at t=" << t << ": " << plan.look.pass
+                  << " frames per pass, frames " << range.origin + double(plan.look.first) << ".."
+                  << range.origin + double(plan.look.first + plan.look.frames - 1) << " keyed (origin "
+                  << range.origin << (range.known ? "" : ", clip range unknown") << "), " << keyed << " keyframes on "
+                  << params << " params in "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()
+                  << " ms;" << host_ranges_text() << (guards ? "; guard keys" : "") << "; keys of " << sample;
                 dlog::write(o.str());
             }
         } catch (...) {
@@ -985,6 +1142,9 @@ private:
     uint64_t keys_sig_ = 0;      // key counts per param, hashed (0 = no keys anywhere)
     bool keys_counted_ = false;
     std::map<double, std::string> look_cache_;  // render thread, under mu_
+    std::vector<char> keyed_;     // params with keyframes (animated(), under mu_)
+    std::vector<json> held_;      // values of the params without keyframes (null = not read yet)
+    uint64_t held_gen_ = ~uint64_t(0);
     uint64_t look_cache_gen_ = ~uint64_t(0);
     size_t look_builds_ = 0;
     std::string last_warning_;  // degraded-frame message shown / logged
@@ -1108,8 +1268,8 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     const bool debug = debug_box || debug_all || debug_env;
     const auto t_looked = std::chrono::steady_clock::now();
 
-    OfxRangeD range = source_frame_range();
-    RenderCtx ctx{this, range.min, range.max, win, {}};
+    const TimeRange range = host_range(args.time);
+    RenderCtx ctx{this, range.origin, range.last, win, {}};
 
     // Non-square pixels: the stages (Downscale height, crop ratios, CRT fit)
     // assume square ones, so an anamorphic source renders squeezed. Said once.
@@ -1127,7 +1287,7 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     ntscrt_render_args ra{};
     // Fielded render (t and t + 0.5): both fields are frame floor(t).
     const bool field = args.fieldToRender == OFX::eFieldLower || args.fieldToRender == OFX::eFieldUpper;
-    ra.frame_index = frame_of(args.time, range.min, field);
+    ra.frame_index = frame_of(args.time, range.origin, field);
     ra.fps = source_frame_rate();
     ra.look_json = look.c_str();
     ra.feedback_json = fb.empty() ? nullptr : fb.c_str();
@@ -1197,6 +1357,7 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         } else if (renders_ == 1) {
             o << " look=" << look.substr(0, 400) << (look.size() > 400 ? "..." : "");
         }
+        if (renders_ == 1) o << ";" << host_ranges_text();
         dlog::write(o.str());
     }
     if (st != NTSCRT_OK && !degraded) {
@@ -1233,22 +1394,7 @@ public:
         const unsigned release = NTSCRT_OFX_VERSION_MAJOR * 10000 + NTSCRT_OFX_VERSION_MINOR * 100 + NTSCRT_OFX_VERSION_PATCH;
         return is_dev_copy() ? 999999u : release;
     }
-    static bool is_dev_copy() {
-        const char *e = std::getenv("NTSCRT_OFX_DEV_BUNDLE");
-        if (!e || !*e) return false;
-        try {
-            namespace fs = std::filesystem;
-            std::error_code ec;
-            const fs::path dev = fs::weakly_canonical(fs::u8path(e), ec);
-            const fs::path res = fs::weakly_canonical(fs::u8path(resource_dir()), ec);
-            auto d = dev.native(), r = res.native();
-            std::transform(d.begin(), d.end(), d.begin(), [](auto c) { return decltype(c)(c < 128 ? std::tolower(int(c)) : int(c)); });
-            std::transform(r.begin(), r.end(), r.begin(), [](auto c) { return decltype(c)(c < 128 ? std::tolower(int(c)) : int(c)); });
-            return !d.empty() && r.compare(0, d.size(), d) == 0;
-        } catch (...) {
-            return false;
-        }
-    }
+    static bool is_dev_copy() { return dev_copy(); }
     void load() override {}
     void unload() override {}
     void describe(OFX::ImageEffectDescriptor &desc) override;

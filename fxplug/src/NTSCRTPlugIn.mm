@@ -561,9 +561,10 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
 // Applies a preset (bundled or a loaded file) as the shared model plans it (Model::plan_preset,
 // the same plan the OpenFX plug-in follows): a look preset replaces the look, so every look
 // parameter presets set loses its keyframes; an animated one (upstream timeline keys) then gets
-// host keyframes from the effect's first frame, one pass after another until the effect ends (at
-// most kMaxKeyedFrames). A Screen Loop file (or a look file's "screen_loop") sets the Screen Loop
-// parameters and turns Screen Loop on unless it says "enabled": false. FxKeyframeAPI_v3's
+// sparse host keyframes (linear segments), the timeline looping from the effect's first frame,
+// for a stretch of whole loops around the playhead (host::preset_keys: about kMaxPresetKeys keys,
+// at most kMaxKeyedFrames frames, the whole effect when it is shorter). A Screen Loop file (or a
+// look file's "screen_loop") sets the Screen Loop parameters and turns Screen Loop on unless it says "enabled": false. FxKeyframeAPI_v3's
 // addKeyframe carries no value: a keyframe is added at the time, then the value is set there.
 - (void)applyPreset:(const json &)preset atTime:(CMTime)t {
     id<FxParameterSettingAPI_v5> set = [_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
@@ -582,7 +583,9 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     CMTime fd = CMTimeMake(1, 30), start = kCMTimeZero;
     int64_t frames = 0;
     [self effectFps:&fps frame:&fd start:&start frames:&frames];
-    const HostPlan plan = m.plan_preset(preset, fps, frames);
+    // The keyed stretch covers the playhead (a long effect is keyed around it, not just from its start).
+    const double at_s = CMTIME_IS_NUMERIC(t) && CMTIME_IS_NUMERIC(start) ? CMTimeGetSeconds(CMTimeSubtract(t, start)) : 0.0;
+    const HostPlan plan = m.plan_preset(preset, fps, frames, std::max<int64_t>(0, int64_t(std::llround(at_s * fps))));
     const BOOL was = _applying;
     _applying = YES;
     size_t keyed = 0;
@@ -613,7 +616,8 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     _applying = was;
     if (plan.animated()) {
         std::ostringstream o;
-        o << "animated preset: " << plan.pass << " frames per pass, " << plan.frames << " frames keyed, " << keyed
+        o << "animated preset: " << plan.pass << " frames per pass, frames " << plan.first << ".."
+          << plan.first + plan.frames - 1 << " keyed, " << keyed
           << " keyframes";
         if (!keys) o << " (FxKeyframeAPI_v3 unavailable: first frame's values set instead)";
         LogLine(o.str(), !keys);

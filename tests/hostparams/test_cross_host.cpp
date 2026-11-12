@@ -31,9 +31,22 @@ struct FxHost {
     json at(const fx::Param &p, int64_t n) const {
         auto k = keys.find(p.host_id);
         if (k == keys.end() || k->second.empty()) return val.at(p.host_id);
-        auto it = k->second.upper_bound(n);
-        if (it == k->second.begin()) return it->second;
-        return std::prev(it)->second;
+        // FxKeyframeAPI keys: linear segments (constant for bools and menus).
+        auto hi = k->second.lower_bound(n);
+        if (hi == k->second.begin()) return hi->second;
+        if (hi == k->second.end()) return std::prev(hi)->second;
+        if (hi->first == n) return hi->second;
+        const auto &lo = *std::prev(hi);
+        if (p.type == fx::Kind::Bool || p.type == fx::Kind::Choice) return lo.second;
+        const double u = double(n - lo.first) / double(hi->first - lo.first);
+        auto mix = [&](const json &a, const json &b) { return a.get<double>() + (b.get<double>() - a.get<double>()) * u; };
+        if (lo.second.is_array()) {
+            json out = json::array();
+            for (size_t i = 0; i < lo.second.size(); ++i) out.push_back(mix(lo.second[i], hi->second[i]));
+            return out;
+        }
+        if (p.type == fx::Kind::Int) return json(int64_t(std::llround(mix(lo.second, hi->second))));
+        return json(mix(lo.second, hi->second));
     }
     void set(uint32_t id, const json &v) {
         auto k = keys.find(id);
@@ -61,7 +74,8 @@ struct FxHost {
 
 void check_same(const Built &ofx, const Built &fxp) {
     std::string where;
-    CHECK_MESSAGE(close(ofx.look, fxp.look, where, "", 0.0), "look " << where);
+    // 1e-12: both interpolate the same keys, one in look values, one in host values.
+    CHECK_MESSAGE(close(ofx.look, fxp.look, where, "", 1e-12), "look " << where);
     CHECK_MESSAGE(close(ofx.feedback, fxp.feedback, where, "", 0.0), "feedback " << where);
 }
 }  // namespace

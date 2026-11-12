@@ -138,7 +138,12 @@ TEST_CASE("OpenFX: every bundled preset builds the look and feedback it built be
         fb.merge_patch(patch["feedback"]);
         // 1e-6: the reference was written on Windows; CRT shader params that timeline keys lerp in
         // float (core/params/timeline.h) differ in the last float bit on macOS (1.1000000238 vs 1.0999999046).
-        CHECK_MESSAGE(close(it->second.look, look, where, "", 1e-6), "look " << where);
+        // Animated looks (name@fps/frame): keyed sparsely since 0.5.0-rc.3, so within the keys'
+        // tolerance of the per-frame keys the reference was written with.
+        if (name.find('@') != std::string::npos)
+            CHECK_MESSAGE(within_key_tolerance(schema(), it->second.look, look, &where), "look " << where);
+        else
+            CHECK_MESSAGE(close(it->second.look, look, where, "", 1e-6), "look " << where);
         CHECK_MESSAGE(close(it->second.feedback, fb, where, "", 1e-6), "feedback " << where);
     }
 }

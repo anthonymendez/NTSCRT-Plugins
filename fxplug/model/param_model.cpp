@@ -182,11 +182,12 @@ std::vector<host::Preset> Model::loop_menu(const json &bundled) const {
     return out;
 }
 
-HostPlan Model::plan_preset(const json &preset, double fps, int64_t available) const {
-    const host::PresetPlan p = host::plan_preset(schema, preset, fps, available);
+HostPlan Model::plan_preset(const json &preset, double fps, int64_t available, int64_t at) const {
+    const host::PresetPlan p = host::plan_preset(schema, preset, fps, available, at);
     HostPlan out;
     out.replaces_look = p.replaces_look;
     out.pass = p.look.pass;
+    out.first = p.look.first;
     out.frames = p.look.frames;
     for (const auto &[i, entries] : p.look.keys) {
         auto &keys = out.look[params[i].host_id];

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <optional>
 
+#include "../../src/sim_segment.h"
 #include "glitch_kernels.h"
 
 namespace ntscrt::glitch {
@@ -68,7 +69,16 @@ const GlitchFieldPlan &GlitchTimeline::plan_for(const FrameContext &ctx, int wid
         seed_ = seed;
         fps_ = fps;
     }
-    const int64_t F = std::max<int64_t>(0, ctx.frame);
+    // The simulation runs from the start of the frame's segment (sim_segment.h): frame
+    // numbers below are relative to it, k <-> effect frame seg + k.
+    const int64_t abs_frame = std::max<int64_t>(0, ctx.frame);
+    const int64_t seg = sim_segment_start(abs_frame, fps);
+    if (seg != segment_) {
+        flush();
+        sim_ = std::make_unique<ReceiverSimulator>(raster, seed);
+        segment_ = seg;
+    }
+    const int64_t F = abs_frame - seg;
 
     // Settings at frame k: the host's keyframes, read once per call.
     // Frames whose look is this frame's own (no keyframes: all of them) share
@@ -78,7 +88,7 @@ const GlitchFieldPlan &GlitchTimeline::plan_for(const FrameContext &ctx, int wid
     auto settings_at = [&](int64_t k) -> const GlitchSettings & {
         auto it = memo.find(k);
         if (it != memo.end()) return it->second;
-        const json *j = k == ctx.frame && ctx.look ? ctx.look : ctx.look_at ? &ctx.look_at(k) : ctx.look;
+        const json *j = seg + k == ctx.frame && ctx.look ? ctx.look : ctx.look_at ? &ctx.look_at(seg + k) : ctx.look;
         GlitchSettings s;
         if (j && j == ctx.look) {
             if (!current) current = GlitchSettings::from_look(*ctx.look);
