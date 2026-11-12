@@ -4,14 +4,18 @@
 Renders every bundled preset, every effect stage on its own, every NTSC setting and the key options of the
 other stages through the plug-in in one headless Resolve session per configuration, and compares the frames:
 
-  cpu   NTSCRT_NTSC_GPU=0 NTSCRT_OFX_GPU=0 NTSCRT_FAST_TRANSFER=0   the reference (0.5.0-rc.3's routes)
-  gpu   nothing set                                               the default: host GPU frames + NTSC on the GPU
-  mixa  NTSCRT_OFX_GPU=0                                          CPU frames, NTSC on the GPU (AMD / Intel GPUs)
-  mixb  NTSCRT_NTSC_GPU=0                                         host GPU frames, ntsc-rs
+  cpu   NTSCRT_NTSC_GPU=0 NTSCRT_DIGITAL_GPU=0 NTSCRT_OFX_GPU=0 NTSCRT_FAST_TRANSFER=0
+                                                                  the reference (0.5.0-rc.3's routes)
+  gpu   nothing set                                               the default: host GPU frames, NTSC and Digital
+                                                                  video on the GPU
+  mixa  NTSCRT_OFX_GPU=0                                          CPU frames, NTSC and Digital video on the GPU
+                                                                  (AMD / Intel GPUs)
+  mixb  NTSCRT_NTSC_GPU=0                                         host GPU frames, ntsc-rs (so Digital video on
+                                                                  the CPU too: ntsc-rs needs the picture there)
   cpu2  as cpu, a subset of the cases                             Resolve's own session-to-session noise
 
-Pairs and their rule (docs/dev/HOST-GPU.md, docs/dev/NTSC-GPU.md):
-  mixa vs cpu, gpu vs mixb   only the NTSC route differs: every value equal
+Pairs and their rule (docs/dev/HOST-GPU.md, docs/dev/NTSC-GPU.md, docs/dev/DIGITAL-GPU.md):
+  mixa vs cpu, gpu vs mixb   only the NTSC and Digital video routes differ: every value equal
   mixb vs cpu, gpu vs cpu    host GPU frames: each channel within 1/255 and at most 0.2% of values different
   cpu2 vs cpu                noise: reported (expected 0)
 8-bit and half-float Fusion sources against a CPU-frames session are informational: with GPU render offered,
@@ -51,14 +55,22 @@ from pathlib import Path
 import run_resolve_tests as rrt
 
 ROOT = rrt.ROOT
-ENV_KEYS = ("NTSCRT_NTSC_GPU", "NTSCRT_OFX_GPU", "NTSCRT_FAST_TRANSFER")
-CPU_ENV = {"NTSCRT_NTSC_GPU": "0", "NTSCRT_OFX_GPU": "0", "NTSCRT_FAST_TRANSFER": "0"}
+ENV_KEYS = ("NTSCRT_NTSC_GPU", "NTSCRT_DIGITAL_GPU", "NTSCRT_OFX_GPU", "NTSCRT_FAST_TRANSFER")
+CPU_ENV = {"NTSCRT_NTSC_GPU": "0", "NTSCRT_DIGITAL_GPU": "0", "NTSCRT_OFX_GPU": "0", "NTSCRT_FAST_TRANSFER": "0"}
+# "digital": the Digital video route its frames must log (digital_route=; DIGITAL-GPU.md). With ntsc-rs
+# (mixb) Digital video stays on the CPU where NTSC is on (ntsc-rs needs the picture there), on the GPU where
+# it's off ("cpu-if-ntsc").
 CONFIGS = {
-    "cpu": {"env": CPU_ENV, "frames": "cpu", "ntsc": "cpu", "what": "reference: CPU frames, ntsc-rs, rc.3 transfers"},
-    "gpu": {"env": {}, "frames": "gpu", "ntsc": "gpu", "what": "default: host GPU frames, NTSC on the GPU"},
-    "mixa": {"env": {"NTSCRT_OFX_GPU": "0"}, "frames": "cpu", "ntsc": "gpu", "what": "CPU frames, NTSC on the GPU"},
-    "mixb": {"env": {"NTSCRT_NTSC_GPU": "0"}, "frames": "gpu", "ntsc": "cpu", "what": "host GPU frames, ntsc-rs"},
-    "cpu2": {"env": CPU_ENV, "frames": "cpu", "ntsc": "cpu", "what": "the reference again (noise subset)", "subset": "noise"},
+    "cpu": {"env": CPU_ENV, "frames": "cpu", "ntsc": "cpu", "digital": "cpu",
+            "what": "reference: CPU frames, ntsc-rs, CPU Digital video, rc.3 transfers"},
+    "gpu": {"env": {}, "frames": "gpu", "ntsc": "gpu", "digital": "gpu",
+            "what": "default: host GPU frames, NTSC and Digital video on the GPU"},
+    "mixa": {"env": {"NTSCRT_OFX_GPU": "0"}, "frames": "cpu", "ntsc": "gpu", "digital": "gpu",
+             "what": "CPU frames, NTSC and Digital video on the GPU"},
+    "mixb": {"env": {"NTSCRT_NTSC_GPU": "0"}, "frames": "gpu", "ntsc": "cpu", "digital": "cpu-if-ntsc",
+             "what": "host GPU frames, ntsc-rs, CPU Digital video (with NTSC)"},
+    "cpu2": {"env": CPU_ENV, "frames": "cpu", "ntsc": "cpu", "digital": "cpu", "what": "the reference again (noise subset)",
+             "subset": "noise"},
 }
 # (session, against, rule)
 PAIRS = [("mixa", "cpu", "exact"), ("gpu", "mixb", "exact"), ("mixb", "cpu", "hostgpu"), ("gpu", "cpu", "hostgpu"),
@@ -560,6 +572,7 @@ def order_params(params):
 def log_routes(text):
     """Route summary of the plug-in's render lines in `text`."""
     paths, ntsc, reasons, ts, inst, loops, errs = {}, {}, set(), set(), set(), {"gpu": 0, "cpu": 0}, []
+    digital, digital_reasons = {}, set()
     sizes, depths = set(), set()
     identity = 0
     for line in text.splitlines():
@@ -587,11 +600,17 @@ def log_routes(text):
             ntsc[r.group(1)] = ntsc.get(r.group(1), 0) + 1
             if r.group(2):
                 reasons.add(f"{r.group(1)} ({r.group(2)})")
+        r = re.search(r" digital_route=(gpu|cpu)(?: \(([^)]*)\))?", rest)
+        if r:
+            digital[r.group(1)] = digital.get(r.group(1), 0) + 1
+            if r.group(2):
+                digital_reasons.add(f"{r.group(1)} ({r.group(2)})")
         lp = re.search(r" ntsc_loop=gpu:(\d+),cpu:(\d+)", rest)
         if lp:
             loops["gpu"] += int(lp.group(1))
             loops["cpu"] += int(lp.group(2))
-    return {"paths": paths, "ntsc": ntsc, "ntsc_reasons": sorted(reasons), "t": sorted(ts, key=lambda v: float(v)),
+    return {"paths": paths, "ntsc": ntsc, "ntsc_reasons": sorted(reasons), "digital": digital,
+            "digital_reasons": sorted(digital_reasons), "t": sorted(ts, key=lambda v: float(v)),
             "instances": sorted(inst), "ntsc_loop": loops, "errors": errs[:5], "sizes": sorted(sizes), "identity": identity,
             "depths": sorted(depths)}
 
@@ -891,6 +910,12 @@ def route_problems(cfg, r):
     lp = r.get("ntsc_loop", {})
     if lp.get(other):
         out.append(f"Screen Loop passes on {other} NTSC: {lp[other]}")
+    dwant = want["digital"]
+    if dwant == "cpu-if-ntsc":
+        dwant = "cpu" if r.get("ntsc") else "gpu"
+    dother = "cpu" if dwant == "gpu" else "gpu"
+    if r.get("digital", {}).get(dother):
+        out.append(f"digital_route={dother} x{r['digital'][dother]} ({'; '.join(r.get('digital_reasons', []))[:160]})")
     if r.get("errors"):
         out.append("log: " + " | ".join(r["errors"])[:300])
     return out
@@ -1010,7 +1035,8 @@ def analyse(base, cases, configs, expected, timings):
             r = doc["results"].get(c["id"], {})
             probs = [] if r.get("error") else route_problems(cfg, r.get("routes"))
             route_rows.append({"session": cfg, "case": c["id"], "paths": r.get("routes", {}).get("paths"),
-                               "ntsc": r.get("routes", {}).get("ntsc"), "problems": probs, "error": r.get("error"),
+                               "ntsc": r.get("routes", {}).get("ntsc"), "digital": r.get("routes", {}).get("digital"),
+                               "problems": probs, "error": r.get("error"),
                                "setup": r.get("setup")})
     route_bad = {(x["session"], x["case"]) for x in route_rows if x["problems"]}
     for sa, sb, rule in PAIRS:
@@ -1034,12 +1060,16 @@ def analyse(base, cases, configs, expected, timings):
                 continue
             depth_info = rule == "hostgpu" and c.get("source") in ("i8", "f16")
             routes_ok = (sa, cid) not in route_bad and (sb, cid) not in route_bad
-            # A pass must not come from both sessions taking the same NTSC route.
+            # A pass must not come from both sessions taking the same NTSC (or Digital video) route.
             same_route = ""
             if not cid.startswith("src:") and CONFIGS[sa]["ntsc"] != CONFIGS[sb]["ntsc"]:
                 na, nb = ra["routes"].get("ntsc", {}), rb["routes"].get("ntsc", {})
                 if bool(na) != bool(nb):
                     same_route = f"NTSC lines in one session only ({na} vs {nb})"
+            if not cid.startswith("src:") and CONFIGS[sa]["digital"] != CONFIGS[sb]["digital"]:
+                da, db = ra["routes"].get("digital", {}), rb["routes"].get("digital", {})
+                if bool(da) != bool(db):
+                    same_route = f"Digital video lines in one session only ({da} vs {db})"
             for f, ia in ra["images"].items():
                 ib = rb["images"].get(f)
                 if not ib:
@@ -1076,7 +1106,9 @@ def analyse(base, cases, configs, expected, timings):
                              "pct_differing": d.get("pct_differing"), "mean_of_255": d.get("mean_of_255"),
                              "differing": d.get("differing"), "values": d.get("values"),
                              "paths_a": ra["routes"].get("paths"), "ntsc_a": ra["routes"].get("ntsc"),
-                             "paths_b": rb["routes"].get("paths"), "ntsc_b": rb["routes"].get("ntsc"), "note": note})
+                             "paths_b": rb["routes"].get("paths"), "ntsc_b": rb["routes"].get("ntsc"),
+                             "digital_a": ra["routes"].get("digital"), "digital_b": rb["routes"].get("digital"),
+                             "note": note})
         pair_summary[f"{sa}-vs-{sb}"] = summ
     # Within a session: animated looks rendered twice; the effect switched off against the source.
     repeats, identity = [], []
@@ -1147,6 +1179,20 @@ def write_reports(base, doc):
     (base / "parity.md").write_text("\n".join(L) + "\n", encoding="utf-8")
 
 
+def digital_case(c):
+    """The case runs Digital video (--parity-digital): it switches the stage on, or picks a look / format with it."""
+    if (c.get("params") or {}).get("digital_enabled") == 1:
+        return True
+    names = ([c["menu"][2]] if c.get("menu") else []) + ([c["look"]] if c.get("look") else [])
+    for n in names:
+        if n.startswith("Digital video/"):
+            return True
+        f = ROOT / "presets" / f"{n}.json"
+        if f.exists() and (json.loads(f.read_text(encoding="utf-8")).get("digital") or {}).get("enabled"):
+            return True
+    return False
+
+
 def main(a):
     import faulthandler
     faulthandler.enable()  # a crash inside fusionscript prints where it happened
@@ -1170,6 +1216,8 @@ def main(a):
         cases, expected = doc["cases"], doc["expected"]
     else:
         cases, expected = build_cases(quick)
+        if getattr(a, "parity_digital", False):
+            cases = [c for c in cases if digital_case(c)]
         sources = make_sources(Path(a.parity_sources) if a.parity_sources else base / "_src")
         cases_path.write_text(json.dumps({"sources": sources, "cases": cases, "expected": expected, "quick": quick},
                                          indent=1), encoding="utf-8")

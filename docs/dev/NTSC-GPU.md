@@ -39,8 +39,9 @@ render_once, NTSC on (every frame)
   ntsc_gpu_on(inst)                the instance's route: ntsc_gpu_route(dev) once (again when NTSCRT_NTSC_GPU
                                    changes or the device is replaced), off after 3 GPU errors in a row
   no Screen Loop:
-    the source goes straight to the GPU (DirectSrc) unless Digital video is on: the host GPU frame's convert
-    kernel (gpu-direct) or the CPU picture converted into upload memory (CPU path); else the CPU picture
+    the source goes straight to the GPU (DirectSrc) unless Digital video is on the CPU: the host GPU frame's
+    convert kernel (gpu-direct) or the CPU picture converted into upload memory (CPU path); else the CPU picture
+    (Digital video on the GPU, docs/dev/DIGITAL-GPU.md: picture() is its result on that texture)
     ntsc_gpu_run:
       NtscStage::gpu_plan(.., false)   -> shim ntsc_gpu_plan (or the cached plan: same frame again)
       plan.supported()                 every enabled stage implemented          -> else ntsc-rs

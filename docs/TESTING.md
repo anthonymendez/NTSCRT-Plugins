@@ -146,7 +146,10 @@ route differs (`mixa`/`cpu`, `gpu`/`mixb`) every value must be equal; with host 
 Every case's route is read from the plug-in's log (`path=`, `ntsc_route=`) and must be the configuration's, so a
 pass can't come from both sides taking the same route. Results: `parity.md`, `parity.json`, `parity.csv` in
 `--out`, with one folder of frames and logs per session; `--parity-compare-only` compares them again,
-`--parity-configs` picks sessions, `--parity-retry` renders again the cases a session lost (Resolve sometimes stops
+`--parity-configs` picks sessions, `--parity-digital` keeps only the cases that run Digital video (62 of them;
+`cpu` and `cpu2` also set `NTSCRT_DIGITAL_GPU=0`, and every case's `digital_route=` must be its session's:
+GPU in `gpu` / `mixa`, CPU in `cpu` / `cpu2` and, where NTSC is on, `mixb`), `--parity-retry` renders again the
+cases a session lost (Resolve sometimes stops
 answering scripting calls for a while) and merges them in. A full run takes about two and a half hours (RTX 5090).
 First run (2026-11-12, 355 cases, 972 images per pair): every image equal in every pair except the CRT *sim* shader,
 whose output depends on the frames rendered before it (it differs between two CPU sessions too), and the documented
@@ -184,14 +187,16 @@ starting Resolve does the same for that session (see [ENVIRONMENT.md](ENVIRONMEN
 
 **GPU or CPU path.** On Windows with an NVIDIA GPU, Resolve (in its default CUDA mode) hands the effect its
 frames in GPU memory and they stay there; each logged frame says `path=gpu-direct`, `path=gpu-download`
-(Digital video, Screen Loop or ntsc-rs need the picture on the CPU) or `path=gpu-cpuconvert`, and `path=cpu`
+(Screen Loop, ntsc-rs or Digital video on the CPU need the picture there) or `path=gpu-cpuconvert`, and `path=cpu`
 when Resolve handed over CPU images (AMD / Intel GPUs, OpenCL mode, macOS). If a problem might come from that,
 start Resolve with `NTSCRT_OFX_GPU=0` (see [ENVIRONMENT.md](ENVIRONMENT.md)) and try again: the effect then always
 gets CPU images, as before 0.5.0. Resolve's Fusion page only notices the change after the plug-in is reinstalled
 or updated.
 
 **NTSC on the GPU or ntsc-rs.** The log says once per effect where the NTSC signal runs (`NTSC route: gpu (...)`
-or `NTSC route: cpu (why)`), and each logged frame `ntsc_route=gpu` / `ntsc_route=cpu`. If a problem might come
+or `NTSC route: cpu (why)`), and each logged frame `ntsc_route=gpu` / `ntsc_route=cpu`; likewise for Digital
+video's full-size steps (`Digital video route: ...`, `digital_route=`; `NTSCRT_DIGITAL_GPU=0` keeps them on the
+CPU, docs/ENVIRONMENT.md). If a problem might come
 from the GPU NTSC signal, start Resolve with `NTSCRT_NTSC_GPU=0` (ntsc-rs, as 0.5.0-rc.4) and compare.
 
 Where the logs are:

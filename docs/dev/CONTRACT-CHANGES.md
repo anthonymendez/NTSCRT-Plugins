@@ -256,3 +256,22 @@ plug-in logs the `ntsc_route` text once per instance when it changes. No C ABI c
 
 **Reason.** Phase 4 of the GPU port (docs/dev/NTSC-GPU.md): GPU NTSC by default where it is exact, inside
 Screen Loop and on host GPU frames (`gpu-direct` with NTSC on).
+
+## 2026-11-12 — agent Z — `core/stages/stages.h` (DigitalStage), `core/gpu/gpu_route.h`, `ntsc_gpu.h`, `core/src/testing.h` (private), timings text
+
+**Change.** `DigitalStage` gains `std::shared_ptr<gpu::Texture> process_gpu(DigitalGpu &, const
+std::shared_ptr<gpu::Texture> &, const FrameContext &)` (the stage on a picture on the GPU:
+`core/stages/digital/gpu/digital_gpu.h`) and `std::string profile_note() const`. `digital::Renderer` gains
+`code()` (`process()` without the full-size pictures), `scalePlan()` / `ScalePlan`, `ninths()`,
+`upscaleMaps()`, `Profile` / `lastProfile()` / `profile()`, and `render()` a defaulted `double *deblock_ms`.
+New `core/gpu/gpu_route.h`: `GpuRouteEnv`, `gpu_route_env[_text|_label]()`, `gpu_adapter_description()`,
+`gpu_is_software()` (moved from `ntsc_gpu.h`, same signature, still visible through it); `NtscGpuEnv` is now an
+alias of `GpuRouteEnv` (same enumerators). `testing::simulate_digital_gpu_errors` (fault injection).
+`ntscrt_last_timings` text: ` digital_route=gpu (<why>)` / ` digital_route=cpu (<why>)` on every frame Digital
+video runs, then ` digital_ms=scale:..,download:..,earlier:..,camera:..,codec:..,deblock:..,upsample:..,upload:..,upscale:..
+digital_captures=N`. A Digital look takes the direct picture path (`path=gpu-direct` with host GPU frames) when
+its route is on. The OpenFX plug-in logs `Digital video route: ...` once per instance when it changes. No C ABI
+change.
+
+**Reason.** Digital video's full-size steps on the GPU (docs/dev/DIGITAL-GPU.md), with the route decided like
+NTSC's (one shared rule, one switch per stage: `NTSCRT_DIGITAL_GPU`).

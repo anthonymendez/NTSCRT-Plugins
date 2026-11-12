@@ -1257,9 +1257,11 @@ class Suite:
                     f"{len(errors)} cases didn't render" if errors else "frames for --parity")
 
     BENCH_LOOKS = (("default", None, ""), ("clean-crt", "Clean CRT", ""), ("ntsc-off", "(defaults)", "ntsc_enabled=0"))
-    # More looks --bench-looks can name: bundled presets with NTSC on.
+    # More looks --bench-looks can name: bundled presets with NTSC on; Digital video looks.
     BENCH_EXTRA_LOOKS = {"mild-vhs": ("Mild VHS", ""), "tracking-noise": ("Tracking Noise up", ""),
-                         "high-chroma": ("High Chroma static", "")}
+                         "high-chroma": ("High Chroma static", ""),
+                         "webcam-lq": ("Webcam (low quality)", ""), "cheap-camcorder": ("Cheap camcorder", ""),
+                         "minidv": ("Digital video/MiniDV", "")}
     BENCH_SIZES = {"uhd": (3840, 2160), "1080p": (1920, 1080)}
 
     def t_bench(self):
@@ -1345,7 +1347,7 @@ class Suite:
                     p.DeleteRenderJob(job)
                     time.sleep(0.5)
                     text = self.log_since_rotated(log, mark)
-                    ms, paths, phases, ntsc = [], {}, {}, {}
+                    ms, paths, phases, ntsc, digital = [], {}, {}, {}, {}
                     for m in re.finditer(r" render #\d+ t=\S+ .*? ms=([\d.]+)(?: (\S+))?([^\r\n]*)", text):
                         ms.append(float(m.group(1)))
                         path = m.group(2) if m.group(2) and not m.group(2).startswith("look=") else "path=?"
@@ -1355,6 +1357,9 @@ class Suite:
                         r = re.search(r" ntsc_route=(gpu|cpu)", m.group(3))
                         if r:
                             ntsc[r.group(1)] = ntsc.get(r.group(1), 0) + 1
+                        r = re.search(r" digital_route=(gpu|cpu)", m.group(3))
+                        if r:
+                            digital[r.group(1)] = digital.get(r.group(1), 0) + 1
                     ms.sort()
                     q = lambda f: round(ms[min(len(ms) - 1, int(f * len(ms)))], 2) if ms else None  # noqa: E731
                     row = {"bench": self.a.bench_label, "size": f"{w}x{h}", "fps": self.a.bench_fps, "look": label,
@@ -1363,6 +1368,9 @@ class Suite:
                            "paths": {k.replace("path=", ""): v for k, v in paths.items()},
                            "ntsc_routes": ntsc,
                            "ntsc_route_lines": sorted(set(re.findall(r" NTSC route: ([^\r\n]*)", text))),
+                           "digital_routes": digital,
+                           "digital_route_lines": sorted(set(re.findall(r" Digital video route: ([^\r\n]*)", text))),
+                           "digital_gpu_env": os.environ.get("NTSCRT_DIGITAL_GPU", ""),
                            "phase_mean_ms": {k: round(sum(v) / len(v), 2) for k, v in phases.items()},
                            "profile": bool(os.environ.get("NTSCRT_PROFILE")),
                            "gpu_env": os.environ.get("NTSCRT_OFX_GPU", ""),
@@ -1679,7 +1687,8 @@ def main():
     ap.add_argument("--bench-fps", type=int, default=60, help="bench: project frame rate")
     ap.add_argument("--bench-repeat", type=int, default=1, help="bench: render jobs per look and size")
     ap.add_argument("--bench-looks", default="default,clean-crt,ntsc-off",
-                    help="bench: comma-separated looks: default, clean-crt, ntsc-off, mild-vhs, tracking-noise, high-chroma")
+                    help="bench: comma-separated looks: default, clean-crt, ntsc-off, mild-vhs, tracking-noise, high-chroma, "
+                         "webcam-lq, cheap-camcorder, minidv (Digital video)")
     ap.add_argument("--bench-label", default="", help="bench: label copied into each JSON line (e.g. the build)")
     ap.add_argument("--gpu-ab", action="store_true",
                     help="with --headless: render the gpupath frames with NTSCRT_OFX_GPU=0 (CPU path) and with the GPU "
@@ -1691,6 +1700,8 @@ def main():
                     help="with --headless --bundle: render every preset and effect in one Resolve session per "
                          "configuration (CPU reference, GPU default, mixed) and compare them (tests/resolve/parity.py)")
     ap.add_argument("--parity-quick", action="store_true", help="--parity with a small subset of the cases")
+    ap.add_argument("--parity-digital", action="store_true",
+                    help="--parity / --parity-quick: only the cases that run Digital video (docs/dev/DIGITAL-GPU.md)")
     ap.add_argument("--parity-configs", default="cpu,gpu,mixa,mixb,cpu2",
                     help="--parity: the sessions, in order (cpu, gpu, mixa, mixb, cpu2 = cpu again on a subset)")
     ap.add_argument("--parity-sources", default=None, help="--parity: folder for the generated source clips (default <out>/_src)")

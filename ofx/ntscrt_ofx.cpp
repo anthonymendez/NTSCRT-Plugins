@@ -1267,6 +1267,7 @@ private:
     long renders_ = 0, failures_ = 0;
     std::string gpu_fallback_said_;  // the last reason the GPU path fell back to the CPU, logged once
     std::string ntsc_route_said_;    // the NTSC route (GPU / ntsc-rs, and why) last logged
+    std::string digital_route_said_; // the Digital video route (GPU / CPU, and why) last logged
     bool gpu_first_logged_ = false;  // the first GPU render's details logged
     static int &instance_count() { static int n = 0; return n; }
     friend struct RenderCtx;
@@ -1485,17 +1486,18 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     }
     path += ntscrt_last_timings(inst_);
     {
-        // Which NTSC route renders this instance's frames and why (the core's
-        // " ntsc_route=gpu (...)" / " ntsc_route=cpu (...)"): logged when it changes,
-        // so once per instance unless a setting or a GPU failure changes it.
-        const size_t a = path.find(" ntsc_route=");
-        if (a != std::string::npos) {
-            const size_t open = path.find(" (", a);
-            size_t end = path.find(" ntsc_", a + 1);
-            if (open != std::string::npos && open < end) {
+        // Which route renders this instance's frames of a CPU stage with a GPU port, and
+        // why (the core's " ntsc_route=gpu (...)" / " digital_route=cpu (...)"): logged
+        // when it changes, so once per instance unless a setting or a GPU failure changes it.
+        auto log_route = [&](const std::string &key, const char *label, std::string &said) {
+            const size_t a = path.find(" " + key + "=");
+            if (a == std::string::npos) return;
+            const size_t from = a + key.size() + 2;
+            size_t end = path.find(' ', from);
+            if (end != std::string::npos && path.compare(end, 2, " (") == 0) {
                 // the reason runs to its matching ')'
                 int depth = 0;
-                for (size_t i = open + 1; i < path.size(); ++i) {
+                for (size_t i = end + 1; i < path.size(); ++i) {
                     if (path[i] == '(') ++depth;
                     else if (path[i] == ')' && --depth == 0) {
                         end = i + 1;
@@ -1503,12 +1505,14 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
                     }
                 }
             }
-            const std::string route = path.substr(a + 12, (end == std::string::npos ? path.size() : end) - a - 12);
-            if (route != ntsc_route_said_) {
-                ntsc_route_said_ = route;
-                dlog::write("instance #" + std::to_string(id_) + " NTSC route: " + route);
+            const std::string route = path.substr(from, (end == std::string::npos ? path.size() : end) - from);
+            if (route != said) {
+                said = route;
+                dlog::write("instance #" + std::to_string(id_) + " " + label + " route: " + route);
             }
-        }
+        };
+        log_route("ntsc_route", "NTSC", ntsc_route_said_);
+        log_route("digital_route", "Digital video", digital_route_said_);
     }
     if (ctx.aborted) {
         // Frames were skipped: the Digital stream / Screen Loop history built

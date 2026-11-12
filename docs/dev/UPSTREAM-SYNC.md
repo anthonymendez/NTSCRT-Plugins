@@ -90,6 +90,17 @@ entries and the files `gen_schema.py` reads disagree, so a new upstream file alw
 2. Port the new and changed XCTests next to the existing ones (Metal-only tests: port what they check about sizes
    and shapes, not the GPU call).
 3. App-only files: read the diff for behaviour a menu writes into a look; port only that.
+4. **Files with two targets.** Some of our ports also run on the GPU and must stay byte-identical to the C++:
+   - `Sources/CrtCodec/DigitalVideoRenderer.swift`: the capture scale-down (`scale`: the vImage Lanczos stand-in,
+     aliasing, One field) and the upscale back to the frame's size have a GPU copy in
+     `core/stages/digital/gpu/` (kernels in `shaders/digital_gpu.slang`, their tables from
+     `Renderer::scalePlan` / `upscaleMaps` / `ninths`; [DIGITAL-GPU.md](DIGITAL-GPU.md)). A diff to those
+     steps changes `renderer.cpp` **and** the kernels or `scalePlan` (a new parameter: a new field of
+     `ScalePlan`); then `test_digital_gpu` must pass (byte parity, also on WARP: `NTSCRT_D3D11_WARP=1`). The
+     camera (`capture`), the codecs and `render` are CPU-only: port them once. A change too big to port twice
+     right away can ship with the GPU route turned off for the affected settings (make `digital_gpu_route` /
+     `process_gpu` decline them), never with different pictures.
+   - The NTSC signal (vendor ntsc-rs) has its GPU copy in `core/stages/ntsc/gpu/` ([NTSC-GPU.md](NTSC-GPU.md)).
 
 ## 4. Saved-project compatibility
 
