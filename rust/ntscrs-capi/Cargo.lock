@@ -88,6 +88,9 @@ name = "ntscrs-capi"
 version = "0.1.0"
 dependencies = [
  "ntsc-rs",
+ "rand",
+ "rand_xoshiro",
+ "siphasher",
 ]
 
 [[package]]

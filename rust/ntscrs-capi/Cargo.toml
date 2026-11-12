@@ -12,6 +12,11 @@ crate-type = ["staticlib"]
 
 [dependencies]
 ntsc-rs = { path = "../../vendor/ntsc-rs/crates/ntscrs" }
+# The versions ntsc-rs itself uses (Cargo.lock): the GPU plan exports
+# (src/gpu_plan.rs) reproduce its seeds and random rows with the same code.
+rand = { version = "0.9.0", default-features = false }
+rand_xoshiro = "0.7.0"
+siphasher = "1.0.0"
 
 [profile.release]
 lto = true
