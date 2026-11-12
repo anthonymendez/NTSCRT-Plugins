@@ -148,6 +148,11 @@ separate multiply and add, and the GPU would then differ from it by the amounts 
 | WARP (`double`) | max 0, 0 differ | max 0, 0 differ | 0 | max 0, 0 differ |
 | WARP with plain `mad` (not fused; before the probe) | max 1-3 levels, 0.0005-5.6% differ | - | 1e-7 .. 1.3e-5 (ringing's gain) | - |
 
+Through the whole pipeline (`bench_transfer --dump`, `ntsc_gpu_passes` look with CRT, 3840x2160 and
+1920x1080, 8-bit and float frames) the output with `NTSCRT_NTSC_GPU=1` is byte-identical to the output
+without it; and the `default`, `clean_crt` and `ntsc_off` looks render byte-identically to the parent commit
+(9221271) with the variable unset and with it set to 1 (fallback).
+
 The tolerance in the tests is the HOST-GPU.md rule (each channel within 1/255, at most 0.2% of values
 different), the same for every case; it holds with room to spare because the result is exact. The unfused
 row shows why the probe exists: ntsc-rs truncates to 8 bits (no rounding), so a float error of one ulp flips a
