@@ -124,6 +124,36 @@ Lines that mention a project or file name containing "NTSCRT" are kept as they a
 Nothing is uploaded anywhere. Look through it if you like, then send it along with a description of
 what went wrong.
 
+### GPU vs CPU parity (developers, a build, Resolve Studio)
+The plug-in has three GPU routes that are on by default (fast transfers, host GPU frames, the NTSC signal on the
+GPU); `run_resolve_tests.py --parity` checks in Resolve itself that they render what the CPU version renders.
+Resolve closed, ffmpeg on PATH (it makes the test clips once):
+```bash
+python tests/resolve/run_resolve_tests.py --headless --bundle <build>/ofx/Release/NTSCRT.ofx.bundle --build <build> \
+    --out <folder> --parity            # or --parity-quick: about 90 cases, ~6 minutes per session
+```
+It renders every bundled preset (counted from `presets/` plus the schema's Digital video formats), every stage on
+its own from all-off, every NTSC setting at a strong value, the options of Glitch / Digital video / Screen Loop /
+Downscale / Crop, every CRT shader (alone, over the default look, and with all its parameters at strong values),
+8-bit / half-float / smaller sources, a title in both *Transparent areas* modes, the Edit page (also a zoomed,
+panned and cropped clip), frames 0, 75 and 1850 and frame 107980 of a one-hour clip, and 1080p and UHD projects.
+One headless Resolve session per configuration: `cpu` (`NTSCRT_NTSC_GPU=0 NTSCRT_OFX_GPU=0
+NTSCRT_FAST_TRANSFER=0`, the reference), `gpu` (nothing set), `mixa` (`NTSCRT_OFX_GPU=0`), `mixb`
+(`NTSCRT_NTSC_GPU=0`), `cpu2` (the reference again on a subset: Resolve's own noise). Rules: where only the NTSC
+route differs (`mixa`/`cpu`, `gpu`/`mixb`) every value must be equal; with host GPU frames (`mixb`/`cpu`,
+`gpu`/`cpu`) the [HOST-GPU.md](dev/HOST-GPU.md) tolerance (within 1/255, at most 0.2% of values different);
+8-bit and half-float Fusion sources against CPU frames are informational (Resolve hands GPU-render plug-ins float).
+Every case's route is read from the plug-in's log (`path=`, `ntsc_route=`) and must be the configuration's, so a
+pass can't come from both sides taking the same route. Results: `parity.md`, `parity.json`, `parity.csv` in
+`--out`, with one folder of frames and logs per session; `--parity-compare-only` compares them again,
+`--parity-configs` picks sessions, `--parity-retry` renders again the cases a session lost (Resolve sometimes stops
+answering scripting calls for a while) and merges them in. A full run takes about two and a half hours (RTX 5090).
+First run (2026-11-12, 355 cases, 972 images per pair): every image equal in every pair except the CRT *sim* shader,
+whose output depends on the frames rendered before it (it differs between two CPU sessions too), and the documented
+8-bit Fusion case. Not covered: Adjustment Clips (scripts can't give them an OpenFX effect), render scale (the
+render queue always renders at full size), Screen Loop on an Edit-page clip in 1080p / UHD projects (Resolve fetches
+hundreds of full-size history frames and stalls).
+
 ### Debug logging (for a specific problem)
 The plug-in always keeps a small log (start-up, the first frames of each effect, every error). To capture
 **every** frame of the problem:
