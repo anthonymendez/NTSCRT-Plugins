@@ -21,6 +21,7 @@
 
 #include "../stages/digital/fields.h"
 #include "../stages/digital/parallel.h"
+#include "../stages/crop/crop_internal.h"
 #include "../stages/ntsc/gpu/ntsc_gpu.h"
 #include "../stages/stages.h"
 #include "embedded_schema.h"
@@ -148,9 +149,18 @@ struct ntscrt_instance {
     std::shared_ptr<gpu::Device> dev;
     DigitalStage digital;
     NtscStage ntsc;
-    NtscStage howl_ntsc[2];  // Screen Loop history passes, two at a time on worker threads (render_once)
-    std::unique_ptr<NtscGpu> ntsc_gpu;  // GPU port of the NTSC stage (opt-in: NTSCRT_NTSC_GPU, NTSC-GPU.md)
-    NtscGpuPlan ntsc_plan;              // its per-frame plan, buffers kept between frames
+    NtscStage howl_ntsc[2];  // Screen Loop history passes on ntsc-rs, two at a time on worker threads (render_once)
+    std::unique_ptr<NtscGpu> ntsc_gpu;  // GPU port of the NTSC stage (NTSC-GPU.md; NTSCRT_NTSC_GPU)
+    NtscGpuPlan ntsc_plan;              // its plan of the frame (one-entry cache: the same frame again reuses it)
+    NtscGpuPlan howl_plan;              // ... of Screen Loop's history passes
+    // Whether this instance's NTSC frames take the GPU route (ntsc_gpu_on): decided on
+    // the first NTSC frame, again when NTSCRT_NTSC_GPU changes or the device is replaced.
+    struct NtscRoute {
+        bool decided = false, on = false;
+        std::string env, why;  // the variable's value it was decided for; the reason either way
+        int failures = 0;      // GPU errors in a row (not a lost device)
+        bool disabled = false; // too many: ntsc-rs for this instance from then on
+    } ntsc_route;
     std::unique_ptr<Downscaler> downscale;
     std::unique_ptr<GlitchStage> glitch;
     std::unique_ptr<CrtStage> crt;
@@ -165,6 +175,7 @@ struct ntscrt_instance {
     std::string gpu_gone;  // set when the GPU was lost and couldn't be replaced: CPU stages from then on
     int device_resets = 0;  // devices recreated since the last good GPU frame
     bool test_lose_device = false, test_recreate_fails = false;
+    int test_ntsc_gpu_errors = 0;  // testing::simulate_ntsc_gpu_errors
     std::string presets_cache;
     SourceCache sources;
     LookStore looks;
@@ -201,6 +212,7 @@ void drop_gpu(ntscrt_instance *inst) {
     inst->glitch.reset();
     inst->downscale.reset();
     inst->ntsc_gpu.reset();
+    inst->ntsc_route = {};
     inst->dev.reset();
 }
 
@@ -274,6 +286,7 @@ void set_source_budget(ntscrt_instance *inst, size_t bytes) {
     inst->sources.budget = bytes;
     inst->sources.evict();
 }
+void simulate_ntsc_gpu_errors(ntscrt_instance *inst, int n) { inst->test_ntsc_gpu_errors = n; }
 void simulate_device_lost(ntscrt_instance *inst, bool recreate_fails) {
     inst->test_lose_device = true;
     inst->test_recreate_fails = recreate_fails;
@@ -435,6 +448,103 @@ using facade::for_row_blocks;
 using facade::output_format;
 using facade::readback_bands;
 
+
+// ---- NTSC on the GPU (docs/dev/NTSC-GPU.md) ----
+// GPU errors (not a lost device) in a row after which an instance stays on ntsc-rs.
+constexpr int kNtscGpuMaxFailures = 3;
+
+// Whether this instance's NTSC frames may take the GPU route now; `why` gets the
+// reason either way (ntsc_gpu_route's, or the failures that turned it off).
+bool ntsc_gpu_on(ntscrt_instance *inst, gpu::Device &dev, std::string &why) {
+    auto &r = inst->ntsc_route;
+    const std::string env = ntsc_gpu_env_text();
+    if (!r.decided || r.env != env) {
+        r = {};
+        r.decided = true;
+        r.env = env;
+        r.on = ntsc_gpu_route(dev, &r.why, inst->ntsc_gpu.get());
+    }
+    why = r.why;
+    return r.on && !r.disabled;
+}
+
+// A GPU error on the NTSC route: this frame takes ntsc-rs; after
+// kNtscGpuMaxFailures in a row, every frame of the instance does.
+void ntsc_gpu_failed(ntscrt_instance *inst, const std::string &what, std::string &why) {
+    auto &r = inst->ntsc_route;
+    why = "GPU error: " + what;
+    if (++r.failures >= kNtscGpuMaxFailures && !r.disabled) {
+        r.disabled = true;
+        r.why = "GPU error " + std::to_string(r.failures) + " frames in a row (last: " + what +
+                "): ntsc-rs for this instance from now on";
+        why = r.why;
+    }
+}
+
+// The NTSC stage on the GPU for a w x h picture: the plan, its tables (on another
+// thread while `picture` makes the input, when `async_tables`), the passes. The
+// result (BGRA8), or nullptr when the frame must take ntsc-rs instead (`why`).
+// A lost device throws (render_impl replaces it).
+std::shared_ptr<gpu::Texture> ntsc_gpu_run(ntscrt_instance *inst, NtscGpuPlan &plan, const FrameContext &c, int w,
+                                           int h, const std::function<std::shared_ptr<gpu::Texture>()> &picture,
+                                           bool async_tables, std::string &why) {
+    try {
+        inst->ntsc.gpu_plan(c, w, h, plan, 0xffffffffu, false);
+    } catch (const std::exception &e) {
+        why = e.what();  // bad settings: ntsc-rs reports them
+        return nullptr;
+    }
+    if (!plan.supported()) {
+        why = "not on the GPU yet: " + plan.unsupported_names();
+        return nullptr;
+    }
+    std::future<void> tables;
+    try {
+        if (!plan.tables_ready && async_tables)
+            tables = std::async(std::launch::async, [inst, &plan] { inst->ntsc.gpu_tables(plan); });
+        else
+            inst->ntsc.gpu_tables(plan);  // (nothing to do when the cache kept them)
+        std::shared_ptr<gpu::Texture> in = picture();
+        if (tables.valid()) tables.get();
+        if (inst->test_ntsc_gpu_errors > 0) {
+            --inst->test_ntsc_gpu_errors;
+            throw std::runtime_error("simulated NTSC GPU error");
+        }
+        if (!in) throw std::runtime_error("no input picture");
+        auto out = inst->ntsc_gpu->run(*in, plan);
+        inst->ntsc_route.failures = 0;
+        return out;
+    } catch (const std::exception &e) {
+        if (tables.valid()) tables.wait();
+        plan.key_valid = false;  // not a plan to keep
+        if (device_lost(inst)) throw;
+        ntsc_gpu_failed(inst, e.what(), why);
+        return nullptr;
+    }
+}
+
+// The timings note of the NTSC route (ntscrt_last_timings, the OpenFX debug log):
+// " ntsc_route=gpu (why)" / " ntsc_route=cpu (why)"; with the GPU, the CPU time of
+// the plan and tables and, with NTSCRT_PROFILE=1, the GPU time (total, per pass).
+void note_ntsc_route(ntscrt_instance *inst, PhaseTimes &pt, bool gpu, const std::string &why) {
+    pt.note += std::string(" ntsc_route=") + (gpu ? "gpu" : "cpu") + " (" + why + ")";
+    if (!gpu) return;
+    char b[64];
+    std::snprintf(b, sizeof b, " ntsc_tables_ms=%.3f%s", inst->ntsc_plan.table_ms, inst->ntsc_plan.cached ? " ntsc_cached=1" : "");
+    pt.note += b;
+    const auto &times = inst->ntsc_gpu->pass_times();
+    if (times.empty()) return;
+    double total = 0;
+    for (const auto &t : times) total += t.second;
+    std::snprintf(b, sizeof b, " ntsc_gpu_ms=%.3f", total);
+    pt.note += b;
+    pt.note += " ntsc_gpu=";
+    for (size_t i = 0; i < times.size(); ++i) {
+        std::snprintf(b, sizeof b, "%s%s:%.3f", i ? "," : "", times[i].first.c_str(), times[i].second);
+        pt.note += b;
+    }
+}
+
 // out_fmt: output_format() for the host picture; used when the CRT shader is
 // on (its bypass is an 8-bit picture anyway, kept exactly as before).
 ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
@@ -506,11 +616,16 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         }
     } keep{inst, img, alpha};
     if (fast_transfer()) alpha = std::move(inst->spare_alpha);
+    // NTSC on the GPU (docs/dev/NTSC-GPU.md: by default on D3D11 hardware devices),
+    // when this instance's route is on; else (or when a frame can't) ntsc-rs.
+    const bool ntsc_on = inst->ntsc.active(look);
+    std::string ntsc_why;
+    const bool ntsc_gpu = ntsc_on && inst->dev && !inst->test_lose_device && ntsc_gpu_on(inst, *inst->dev, ntsc_why);
     // The source goes straight onto the GPU (direct_src->make, below) when no
-    // CPU stage needs the picture.
+    // CPU stage needs the picture (NTSC on the GPU needs none).
     const bool direct = direct_src && inst->dev && !inst->test_lose_device &&
                         !inst->howl->active(args->feedback_json ? &feedback : nullptr) &&
-                        !inst->digital.active(look) && !inst->ntsc.active(look) &&
+                        !inst->digital.active(look) && (!ntsc_on || ntsc_gpu) &&
                         (direct_src->crops || !Crop::cuts(look, direct_src->w, direct_src->h));
     auto convert_source = [&] {
         ImageBGRA8 raw;
@@ -524,6 +639,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         Crop::apply(look, std::move(raw), img);  // no crop: moved, not copied
         if (fast_transfer() && raw.px.capacity() > inst->spare_px.capacity()) inst->spare_px = std::move(raw.px);
     };
+    bool have_cpu_pic = !direct;  // img holds the picture (else it's made on the GPU)
     if (direct) {
         // No pixels in img (only read on the CPU-only path); its size becomes the
         // direct picture's (the crop's) once made.
@@ -625,12 +741,41 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             if (inst->glitch->active(*c.look)) ch = inst->glitch->run(ch, cg);
             return ch;
         };
+        // NTSC of a loop pass on the GPU, on the camera picture itself (no download,
+        // no ntsc-rs, no upload; bit-identical to them): the NTSC result, or
+        // nullptr when the pass must take ntsc-rs (`loop_why`).
+        int loop_gpu = 0, loop_cpu = 0;  // passes per route in this call (timings)
+        std::string loop_why;
+        auto loop_ntsc_gpu = [&](const std::shared_ptr<gpu::Texture> &cam, const FrameContext &cn) {
+            if (!ntsc_gpu_on(inst, dev, loop_why)) return std::shared_ptr<gpu::Texture>();
+            PhaseScope ps(pt, PhaseTimes::Ntsc, &dev);
+            return ntsc_gpu_run(inst, inst->howl_plan, cn, cam->desc().width, cam->desc().height,
+                                [&] { return cam; }, false, loop_why);
+        };
+        // Downscale and Glitch of a loop pass whose NTSC ran on the GPU (gpu_half without the upload).
+        auto gpu_rest = [&](const std::shared_ptr<gpu::Texture> &ntsc_out, const std::shared_ptr<const json> &pin,
+                            const HowlPass &p) {
+            FrameContext c = at(p.frame, pin);
+            auto ch = inst->downscale->run(ntsc_out, c);
+            FrameContext cg = c;
+            cg.frame = int64_t(std::llround(p.glitch_time * ctx.fps));  // glitch_time(cg)
+            if (inst->glitch->active(*c.look)) ch = inst->glitch->run(ch, cg);
+            return ch;
+        };
         HowlHooks h;
         h.chain_input = [&](const std::shared_ptr<gpu::Texture> &cam, const HowlPass &p) {
-            ImageBGRA8 im = download(*cam);
             const auto pin = look_ptr(p.frame);
             FrameContext cn = at(p.ntsc_frame - 1, pin);  // ntsc_frame(cn) == p.ntsc_frame
-            if (inst->ntsc.active(*pin)) {
+            const bool on = inst->ntsc.active(*pin);
+            if (on) {
+                if (auto g = loop_ntsc_gpu(cam, cn)) {
+                    ++loop_gpu;
+                    return gpu_rest(g, pin, p);
+                }
+                ++loop_cpu;
+            }
+            ImageBGRA8 im = download(*cam);
+            if (on) {
                 PhaseScope ps(pt, PhaseTimes::Ntsc);
                 inst->ntsc.process(im, cn);
             }
@@ -640,10 +785,12 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         // worker (each of the two in flight on its own NtscStage) while the
         // loop exposes the next cameras; ntsc-rs's result depends only on its
         // settings, frame and seed, and the GPU half runs here in frame order,
-        // so the pictures are chain_input's.
+        // so the pictures are chain_input's. On the GPU route the pass's NTSC is
+        // queued on the GPU at once (reading the camera) and the rest is the second half.
         struct LoopJob {
             ImageBGRA8 im;
             std::shared_ptr<const json> pin;
+            std::shared_ptr<gpu::Texture> gpu;  // the NTSC result, GPU route
             std::future<void> cpu;  // last member: destroyed (waited for) first
         };
         constexpr int kJobs = 2;  // NTSC passes running at once (Howlaround allows 2 in flight)
@@ -652,11 +799,20 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         h.chain_input_begin = [&](const std::shared_ptr<gpu::Texture> &cam,
                                   const HowlPass &p) -> std::function<std::shared_ptr<gpu::Texture>()> {
             auto job = std::make_shared<LoopJob>();
-            job->im = download(*cam);
             job->pin = look_ptr(p.frame);
+            const bool on = inst->ntsc.active(*job->pin);
+            if (on) {
+                job->gpu = loop_ntsc_gpu(cam, at(p.ntsc_frame - 1, job->pin));
+                if (job->gpu) ++loop_gpu;
+                else ++loop_cpu;
+            }
+            if (job->gpu) {
+                return [&gpu_rest, job, p] { return gpu_rest(job->gpu, job->pin, p); };
+            }
+            job->im = download(*cam);
             auto &slot = jobs[job_count % kJobs];
             if (slot && slot->cpu.valid()) slot->cpu.wait();
-            if (inst->ntsc.active(*job->pin)) {
+            if (on) {
                 FrameContext cn;  // what NtscStage reads, nothing that points into this call
                 cn.frame = p.ntsc_frame - 1;
                 cn.fps = ctx.fps;
@@ -687,12 +843,26 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             PhaseScope ps(pt, PhaseTimes::Loop, &dev);
             cam = inst->howl->camera(upload(img), feedback, ctx);
         }
-        ImageBGRA8 im = download(*cam);
-        if (inst->ntsc.active(look)) {
-            PhaseScope ps(pt, PhaseTimes::Ntsc);
-            inst->ntsc.process(im, ctx);
+        std::shared_ptr<gpu::Texture> up;
+        if (ntsc_gpu) {
+            PhaseScope ps(pt, PhaseTimes::Ntsc, &dev);
+            up = ntsc_gpu_run(inst, inst->ntsc_plan, ctx, cam->desc().width, cam->desc().height,
+                              [&] { return cam; }, false, ntsc_why);
         }
-        auto up = upload(im);
+        if (ntsc_on) note_ntsc_route(inst, pt, up != nullptr, ntsc_why);
+        if (loop_gpu + loop_cpu > 0) {
+            pt.note += " ntsc_loop=gpu:" + std::to_string(loop_gpu) + ",cpu:" + std::to_string(loop_cpu);
+            if (loop_cpu && !loop_why.empty()) pt.note += " (" + loop_why + ")";
+        }
+        if (!up) {
+            ImageBGRA8 im = download(*cam);
+            if (ntsc_on) {
+                PhaseScope ps(pt, PhaseTimes::Ntsc);
+                inst->ntsc.process(im, ctx);
+            }
+            up = upload(im);
+        }
+        cam.reset();
         {
             PhaseScope ps(pt, PhaseTimes::Downscale, &dev);
             chain = inst->downscale->run(up, ctx);
@@ -710,76 +880,56 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             inst->digital.process(img, ctx);
         }
         ctx.line_height = inst->digital.active(look) ? digital::chain_line_height(look) : 1;  // One field
+        // The pipeline's 8-bit picture on the GPU: made there from the source
+        // (direct), or the CPU picture uploaded.
+        bool use_direct = direct;
+        auto picture = [&]() -> std::shared_ptr<gpu::Texture> {
+            std::shared_ptr<gpu::Texture> t;
+            if (use_direct) {
+                PhaseScope ps(pt, PhaseTimes::In, &dev);
+                t = direct_src->make(dev, mode, look, alpha, facade::PoolFn(acquire));
+                if (t) {
+                    img.width = t->desc().width;
+                    img.height = t->desc().height;
+                }
+            }
+            if (!t) {
+                if (!have_cpu_pic) {  // needs the hole filling: the usual way
+                    convert_source();
+                    have_cpu_pic = true;
+                }
+                t = upload(img);
+            }
+            return t;
+        };
         std::shared_ptr<gpu::Texture> pic;
-        if (inst->ntsc.active(look) && ntsc_gpu_requested()) {
-            // GPU NTSC (opt-in, docs/dev/NTSC-GPU.md): the 8-bit picture goes up
-            // first and the effect runs on it there, when the route is on and
-            // every pass this frame's settings use is implemented; otherwise the
-            // frame takes the Rust path below, exactly as without the variable.
+        if (ntsc_gpu) {
+            // NTSC on the GPU: the plan's tables (CPU: seeds, shifts, speckles) are
+            // built while the picture is made / uploads; then the passes run on it.
             PhaseScope ps(pt, PhaseTimes::Ntsc, &dev);
-            std::string why;
-            bool ok = ntsc_gpu_route(dev, &why);
-            if (ok) {
-                try {
-                    inst->ntsc.gpu_plan(ctx, img.width, img.height, inst->ntsc_plan, 0xffffffffu, false);
-                    ok = inst->ntsc_plan.supported();
-                    if (!ok) why = "not on the GPU yet: " + inst->ntsc_plan.unsupported_names();
-                } catch (const std::exception &e) {
-                    ok = false;
-                    why = e.what();
+            int w = img.width, h = img.height;  // direct: the source's size; cut to the crop's
+            if (use_direct && direct_src->crops)
+                if (auto c = crop::from_look(look)) {
+                    const crop::Rect r = c->rect(w, h);
+                    w = r.width;
+                    h = r.height;
                 }
-            }
-            if (ok) {
-                // The plan's tables (CPU: seeds, shifts, speckles) are built while
-                // the picture uploads; the plan itself said the frame can go.
-                std::future<void> tables = std::async(std::launch::async, [&] {
-                    inst->ntsc.gpu_tables(inst->ntsc_plan);
-                });
-                try {
-                    auto up = upload(img);
-                    tables.get();
-                    pic = inst->ntsc_gpu->run(*up, inst->ntsc_plan);
-                } catch (const std::exception &e) {
-                    if (device_lost(inst)) throw;  // render_impl replaces the device
-                    ok = false;                    // e.g. a kernel that didn't compile: ntsc-rs instead
-                    why = std::string("GPU error: ") + e.what();
-                    pic.reset();
+            pic = ntsc_gpu_run(inst, inst->ntsc_plan, ctx, w, h, picture, true, ntsc_why);
+        }
+        if (ntsc_on) {
+            note_ntsc_route(inst, pt, pic != nullptr, ntsc_why);
+            if (!pic) {
+                // ntsc-rs, on the CPU picture, which then goes up (not the direct one).
+                if (!have_cpu_pic) {
+                    convert_source();
+                    have_cpu_pic = true;
                 }
-            }
-            if (ok) {
-                pt.note += " ntsc_route=gpu";
-                char b[64];
-                std::snprintf(b, sizeof b, " ntsc_tables_ms=%.3f", inst->ntsc_plan.table_ms);
-                pt.note += b;
-                // NTSCRT_PROFILE=1: the GPU time of each pass (NtscGpu::pass_times)
-                const auto &times = inst->ntsc_gpu->pass_times();
-                if (!times.empty()) {
-                    pt.note += " ntsc_gpu=";
-                    for (size_t i = 0; i < times.size(); ++i) {
-                        std::snprintf(b, sizeof b, "%s%s:%.3f", i ? "," : "", times[i].first.c_str(), times[i].second);
-                        pt.note += b;
-                    }
-                }
-            } else {
-                pt.note += " ntsc_route=cpu (" + why + ")";
+                use_direct = false;
+                PhaseScope ps(pt, PhaseTimes::Ntsc);
+                inst->ntsc.process(img, ctx);
             }
         }
-        if (inst->ntsc.active(look) && !pic) {
-            PhaseScope ps(pt, PhaseTimes::Ntsc);
-            inst->ntsc.process(img, ctx);
-        }
-        if (direct) {
-            PhaseScope ps(pt, PhaseTimes::In, &dev);
-            pic = direct_src->make(dev, mode, look, alpha, facade::PoolFn(acquire));
-            if (pic) {
-                img.width = pic->desc().width;
-                img.height = pic->desc().height;
-            }
-        }
-        if (!pic) {
-            if (direct) convert_source();  // needs the hole filling: the usual way
-            pic = upload(img);
-        }
+        if (!pic) pic = picture();
         {
             PhaseScope ps(pt, PhaseTimes::Downscale, &dev);
             chain = inst->downscale->run(pic, ctx);

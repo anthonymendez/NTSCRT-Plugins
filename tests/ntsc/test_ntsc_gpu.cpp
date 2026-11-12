@@ -859,18 +859,18 @@ struct EnvGuard {
 
 }  // namespace
 
-TEST_CASE("ntsc gpu pipeline: unset or 0 changes nothing; an unsupported setting falls back exactly") {
+TEST_CASE("ntsc gpu pipeline: 0 is ntsc-rs, the default is exact; an unsupported setting falls back exactly") {
     EnvGuard guard;
     ntscrt_instance *inst = make_instance();
     const ImageBGRA8 src = picture("bars", 160, 120);
     const std::string house = pipeline_look(json::object());
     const std::string gpu_ok = pipeline_look(gpu_full_settings());  // house + snow
 
-    gputest::set_env("NTSCRT_NTSC_GPU", nullptr);
+    gputest::set_env("NTSCRT_NTSC_GPU", "0");
     const Rendered a = render(inst, house, src, 4);
     const Rendered a2 = render(inst, gpu_ok, src, 4);
-    CHECK(a.timings.find("ntsc_route") == std::string::npos);
-    CHECK(a2.timings.find("ntsc_route") == std::string::npos);
+    CHECK(a.timings.find("ntsc_route=cpu (NTSCRT_NTSC_GPU=0)") != std::string::npos);
+    CHECK(a2.timings.find("ntsc_route=cpu (NTSCRT_NTSC_GPU=0)") != std::string::npos);
 
     // The Rust stage itself, for reference: the pipeline's result is it (all GPU stages off).
     {
@@ -882,9 +882,19 @@ TEST_CASE("ntsc gpu pipeline: unset or 0 changes nothing; an unsupported setting
         CHECK(ref.px == a2.px);
     }
 
-    gputest::set_env("NTSCRT_NTSC_GPU", "0");
-    CHECK(render(inst, house, src, 4).px == a.px);
-    CHECK(render(inst, gpu_ok, src, 4).px == a2.px);
+    // Unset: the default (auto) route. On D3D11 hardware the GPU, bit-identical;
+    // on WARP / Metal ntsc-rs (the reason says which).
+    gputest::set_env("NTSCRT_NTSC_GPU", nullptr);
+    const Rendered d = render(inst, house, src, 4);
+    const Rendered d2 = render(inst, gpu_ok, src, 4);
+    INFO(d.timings);
+    CHECK(d.px == a.px);
+    CHECK(d2.px == a2.px);
+    if (ntscrt::testing::stats(inst).has_gpu) {
+        const bool gpu = d.timings.find("ntsc_route=gpu (auto") != std::string::npos;
+        CHECK((gpu || d.timings.find("software device") != std::string::npos ||
+               d.timings.find("not on Metal") != std::string::npos));
+    }
 
     gputest::set_env("NTSCRT_NTSC_GPU", "1");
     // Every stage is on the GPU now: a stage left to ntsc-rs on purpose (the
@@ -918,3 +928,70 @@ TEST_CASE("ntsc gpu pipeline: unset or 0 changes nothing; an unsupported setting
     ntscrt_destroy(inst);
 }
 
+
+TEST_CASE("ntsc gpu pipeline: GPU errors take ntsc-rs for the frame, three in a row for the instance") {
+    EnvGuard guard;
+    ntscrt_instance *inst = make_instance();
+    if (!ntscrt::testing::stats(inst).has_gpu || gputest::native_backend() != gpu::Backend::D3D11) {
+        ntscrt_destroy(inst);
+        return;
+    }
+    const ImageBGRA8 src = picture("bars", 160, 120);
+    const std::string house = pipeline_look(json::object());
+    gputest::set_env("NTSCRT_NTSC_GPU", "0");
+    const Rendered ref = render(inst, house, src, 4);
+    gputest::set_env("NTSCRT_NTSC_GPU", "force");  // also on WARP
+    // Two errors, then a good frame: the count starts again.
+    ntscrt::testing::simulate_ntsc_gpu_errors(inst, 2);
+    for (int i = 0; i < 2; ++i) {
+        const Rendered r = render(inst, house, src, 4);
+        CHECK(r.timings.find("ntsc_route=cpu (GPU error: simulated") != std::string::npos);
+        CHECK(r.px == ref.px);
+    }
+    Rendered r = render(inst, house, src, 4);
+    CHECK(r.timings.find("ntsc_route=gpu") != std::string::npos);
+    CHECK(r.px == ref.px);
+    // Three in a row: ntsc-rs for the instance from then on.
+    ntscrt::testing::simulate_ntsc_gpu_errors(inst, 3);
+    for (int i = 0; i < 3; ++i) r = render(inst, house, src, 4);
+    CHECK(r.timings.find("3 frames in a row") != std::string::npos);
+    r = render(inst, house, src, 5);
+    CHECK(r.timings.find("ntsc_route=cpu (GPU error 3 frames in a row") != std::string::npos);
+    ntscrt::testing::simulate_ntsc_gpu_errors(inst, 0);
+    // Another value of the variable decides again.
+    gputest::set_env("NTSCRT_NTSC_GPU", "1");
+    if (auto dv = gputest::device(); dv && !gpu_is_software(*dv)) {
+        r = render(inst, house, src, 4);
+        CHECK(r.timings.find("ntsc_route=gpu") != std::string::npos);
+        CHECK(r.px == ref.px);
+    }
+    ntscrt_destroy(inst);
+}
+
+TEST_CASE("ntsc gpu pipeline: the same frame again reuses its plan and tables") {
+    EnvGuard guard;
+    ntscrt_instance *inst = make_instance();
+    if (!ntscrt::testing::stats(inst).has_gpu || gputest::native_backend() != gpu::Backend::D3D11) {
+        ntscrt_destroy(inst);
+        return;
+    }
+    gputest::set_env("NTSCRT_NTSC_GPU", "force");
+    const ImageBGRA8 src = picture("bars", 160, 120);
+    const std::string house = pipeline_look(gpu_full_settings());
+    json other = json::parse(house);
+    other["glitch"] = {{"enabled", true}};  // not an NTSC setting
+    const Rendered a = render(inst, house, src, 7);
+    CHECK(a.timings.find("ntsc_cached") == std::string::npos);
+    const Rendered b = render(inst, house, src, 7);
+    CHECK(b.timings.find("ntsc_cached=1") != std::string::npos);
+    CHECK(b.px == a.px);
+    const Rendered c = render(inst, other.dump(), src, 7);  // an Inspector edit outside NTSC
+    CHECK(c.timings.find("ntsc_cached=1") != std::string::npos);
+    const Rendered d = render(inst, house, src, 8);  // the next frame: new tables
+    CHECK(d.timings.find("ntsc_cached") == std::string::npos);
+    const Rendered e = render(inst, house, src, 7);
+    CHECK(e.px == a.px);
+    gputest::set_env("NTSCRT_NTSC_GPU", "0");
+    CHECK(render(inst, house, src, 8).px == d.px);  // exact against ntsc-rs (force: WARP too)
+    ntscrt_destroy(inst);
+}
