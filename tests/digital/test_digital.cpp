@@ -1,5 +1,5 @@
 // Port of upstream Tests/CrtCoreTests/DigitalVideoTests.swift and Video1Tests.swift
-// (v0.20.0, c6ab639), plus
+// (v0.21.0, 8b26092; Video1Tests unchanged since v0.20.0), plus
 // the same "jumped to = played" checks through DigitalStage and a fake
 // FrameContext, thread-count determinism, missing history and seeds.
 #include <doctest/doctest.h>
