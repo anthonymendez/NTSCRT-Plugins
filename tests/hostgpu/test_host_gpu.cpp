@@ -5,19 +5,25 @@
 // the core's D3D11 device is on another GPU.
 //
 // Tolerance (docs/dev/HOST-GPU.md): every channel within 1/255 (+1e-5) of the CPU
-// path's value and at most 0.2% of the values different at all (beyond 1e-5) —
-// the GPU's division (unpremultiplying in Clip mode, Spill's straight output) can
-// land on the other side of an 8-bit rounding step; opaque frames match exactly.
+// path's value and at most 0.2% of the values different at all. In practice the
+// GPU path is exact except half-float output (GPU rounds to nearest even).
 #include <doctest/doctest.h>
 #include <ntscrt/ntscrt.h>
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
+#include <fstream>
+#include <sstream>
+
 #include "fake_cuda_host.h"
+#include "ntscrt_host/params.h"
 
 namespace {
 
@@ -108,7 +114,7 @@ Diff compare(const HostImage &a, const HostImage &b) {
 
 struct Case {
     const char *name;
-    const char *look;
+    std::string look;
     ntscrt_pixel_format f;
     Alpha alpha;
     double scale = 1.0;
@@ -127,28 +133,48 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
         return;
     }
     const std::string res = NTSCRT_BUILT_RESOURCES_DIR;
+    // Looks as the plug-in builds them: every param at its default (ntsc-rs, Glitch, the default CRT
+    // shader on), with the changes each case names; and the bundled Clean CRT look.
+    const auto schema = ntscrt::host::Schema::parse(ntscrt_param_schema_json());
+    const nlohmann::json plugin_default =
+        ntscrt::host::build_look(schema, [&](size_t i) { return schema.params[i].def; }).look;
+    auto look = [&](const char *patch) {
+        nlohmann::json l = plugin_default;
+        l.merge_patch(nlohmann::json::parse(patch));
+        return l.dump();
+    };
+    std::string clean_crt;
+    {
+        std::ifstream f(std::string(NTSCRT_SOURCE_DIR) + "/presets/Clean CRT.json");
+        std::stringstream ss;
+        ss << f.rdbuf();
+        clean_crt = ss.str();
+        REQUIRE(!clean_crt.empty());
+    }
+    const char *off = R"({"ntsc":{"enabled":false}})";
     const Case cases[] = {
-        {"default look (NTSC on: download route), float", "{}", NTSCRT_RGBA32F, Alpha::Opaque},
-        {"NTSC off (direct route), float", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA32F, Alpha::Opaque},
-        {"NTSC off, half float", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA16F, Alpha::Opaque},
-        {"NTSC off, 8-bit", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA8, Alpha::Opaque},
-        {"default look, 8-bit", "{}", NTSCRT_RGBA8, Alpha::Opaque},
-        {"NTSC off, premultiplied, Clip (holes: CPU conversion)", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA32F,
-         Alpha::Premult},
-        {"NTSC off, straight, Spill", R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})", NTSCRT_RGBA32F,
+        {"default look (NTSC on: download route), float", look("{}"), NTSCRT_RGBA32F, Alpha::Opaque},
+        {"Clean CRT (direct route), float", clean_crt, NTSCRT_RGBA32F, Alpha::Opaque},
+        {"NTSC off (direct route), float", look(off), NTSCRT_RGBA32F, Alpha::Opaque},
+        {"NTSC off, half float", look(off), NTSCRT_RGBA16F, Alpha::Opaque},
+        {"NTSC off, 8-bit", look(off), NTSCRT_RGBA8, Alpha::Opaque},
+        {"default look, 8-bit", look("{}"), NTSCRT_RGBA8, Alpha::Opaque},
+        {"NTSC off, premultiplied, Clip (holes: CPU conversion)", look(off), NTSCRT_RGBA32F, Alpha::Premult},
+        {"NTSC off, straight, Spill", look(R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})"), NTSCRT_RGBA32F,
          Alpha::Straight},
-        {"NTSC off, premultiplied, Spill", R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})", NTSCRT_RGBA32F,
+        {"NTSC off, premultiplied, Spill", look(R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})"),
+         NTSCRT_RGBA32F, Alpha::Premult},
+        {"default look, premultiplied, Spill, half", look(R"({"alpha":{"mode":"spill"}})"), NTSCRT_RGBA16F,
          Alpha::Premult},
-        {"default look, premultiplied, Spill, half", R"({"alpha":{"mode":"spill"}})", NTSCRT_RGBA16F, Alpha::Premult},
-        {"NTSC off, render scale 0.5", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA32F, Alpha::Opaque, 0.5},
-        {"NTSC off, crop 4:3", R"({"ntsc":{"enabled":false},"crop":{"enabled":true,"ratio":"4:3"}})",
+        {"NTSC off, render scale 0.5", look(off), NTSCRT_RGBA32F, Alpha::Opaque, 0.5},
+        {"NTSC off, crop 4:3", look(R"({"ntsc":{"enabled":false},"crop":{"enabled":true,"ratio":"4:3"}})"),
          NTSCRT_RGBA32F, Alpha::Opaque},
         {"NTSC off, source smaller than the frame, Spill",
-         R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})", NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 9},
-        {"NTSC off, source smaller than the frame, Clip", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA32F,
-         Alpha::Opaque, 1.0, 9},
-        {"Digital video on (download route)", R"({"ntsc":{"enabled":false},"digital":{"enabled":true}})",
+         look(R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})"), NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 9},
+        {"NTSC off, source smaller than the frame, Clip", look(off), NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 9},
+        {"Digital video on (download route)", look(R"({"ntsc":{"enabled":false},"digital":{"enabled":true}})"),
          NTSCRT_RGBA32F, Alpha::Opaque},
+        {"core defaults, NTSC off (no Glitch)", off, NTSCRT_RGBA32F, Alpha::Opaque},
     };
     for (const Case &k : cases) {
         const std::string case_name = k.name;
@@ -175,7 +201,7 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
             ntscrt_render_args ra{};
             ra.frame_index = frame;
             ra.fps = 30;
-            ra.look_json = k.look;
+            ra.look_json = k.look.c_str();
             ra.render_scale = k.scale;
             ra.source_premultiplied = premult;
             ntscrt_image s = frame_src.cpu(), d = out_cpu.cpu();
@@ -230,4 +256,68 @@ TEST_CASE("host GPU entry points refuse what they can't do, without writing") {
     host.api = NTSCRT_HOST_GPU_CUDA;
     CHECK(ntscrt_render_host_gpu(inst, &ra, &host, &bad, 0, 0, &bad) == NTSCRT_ERR_INVALID_ARG);
     ntscrt_destroy(inst);
+}
+
+TEST_CASE("host GPU conversion rounds like the CPU path at every 8-bit boundary") {
+#ifdef _WIN32
+    fakecuda::FakeCudaHost cuda;
+    if (!cuda.start()) {
+        MESSAGE("no CUDA (" << cuda.why << "): skipped");
+        return;
+    }
+    // Every stage off: the output is the 8-bit picture itself (opaque), so any rounding
+    // difference of the conversion shows. Values a few float steps either side of each
+    // (k + 0.5) / 255, straight and premultiplied (Clip divides by alpha).
+    const char *look = R"({"downscale":{"enabled":false},"ntsc":{"enabled":false},"glitch":{"enabled":false},)"
+                       R"("digital":{"enabled":false},"shader":{"enabled":false}})";
+    const int W = 255 * 17, H = 3;
+    for (int premult = 0; premult < 2; ++premult) {
+        HostImage src, out_cpu, out_gpu;
+        src.init(W, H, NTSCRT_RGBA32F);
+        for (int k = 0; k < 255; ++k)
+            for (int n = -8; n <= 8; ++n) {
+                float v = (float(k) + 0.5f) / 255.f;
+                for (int s = 0; s < std::abs(n); ++s) v = std::nextafter(v, n < 0 ? 0.f : 1.f);
+                for (int y = 0; y < H; ++y) {
+                    const float a = y == 0 ? 1.f : (y == 1 ? 0.5f : 0.37f);
+                    float px[4] = {v, v * 0.999f, std::fmin(1.f, v * 1.001f), premult ? a : 1.f};
+                    if (premult)
+                        for (int c = 0; c < 3; ++c) px[c] *= a;
+                    src.set(k * 17 + n + 8, y, px);
+                }
+            }
+        out_cpu.init(W, H, NTSCRT_RGBA32F);
+        out_gpu.init(W, H, NTSCRT_RGBA32F);
+        ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, NTSCRT_BUILT_RESOURCES_DIR};
+        ntscrt_instance *a = nullptr, *b = nullptr;
+        REQUIRE(ntscrt_create(&ci, &a) == NTSCRT_OK);
+        REQUIRE(ntscrt_create(&ci, &b) == NTSCRT_OK);
+        ntscrt_render_args ra{};
+        ra.fps = 30;
+        ra.look_json = look;
+        ra.render_scale = 1;
+        ra.source_premultiplied = premult;
+        ntscrt_image s = src.cpu(), d = out_cpu.cpu();
+        REQUIRE(ntscrt_render_cpu(a, &ra, &s, &d) == NTSCRT_OK);
+        auto ds = cuda.upload(src.mem.data(), src.mem.size()), dd = cuda.upload(out_gpu.mem.data(), out_gpu.mem.size());
+        ntscrt_host_gpu host{NTSCRT_HOST_GPU_CUDA, cuda.stream};
+        ntscrt_gpu_image gs{W, H, ptrdiff_t(src.pitch), NTSCRT_RGBA32F, 1, reinterpret_cast<void *>(ds), 0};
+        ntscrt_gpu_image gd{W, H, ptrdiff_t(out_gpu.pitch), NTSCRT_RGBA32F, 1, reinterpret_cast<void *>(dd), 0};
+        const ntscrt_status st = ntscrt_render_host_gpu(b, &ra, &host, &gs, 0, 0, &gd);
+        if (st == NTSCRT_ERR_HOST_GPU) {
+            MESSAGE("GPU path unavailable: " << std::string(ntscrt_last_error(b)));
+        } else {
+            REQUIRE(st == NTSCRT_OK);
+            REQUIRE(cuda.download(dd, out_gpu.mem.data(), out_gpu.mem.size()));
+            const Diff df = compare(out_cpu, out_gpu);
+            MESSAGE("premult " << premult << ": " << std::string(ntscrt_last_timings(b)) << "; max diff "
+                               << df.max * 255 << "/255, " << df.off << " of " << df.n << " values differ");
+            CHECK(df.off == 0);  // exact, divisions included
+        }
+        cuda.MemFree(ds);
+        cuda.MemFree(dd);
+        ntscrt_destroy(a);
+        ntscrt_destroy(b);
+    }
+#endif
 }

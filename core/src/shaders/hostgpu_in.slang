@@ -31,14 +31,26 @@ float4 frame_px(uint fx, uint fy)
 float unit_alpha(float a) { return a > 0.0 ? (a < 1.0 ? a : 1.0) : 0.0; }
 
 // uint8_t(double(v * 255.0f) + 0.5) for v in (0, 1), else 0 / 255 (NaN -> 0):
-// floor(p) + (frac(p) >= 0.5) is that rounding exactly, without doubles.
+// floor(p) + (p >= floor(p) + 0.5) is that rounding exactly, without doubles. Not
+// p - floor(p) >= 0.5: compilers fuse that into one multiply-add, which skips the
+// rounding of v * 255 the CPU does, and exact halves (v * 255 = 128.5) then round down.
 float q8(float v)
 {
     if (!(v > 0.0)) return 0.0;
     if (v >= 1.0) return 1.0;
-    float p = v * 255.0;
+    precise float p = v * 255.0;
     float f = floor(p);
-    return (f + ((p - f) >= 0.5 ? 1.0 : 0.0)) / 255.0;
+    return (f + (p >= f + 0.5 ? 1.0 : 0.0)) / 255.0;
+}
+
+// c / a as the CPU rounds it (correctly rounded) in nearly every case: GPU division is
+// only accurate to a few units in the last place, so one Newton step on the residual
+// (mad: exact where the multiply-add is fused, as on NVIDIA / AMD / Apple GPUs).
+float3 div(float3 c, float a)
+{
+    precise float3 q = c / a;
+    precise float3 e = mad(-q, float3(a, a, a), c);
+    return q + e / a;
 }
 
 [shader("compute")]
@@ -51,7 +63,7 @@ void convert_in(uint3 id : SV_DispatchThreadID)
     float3 c = v.rgb;
     const float kTransparent = 0.5 / 255.0;
     if (P.mode == 0) {
-        if (P.premult != 0 && a > kTransparent && a < 1.0) c = c / a;
+        if (P.premult != 0 && a > kTransparent && a < 1.0) c = div(c, a);
     } else if (P.premult == 0) {
         c = c * a;
     }

@@ -17,6 +17,14 @@ Texture2D<float4> rgb : register(t0);
 Texture2D<float4> host_src : register(t1);
 RWTexture2D<float4> host_dst : register(u0);
 
+// c / a rounded as the CPU's division (see hostgpu_in.slang).
+float3 div(float3 c, float a)
+{
+    precise float3 q = c / a;
+    precise float3 e = mad(-q, float3(a, a, a), c);
+    return q + e / a;
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void merge_out(uint3 id : SV_DispatchThreadID)
@@ -36,7 +44,7 @@ void merge_out(uint3 id : SV_DispatchThreadID)
     }
     if (Q.mode != 0) {
         a = max(a, max(c.r, max(c.g, c.b)));
-        if (Q.premult == 0) c = a > 0.0 ? min(c / a, float3(1.0, 1.0, 1.0)) : float3(0.0, 0.0, 0.0);
+        if (Q.premult == 0) c = a > 0.0 ? min(div(c, a), float3(1.0, 1.0, 1.0)) : float3(0.0, 0.0, 0.0);
     } else if (Q.premult != 0) {
         c *= a;
     }

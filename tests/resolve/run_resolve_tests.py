@@ -1653,6 +1653,9 @@ def main():
     ap.add_argument("--gpu-ab", action="store_true",
                     help="with --headless: render the gpupath frames with NTSCRT_OFX_GPU=0 (CPU path) and with the GPU "
                          "path in two Resolve sessions and compare them (docs/dev/HOST-GPU.md tolerance)")
+    ap.add_argument("--ab-modes", default="cpu,gpu",
+                    help="--gpu-ab: the two sessions (cpu or gpu each); cpu,cpu / gpu,gpu measure Resolve's own "
+                         "session-to-session noise")
     a = ap.parse_args()
     a.only = {s.strip() for s in a.only.split(",") if s.strip()}
     if a.gpu_ab:
@@ -1719,7 +1722,10 @@ def gpu_ab(a):
     keep = os.environ.get("NTSCRT_OFX_GPU")
     dirs = {}
     try:
-        for label, env in (("cpu", "0"), ("gpu", None)):
+        modes = [m.strip() for m in a.ab_modes.split(",")][:2]
+        sessions = [(("cpu" if m == "cpu" else "gpu") + ("2" if i and m == modes[0] else ""), "0" if m == "cpu" else None)
+                    for i, m in enumerate(modes)]
+        for label, env in sessions:
             if env is None:
                 os.environ.pop("NTSCRT_OFX_GPU", None)
             else:
@@ -1737,9 +1743,10 @@ def gpu_ab(a):
             os.environ.pop("NTSCRT_OFX_GPU", None)
         else:
             os.environ["NTSCRT_OFX_GPU"] = keep
+    first, second = sessions[0][0], sessions[1][0]
     results, worst = [], 0
-    for ref in sorted(dirs["cpu"].glob("gpupath-*.png")):
-        got = dirs["gpu"] / ref.name
+    for ref in sorted(dirs[first].glob("gpupath-*.png")):
+        got = dirs[second] / ref.name
         if not got.exists():
             results.append({"image": ref.name, "missing": True})
             continue
@@ -1756,8 +1763,8 @@ def gpu_ab(a):
         worst = max(worst, mx)
         results.append({"image": ref.name, "max_diff_of_255": round(mx / 257, 3), "values_differing": off,
                         "values": len(diffs), "mean_diff_of_255": round(sum(diffs) / len(diffs) / 257, 5)})
-    gpu_log = (dirs["gpu"] / "ntscrt-ofx.log").read_text(encoding="utf-8", errors="replace")
-    cpu_log = (dirs["cpu"] / "ntscrt-ofx.log").read_text(encoding="utf-8", errors="replace")
+    gpu_log = (dirs[second] / "ntscrt-ofx.log").read_text(encoding="utf-8", errors="replace")
+    cpu_log = (dirs[first] / "ntscrt-ofx.log").read_text(encoding="utf-8", errors="replace")
     count = lambda t, k: len(re.findall(k, t))  # noqa: E731
     summary = {"images": len(results), "worst_max_diff_of_255": round(worst / 257, 3),
                "gpu_session_renders": {"gpu-direct": count(gpu_log, r" path=gpu-direct"),
@@ -1774,11 +1781,12 @@ def gpu_ab(a):
                 r["values_differing"] > 0.002 * r["values"])]
     problems += [f"source {r['image']} differs between the sessions" for r in results
                  if r["image"].startswith("gpupath-src") and not r.get("missing") and r["max_diff_of_255"] > 0]
-    if summary["gpu_session_renders"]["gpu-direct"] + summary["gpu_session_renders"]["gpu-download"] == 0:
+    summary["sessions"] = [first, second]
+    if second.startswith("gpu") and summary["gpu_session_renders"]["gpu-direct"] + summary["gpu_session_renders"]["gpu-download"] == 0:
         problems.append("the GPU session never took the GPU path")
-    if summary["gpu_session_renders"]["cpu"] or summary["gpu_session_renders"]["fallback"]:
+    if second.startswith("gpu") and (summary["gpu_session_renders"]["cpu"] or summary["gpu_session_renders"]["fallback"]):
         problems.append("renders of the GPU session got CPU images or fell back to the CPU path")
-    if summary["cpu_session_renders"]["gpu"]:
+    if first.startswith("cpu") and summary["cpu_session_renders"]["gpu"]:
         problems.append("the CPU session took the GPU path")
     doc = {"summary": summary, "problems": problems, "results": results}
     (base / "gpu-ab.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")

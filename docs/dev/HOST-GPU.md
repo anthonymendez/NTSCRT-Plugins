@@ -89,11 +89,23 @@ but has never run in Resolve on a Mac, so the plug-in only offers Metal with `NT
 ## Output vs the CPU path
 
 The conversion kernels do the CPU path's arithmetic (`to_bgra8`, `merge_alpha`): the same 8-bit rounding (round
-half up, computed exactly in float), the same alpha rules, and the CRT's half-float result read the same way.
+half up), the same alpha rules, and the CRT's half-float result read the same way. Two GPU habits had to be
+worked around to get the same bits: shader compilers fuse `v * 255 - floor(...)` into one multiply-add, which
+skips the rounding of the product the CPU does (values exactly halfway between two 8-bit levels then rounded
+down: in Resolve a few such values per 1080p Fusion frame, each a one-level step the CRT shader spreads over a few
+pixels); and GPU division is only accurate to a few units in the last place, so divisions get one Newton step
+on an exact (fused) residual. With those, the GPU path writes exactly the CPU path's values, except for
+half-float hosts: the GPU rounds float to half to nearest even, the CPU half up, one half-float step on a few
+values.
+
 Tolerance, used by every test below: each channel within 1/255 (+1e-5) of the CPU path's value, and at most
-0.2% of the values different at all. What can differ: the GPU's division (unpremultiplying in Clip mode,
-Spill's straight output: a few 1e-7, can cross an 8-bit step), and half-float outputs (the GPU rounds to
-nearest even, the CPU half up: one half-float step). Opaque frames match exactly in practice.
+0.2% of the values different at all. Measured: 0 differences on float and 8-bit frames, ≤ 0.016/255 on
+≤ 0.03% of the values of half-float frames (`test_host_gpu`), 0 in Resolve (`--gpu-ab`).
+
+One difference is Resolve's, not the plug-in's: with GPU render offered, Resolve's Fusion page hands the
+plug-in float images whatever its tools' depth (with CPU images it hands over the tools' own 8-bit or
+half-float), so on 8-bit and half-float comps the effect now gets and writes float, like on the Edit page
+(the CRT shader's half-float output instead of 8 bits). Edit-page clips are float either way.
 
 ## Tests
 
