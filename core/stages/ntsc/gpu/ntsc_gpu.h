@@ -1,4 +1,4 @@
-// ntsc_gpu.h — the GPU port of the ntsc-rs effect (phase 1 of 4; design:
+// ntsc_gpu.h — the GPU port of the ntsc-rs effect (phases 1-3 of 4; design:
 // docs/dev/NTSC-GPU.md). The Rust path (NtscStage::process) stays the
 // reference and the fallback: a frame runs here only when every pass its
 // settings turn on is implemented (NtscGpuPlan::supported) and the route is
@@ -17,13 +17,28 @@
 
 namespace ntscrt {
 
+// Speckle events of one stage (ntsc_gpu_speckles), plus each plane row's
+// range of them (first event, count) for the kernel.
+struct NtscGpuSpeckleList {
+    std::vector<NtscGpuSpeckle> events;
+    std::vector<float> values;
+    std::vector<uint32_t> row_ranges;  // 2 per plane row
+};
+
 // One frame's plan, from the shim (ntsc_gpu_plan): the passes in ntsc-rs's
 // order, their coefficients, the per-row tables.
 struct NtscGpuPlan {
+    static constexpr int kSeedPasses = 11;  // ntsc-rs's noise_seeds 0..10
     NtscGpuPlanInfo info{};
     std::vector<NtscGpuPass> passes;
     std::vector<NtscGpuRow> rows;    // info.plane_rows entries used
     std::vector<NtscGpuOutRow> out;  // one per output row
+    // Tables of the passes that have them (filled for the passes in `passes` only):
+    std::vector<NtscGpuRowSeed> seeds[kSeedPasses];         // by K_NOISE mode (seed pass)
+    std::vector<NtscGpuRowShift> shifts[NTSC_ST_COUNT];     // by stage (K_SHIFT_ROWS, tracking K_NOISE)
+    NtscGpuSpeckleList speckles[NTSC_ST_COUNT];             // by stage (K_SPECKLES)
+    uint32_t simd_lanes = 8;                                // ntsc_gpu_simd_lanes()
+    double table_ms = 0;                                    // CPU time of the tables above (and the plan)
     int width = 0, height = 0;
     bool supported() const { return info.unsupported == 0; }
     // "composite_noise,head_switching" etc.: the stages that keep this frame on the CPU.
@@ -44,8 +59,12 @@ struct NtscGpuU {
     float zi[3][4];
     int32_t fp[3][4];  // len, delay, initial, unused
     float fiv[4];
+    float fx[4];    // per pass: noise frequency, -, gain / shift amount
+    int32_t ix[4];  // per pass: octaves / vertical offset, SIMD lanes, flag, unused
 };
-static_assert(sizeof(NtscGpuU) == 256, "NtscGpuU must match the shader's constant buffer");
+static_assert(sizeof(NtscGpuU) == 288, "NtscGpuU must match the shader's constant buffer");
+static_assert(sizeof(NtscGpuRowSeed) == 16 && sizeof(NtscGpuRowShift) == 16 && sizeof(NtscGpuSpeckle) == 16,
+              "phase 2-3 tables (gpu_plan.rs)");
 static_assert(sizeof(NtscGpuFilter) == 64 && sizeof(NtscGpuPass) == 224, "shim layout (gpu_plan.rs)");
 static_assert(sizeof(NtscGpuRow) == 32 && sizeof(NtscGpuOutRow) == 8, "row tables (gpu_plan.rs)");
 static_assert(sizeof(NtscGpuPlanInfo) == 72, "plan info (gpu_plan.rs)");

@@ -66,6 +66,7 @@ public:
     std::vector<float> debug_planes(const ImageBGRA8 &in, const FrameContext &ctx, uint32_t stage_mask,
                                     int *plane_rows = nullptr);
 private:
+    void gpu_tables(const FrameContext &ctx, float scale, NtscGpuPlan &out);
     struct Impl; std::unique_ptr<Impl> impl_;
 };
 

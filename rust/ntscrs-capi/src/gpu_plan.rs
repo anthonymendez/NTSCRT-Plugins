@@ -12,11 +12,19 @@
 //!     field membership, chroma subcarrier phase, per-row chroma phase noise
 //!     rotation, chroma-loss flag;
 //!   - a per-output-row table (`NtscGpuOutRow`): the Bob deinterlace;
-//!   - per-row noise seeds (`NtscGpuRowSeed`, for phase 2's noise passes).
+//!   - per-row noise seeds (`NtscGpuRowSeed`): the Fbm seed and start offset of
+//!     each row of composite / luma / chroma / tracking noise (the per-pixel
+//!     noise itself runs on the GPU);
+//!   - per-row shifts (`NtscGpuRowShift`) of head switching, tracking noise and
+//!     the edge wave (their seeds, powf and gradient noise sampled here);
+//!   - speckle events (`NtscGpuSpeckle` + values) of snow, tracking noise and
+//!     the head-switching transient: row_speckles' f64 logistic, geometric
+//!     distribution, RNG jumps and per-pixel values, all computed here.
 //!
-//! ntsc-rs keeps its filter / RNG helpers private (`mod filter`, `mod random`,
-//! `pub(crate) VHSTapeSpeed::filter_params`), so the minimal pieces are copied
-//! below, each with the source lines it reproduces. The copies are Rust
+//! ntsc-rs keeps its filter / RNG / noise helpers private (`mod filter`, `mod
+//! random`, `mod noise`, `pub(crate) VHSTapeSpeed::filter_params`, private
+//! functions of ntsc.rs), so the minimal pieces are copied below (and in
+//! gpu_noise.rs), each with the source lines it reproduces. The copies are Rust
 //! compiled by the same toolchain with the same operations in the same order,
 //! so their f32 results are bit-identical to ntsc-rs's. vendor/ is never
 //! modified.

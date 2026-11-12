@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <stdexcept>
 
 #ifdef _WIN32
@@ -89,6 +90,30 @@ namespace {
 
 constexpr uint32_t kPlaneY = 1, kPlaneI = 2, kPlaneQ = 4;
 
+// NoiseRow in the shader: the Fbm seed and start offset of the row
+// (NtscGpuRowSeed), its intensity (* 0.25), whether the pass touches it.
+struct NoiseRowGpu {
+    int32_t seed;
+    float offset;
+    float intensity;
+    uint32_t active;
+};
+static_assert(sizeof(NoiseRowGpu) == 16, "shader NoiseRow");
+
+// Runs [first, end) of the rows for which `on(row)` holds, gaps under 32 rows
+// merged: the row-table passes are dispatched over these only (tracking noise
+// and head switching touch the bottom rows of each field).
+template <class F>
+std::vector<std::pair<int, int>> row_runs(int rows, F on) {
+    std::vector<std::pair<int, int>> runs;
+    for (int r = 0; r < rows; ++r) {
+        if (!on(r)) continue;
+        if (!runs.empty() && r - runs.back().second < 32) runs.back().second = r + 1;
+        else runs.emplace_back(r, r + 1);
+    }
+    return runs;
+}
+
 void set_filter(NtscGpuU &u, int p, const NtscGpuFilter &f) {
     std::memcpy(u.num[p], f.num, sizeof f.num);
     std::memcpy(u.den[p], f.den, sizeof f.den);
@@ -107,6 +132,18 @@ struct NtscGpu::Impl {
     std::vector<std::shared_ptr<gpu::Texture>> pool;
     std::shared_ptr<gpu::Buffer> rows, out;
     size_t rows_cap = 0, out_cap = 0;
+    // The phase 2-3 tables, one buffer per use (a buffer keeps the stride it was first bound with).
+    struct Slot {
+        std::shared_ptr<gpu::Buffer> buf;
+        size_t cap = 0;
+    };
+    std::map<std::string, Slot> slots;
+    gpu::Buffer *table(const std::string &key, const void *data, size_t bytes) {
+        Slot &s = slots[key];
+        ensure_room(s.buf, s.cap, std::max<size_t>(bytes, 16), data, bytes);
+        return s.buf.get();
+    }
+    std::vector<NoiseRowGpu> noise_rows;
     explicit Impl(gpu::Device &d) : dev(d) {}
 
     // NTSCRT_PROFILE=1: time per pass (finish() after each).
@@ -144,9 +181,9 @@ struct NtscGpu::Impl {
             return;
         }
         try {
-            dev.kernel("ntsc_gpu/row_filter_x");
-            dev.kernel("ntsc_gpu/from_bgra8_x");
-            dev.kernel("ntsc_gpu/to_bgra8_x");
+            for (const char *x : {"row_filter_x", "from_bgra8_x", "to_bgra8_x", "noise_add_x", "shift_rows_x",
+                                  "chroma_delay_x"})
+                dev.kernel(std::string("ntsc_gpu/") + x);
             fma = 1;
         } catch (const std::exception &) {
             fma = 2;  // no double support: mad as it is
@@ -178,6 +215,17 @@ struct NtscGpu::Impl {
         }
         dev.upload(*buf, data, bytes, 0);
     }
+    // As ensure(), for `bytes` of data in a buffer of at least `room` bytes.
+    void ensure_room(std::shared_ptr<gpu::Buffer> &buf, size_t &cap, size_t room, const void *data, size_t bytes) {
+        if (!buf || cap < room) {
+            std::vector<uint8_t> init(room, 0);
+            if (bytes) std::memcpy(init.data(), data, bytes);
+            buf = dev.create_buffer(room, init.data());
+            cap = room;
+            return;
+        }
+        if (bytes) dev.upload(*buf, data, bytes, 0);
+    }
     gpu::Kernel *k(const char *name) {
         gpu::Kernel *kk = dev.kernel(name);
         if (!kk) throw std::runtime_error(std::string("ntsc gpu: kernel ") + name + " missing");
@@ -207,18 +255,25 @@ struct NtscGpu::Impl {
         base.outHeight = uint32_t(plan.height);
         base.c16 = 16.0f / 255.0f;  // ntsc-rs's f32 constants
         base.inv255 = 1.0f / 255.0f;
+        base.ix[1] = int32_t(plan.simd_lanes ? plan.simd_lanes : 8);
         const std::vector<gpu::Texture *> planes = {p.y.get(), p.i.get(), p.q.get(), p.s.get()};
 
         auto run = [&](const char *name, const NtscGpuU &u, int wx, int wy, bool use_rows,
-                       const gpu::Texture *src = nullptr, bool fused = false) {
+                       const gpu::Texture *src = nullptr, bool fused = false,
+                       std::vector<const gpu::Buffer *> tables = {}) {
             gpu::Bindings b;
             b.constants = &u;
             b.constants_size = sizeof u;
             if (src) b.textures = {src};
-            if (use_rows) b.buffers = {rows.get()};
+            if (use_rows || !tables.empty()) b.buffers = {rows.get()};
+            if (!tables.empty()) {
+                b.buffers.push_back(nullptr);  // t9: outRows (to_bgra8 only)
+                for (const gpu::Buffer *t : tables) b.buffers.push_back(t);  // t10..
+            }
             b.out_textures = planes;
             dev.dispatch(fused ? kf(name) : k(name), b, wx, wy);
         };
+        gpu::Texture *const plane_tex[3] = {p.y.get(), p.i.get(), p.q.get()};
 
         times.clear();
         if (profile) {
@@ -246,15 +301,94 @@ struct NtscGpu::Impl {
                 break;
             case NTSC_GPU_K_DEMOD:
                 dev.copy(*p.y, *p.s);  // the modulated signal (ntsc-rs's scratch)
-                if (ps.mode == 1) {
-                    u.planes = kPlaneY;
-                    set_filter(u, 0, ps.filter[0]);
-                    run("ntsc_gpu/row_filter", u, R, 1, false, nullptr, true);
-                } else {
+                if (ps.mode == 1 || ps.pad[0] == 1) {
+                    // the notch; with pad[0] = 1 (a comb, some 1-row fields) only on those fields' rows
+                    NtscGpuU un = u;
+                    un.planes = kPlaneY;
+                    un.ix[2] = ps.pad[0];
+                    set_filter(un, 0, ps.filter[0]);
+                    run("ntsc_gpu/row_filter", un, R, 1, true, nullptr, true);
+                }
+                if (ps.mode != 1) {
                     u.mode = uint32_t(ps.mode);
+                    u.ix[2] = ps.pad[0];
                     run("ntsc_gpu/demod_luma", u, W, R, true);
                 }
                 run("ntsc_gpu/demodulate", base, W, R, true);
+                break;
+            case NTSC_GPU_K_NOISE: {
+                // video_noise_line per row: the row seeds of the pass, the intensity of
+                // the pass or (tracking noise, pad[1] = 1) of the row
+                const auto &seeds = plan.seeds[ps.mode];
+                const auto *sh = ps.pad[1] == 1 ? &plan.shifts[ps.stage] : nullptr;
+                if (seeds.size() < size_t(R) || (sh && sh->size() < size_t(R)))
+                    throw std::runtime_error("ntsc gpu: noise tables missing");
+                noise_rows.resize(size_t(R));
+                for (int r = 0; r < R; ++r) {
+                    NoiseRowGpu &n = noise_rows[size_t(r)];
+                    n.seed = seeds[size_t(r)].noise_seed;
+                    n.offset = seeds[size_t(r)].offset;
+                    n.intensity = sh ? (*sh)[size_t(r)].intensity : ps.b;
+                    n.active = sh ? ((*sh)[size_t(r)].boundary >= 0) : 1u;
+                }
+                const gpu::Buffer *nb =
+                    table("noise" + std::to_string(idx), noise_rows.data(), noise_rows.size() * sizeof(NoiseRowGpu));
+                u.planes = ps.planes;
+                u.fx[0] = ps.a;
+                u.fx[2] = 1.0f;  // gain (video_noise_line's Fbm)
+                u.ix[0] = ps.pad[0];
+                for (auto [r0, r1] : row_runs(R, [&](int r) { return noise_rows[size_t(r)].active != 0; })) {
+                    u.ix[3] = r0;
+                    run("ntsc_gpu/noise_add", u, W, r1 - r0, true, nullptr, true, {nb});
+                }
+                break;
+            }
+            case NTSC_GPU_K_SPECKLES: {
+                const NtscGpuSpeckleList &l = plan.speckles[ps.stage];
+                if (l.events.empty()) break;
+                if (l.row_ranges.size() < size_t(R) * 2) throw std::runtime_error("ntsc gpu: speckle tables missing");
+                const std::string key = std::to_string(ps.stage);
+                const gpu::Buffer *rr = table("spr" + key, l.row_ranges.data(), size_t(R) * 2 * sizeof(uint32_t));
+                const gpu::Buffer *ev =
+                    table("spe" + key, l.events.data(), l.events.size() * sizeof(NtscGpuSpeckle));
+                const gpu::Buffer *va = table("spv" + key, l.values.data(), l.values.size() * sizeof(float));
+                uint32_t longest = 0;
+                for (const NtscGpuSpeckle &e : l.events) longest = std::max(longest, e.count);
+                u.ix[0] = int32_t(longest);
+                for (auto [r0, r1] : row_runs(R, [&](int r) { return l.row_ranges[size_t(r) * 2 + 1] != 0; })) {
+                    u.ix[3] = r0;
+                    run("ntsc_gpu/add_speckles", u, W, r1 - r0, true, nullptr, false, {nullptr, nullptr, rr, ev, va});
+                }
+                break;
+            }
+            case NTSC_GPU_K_SHIFT_ROWS: {
+                const auto &sh = plan.shifts[ps.stage];
+                if (sh.size() < size_t(R)) throw std::runtime_error("ntsc gpu: shift table missing");
+                const gpu::Buffer *sb =
+                    table("shift" + std::to_string(ps.stage), sh.data(), size_t(R) * sizeof(NtscGpuRowShift));
+                const auto runs = row_runs(R, [&](int r) { return sh[size_t(r)].boundary >= 0; });
+                for (int pl = 0; pl < 3; ++pl) {
+                    if (!(ps.planes & (1u << pl)) || runs.empty()) continue;
+                    dev.copy(*plane_tex[pl], *p.s);  // shift_row reads the row as it was
+                    NtscGpuU us = u;
+                    us.planes = 1u << pl;
+                    for (auto [r0, r1] : runs) {
+                        us.ix[3] = r0;
+                        run("ntsc_gpu/shift_rows", us, W, r1 - r0, true, nullptr, true, {nullptr, sb});
+                    }
+                }
+                break;
+            }
+            case NTSC_GPU_K_CHROMA_DELAY:
+                for (int pl = 1; pl < 3; ++pl) {
+                    dev.copy(*plane_tex[pl], *p.s);
+                    NtscGpuU uc = u;
+                    uc.planes = 1u << pl;
+                    uc.fx[0] = ps.a;
+                    uc.ix[0] = ps.mode;
+                    uc.ix[2] = ps.pad[0];
+                    run("ntsc_gpu/chroma_delay", uc, W, R, true, nullptr, true);
+                }
                 break;
             case NTSC_GPU_K_ROTATE_CONST:
                 u.mode = 0;

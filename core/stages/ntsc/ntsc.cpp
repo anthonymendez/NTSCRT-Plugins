@@ -20,7 +20,9 @@
 //  * seed: ctx.seed is added to ntsc-rs's random_seed (0 = upstream).
 #include <ntscrs_capi.h>
 
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -218,8 +220,32 @@ void NtscStage::process(ImageBGRA8 &inout, const FrameContext &ctx) {
     if (rc != 0) throw std::runtime_error("ntsc: frame processing failed (" + std::to_string(rc) + ")");
 }
 
+namespace {
+
+// NTSCRT_NTSC_GPU_CPU_STAGES=<stage>,<stage>,...: debugging, leaves frames that
+// use these stages (ntsc_stage_name) to ntsc-rs as if the GPU lacked them.
+uint32_t forced_cpu_stages() {
+    const char *e = std::getenv("NTSCRT_NTSC_GPU_CPU_STAGES");
+    if (!e || !*e) return 0;
+    uint32_t m = 0;
+    std::string list(e);
+    size_t pos = 0;
+    while (pos <= list.size()) {
+        size_t comma = list.find(',', pos);
+        if (comma == std::string::npos) comma = list.size();
+        const std::string name = list.substr(pos, comma - pos);
+        for (int i = 0; i < NTSC_ST_COUNT; ++i)
+            if (name == ntsc_stage_name(i)) m |= 1u << i;
+        pos = comma + 1;
+    }
+    return m;
+}
+
+}  // namespace
+
 void NtscStage::gpu_plan(const FrameContext &ctx, int width, int height, NtscGpuPlan &out, uint32_t stage_mask) {
     if (width <= 0 || height <= 0) throw std::runtime_error("ntsc gpu: empty picture");
+    const auto t0 = std::chrono::steady_clock::now();
     const float scale = impl_->apply(ctx);
     out.width = width;
     out.height = height;
@@ -237,9 +263,82 @@ void NtscStage::gpu_plan(const FrameContext &ctx, int width, int height, NtscGpu
         if (rc != 0) throw std::runtime_error("ntsc gpu: plan failed (" + std::to_string(rc) + ")");
         out.passes.resize(out.info.num_passes);
         out.rows.resize(out.info.plane_rows);
+        out.info.unsupported |= out.info.enabled & forced_cpu_stages();
+        if (out.supported()) gpu_tables(ctx, scale, out);
+        out.table_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return;
     }
     throw std::runtime_error("ntsc gpu: plan failed");
+}
+
+// The per-row tables and speckle lists of the plan's passes (gpu_plan.rs).
+void NtscStage::gpu_tables(const FrameContext &ctx, float scale, NtscGpuPlan &out) {
+    const uint32_t w = uint32_t(out.width), h = uint32_t(out.height);
+    const int64_t frame = ntsc_frame(ctx);
+    const int32_t so = Impl::seed_offset(ctx);
+    NtscInstance *inst = impl_->inst;
+    out.simd_lanes = ntsc_gpu_simd_lanes();
+    uint32_t have_seeds = 0, have_shifts = 0, have_speckles = 0;
+    auto shifts = [&](int stage) {
+        if (have_shifts & (1u << stage)) return;
+        have_shifts |= 1u << stage;
+        auto &v = out.shifts[stage];
+        v.resize(h);
+        int rc = ntsc_gpu_row_shifts(inst, w, h, frame, scale, scale, so, uint32_t(stage), v.data());
+        if (rc != 0) throw std::runtime_error("ntsc gpu: row shifts failed (" + std::to_string(rc) + ")");
+        v.resize(out.info.plane_rows);
+    };
+    for (const NtscGpuPass &p : out.passes) {
+        switch (p.kind) {
+        case NTSC_GPU_K_NOISE: {
+            if (p.mode < 0 || p.mode >= NtscGpuPlan::kSeedPasses) throw std::runtime_error("ntsc gpu: seed pass");
+            if (p.pad[1] == 1) shifts(p.stage);  // tracking noise: the row's intensity
+            if (have_seeds & (1u << p.mode)) break;
+            have_seeds |= 1u << p.mode;
+            auto &v = out.seeds[p.mode];
+            v.resize(h);
+            int rc = ntsc_gpu_row_seeds(inst, w, h, frame, scale, scale, so, uint32_t(p.mode), v.data());
+            if (rc != 0) throw std::runtime_error("ntsc gpu: row seeds failed (" + std::to_string(rc) + ")");
+            v.resize(out.info.plane_rows);
+            break;
+        }
+        case NTSC_GPU_K_SHIFT_ROWS:
+            shifts(p.stage);
+            break;
+        case NTSC_GPU_K_SPECKLES: {
+            if (have_speckles & (1u << p.stage)) break;
+            have_speckles |= 1u << p.stage;
+            NtscGpuSpeckleList &l = out.speckles[p.stage];
+            l.events.resize(std::max<size_t>(l.events.capacity(), 256));
+            l.values.resize(std::max<size_t>(l.values.capacity(), 4096));
+            uint32_t ne = 0, nv = 0;
+            int rc = ntsc_gpu_speckles(inst, w, h, frame, scale, scale, so, uint32_t(p.stage), l.events.data(),
+                                       uint32_t(l.events.size()), l.values.data(), uint32_t(l.values.size()), &ne,
+                                       &nv);
+            if (rc == 3) {  // more than last time: room for twice that, then again
+                l.events.resize(std::max<size_t>(ne, 1) * 2);
+                l.values.resize(std::max<size_t>(nv, 1) * 2);
+                rc = ntsc_gpu_speckles(inst, w, h, frame, scale, scale, so, uint32_t(p.stage), l.events.data(),
+                                       uint32_t(l.events.size()), l.values.data(), uint32_t(l.values.size()), &ne,
+                                       &nv);
+            }
+            if (rc != 0) throw std::runtime_error("ntsc gpu: speckles failed (" + std::to_string(rc) + ")");
+            // Keep the capacity (next frame), the counts in the vectors' sizes.
+            l.events.resize(ne);
+            l.values.resize(nv);
+            l.row_ranges.assign(size_t(out.info.plane_rows) * 2, 0u);
+            for (uint32_t e = 0; e < ne; ++e) {
+                const uint32_t r = l.events[e].row;
+                if (r >= out.info.plane_rows) throw std::runtime_error("ntsc gpu: speckle row");
+                if (l.row_ranges[r * 2 + 1] == 0) l.row_ranges[r * 2] = e;
+                ++l.row_ranges[r * 2 + 1];
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
 }
 
 std::vector<float> NtscStage::debug_planes(const ImageBGRA8 &in, const FrameContext &ctx, uint32_t stage_mask,

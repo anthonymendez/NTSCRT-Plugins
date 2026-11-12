@@ -1,8 +1,8 @@
-// ntsc_gpu.slang — the GPU port of ntsc-rs's effect (phase 1 of 4).
+// ntsc_gpu.slang — the GPU port of ntsc-rs's effect (phases 1-3 of 4).
 // Design, plane format and tables: docs/dev/NTSC-GPU.md. Driver:
 // core/stages/ntsc/gpu/ntsc_gpu.cpp. Reference: vendor/ntsc-rs/crates/ntscrs/src
-// (ntsc.rs, filter.rs, yiq_fielding.rs); the plan and tables come from
-// rust/ntscrs-capi/src/gpu_plan.rs.
+// (ntsc.rs, filter.rs, yiq_fielding.rs, shift.rs, noise/); the plan and tables
+// come from rust/ntscrs-capi/src/gpu_plan.rs.
 //
 // The signal: Y, I, Q in three R32F planes (u0..u2) of width x planeRows
 // (ntsc-rs's YIQ buffer layout: for the interleaved fields, one field's rows
@@ -18,6 +18,7 @@
 // Bindings (gpu.h convention):
 //   b0  NtscGpuU (all)              t0  source picture (BGRA8, from_bgra8)
 //   t8  rows (NtscGpuRow per plane row)   t9  outRows (uint2 per output row)
+//   t10 noiseRows   t11 shifts   t12 speckleRows   t13 speckles   t14 speckleValues
 //   u0  Y   u1  I   u2  Q   u3  S (scratch)   u4  output picture (to_bgra8)
 
 struct NtscGpuU {
@@ -29,6 +30,9 @@ struct NtscGpuU {
     float4 zi[3];
     int4 fp[3];                         // len, delay, initial (0 zero, 1 first sample), unused
     float4 fiv;                         // constant initial value per plane
+    float4 fx;                          // per pass: noise (frequency, -, gain), shifts (horizontal shift)
+    int4 ix;                            // per pass: x octaves / vertical offset / longest speckle, y SIMD lanes,
+                                        // z flag, w first row (passes dispatched over a run of rows)
 };
 struct Row {
     uint src_row, field_row, field_first, field_rows;
@@ -40,6 +44,31 @@ ConstantBuffer<NtscGpuU> U : register(b0);
 Texture2D<float4> srcPic : register(t0);
 StructuredBuffer<Row> rows : register(t8);
 StructuredBuffer<uint2> outRows : register(t9);
+// Phase 2-3 tables (NtscGpuRowShift / NtscGpuSpeckle layouts, ntscrs_capi.h;
+// NoiseRow is the driver's: the row seed's Fbm seed and offset, the intensity).
+struct NoiseRow {
+    int seed;
+    float offset;
+    float intensity;  // already * 0.25 (video_noise_line)
+    uint active;
+};
+struct RowShift {
+    float shift;
+    int boundary;    // 0 constant 0, 1 extend, -1 row untouched
+    int copy_start;  // head switching's mid line: pixels from here on are shifted; -1 whole row
+    float intensity;
+};
+struct Speckle {
+    uint row;
+    int x0;
+    uint count;
+    uint value_offset;
+};
+StructuredBuffer<NoiseRow> noiseRows : register(t10);
+StructuredBuffer<RowShift> shifts : register(t11);
+StructuredBuffer<uint2> speckleRows : register(t12);  // per plane row: first event, event count
+StructuredBuffer<Speckle> speckles : register(t13);
+StructuredBuffer<float> speckleValues : register(t14);
 RWTexture2D<float> pY : register(u0);
 RWTexture2D<float> pI : register(u1);
 RWTexture2D<float> pQ : register(u2);
@@ -57,8 +86,14 @@ RWTexture2D<float4> outPic : register(u4);
 interface IFma {
     static float fma3(float a, float b, float c);
 };
+// The result is `precise`: a mad() whose result isn't may be split into a
+// multiply and an add by the driver (measured on NVIDIA: shift_row's blend).
 struct MadFma : IFma {
-    static float fma3(float a, float b, float c) { return mad(a, b, c); }
+    static float fma3(float a, float b, float c)
+    {
+        precise float r = mad(a, b, c);
+        return r;
+    }
 };
 struct ExactFma : IFma {
     static float fma3(float a, float b, float c)
@@ -203,6 +238,8 @@ void row_filter_impl<F : IFma>(uint3 id)
 {
     if (id.x >= U.planeRows || id.y > 2u) return;
     if ((U.planes & (1u << id.y)) == 0u || U.fp[id.y].x == 0) return;
+    // luma_into_chroma with a comb on a picture with some 1-row fields: the notch only on those
+    if (U.ix.z == 1 && rows[id.x].field_rows != 1u) return;
     if (id.y == 0u) filter_row<F>(pY, id.x, 0u);
     else if (id.y == 1u) filter_row<F>(pI, id.x, 1u);
     else filter_row<F>(pQ, id.x, 2u);
@@ -276,6 +313,7 @@ void demod_luma(uint3 id : SV_DispatchThreadID)
     if (id.x >= U.width || id.y >= U.planeRows) return;
     const uint x = id.x, y = id.y;
     const Row r = rows[y];
+    if (U.ix.z == 1 && r.field_rows == 1u) return;  // a 1-row field: notch (row_filter), not the comb
     if (U.mode == 0u) {
         // luma_into_chroma_line_box: [m[x-1] or 16/255, m[x], m[x+1], m[x+2]] summed * 0.25
         const uint w1 = U.width - 1u;
@@ -371,3 +409,264 @@ void vert_blend(uint3 id : SV_DispatchThreadID)
     if (U.mode == 0u) pI[id.xy] = r;
     else pQ[id.xy] = r;
 }
+
+// ---- phase 2: gradient noise (noise.rs, noise/simplex.rs, grid.rs, hash.rs) ----
+// video_noise_line: add_noise_1d with Fbm(Simplex1d), per row seed and offset
+// (ntsc_gpu_row_seeds). ntsc-rs evaluates it N lanes at a time (N = the SIMD
+// width, 8 on AVX2): lane i of chunk k samples the coordinate
+//   c = offset + i, then c += N, k times (each addition rounded),
+// then Fbm scales it (x * frequency, x * 2 per octave). Every operation below is
+// ntsc-rs's, fused where it uses mul_add, `precise` elsewhere.
+
+// The k-fold rounded sum c + N + N + ... of the SIMD loop, without k steps:
+// within a binade [2^e, 2^(e+1)) adding N (a power of two at least the ulp,
+// for coordinates below 2^26) is exact, so the steps up to the next power of
+// two are one exact multiply-add; only the step that crosses into the next
+// binade rounds, and it is the same addition ntsc-rs does.
+float chain_add(float x, float c, uint k)
+{
+    [loop] for (int guard = 0; guard < 96 && k > 0u; ++guard) {
+        if (!(x >= c)) {
+            precise float y = x + c;
+            x = y;
+            k -= 1u;
+            continue;
+        }
+        const float lo = asfloat(asuint(x) & 0x7F800000u);  // 2^e <= x
+        precise float d = lo * 2.0 - x;                     // exact (Sterbenz)
+        const uint steps = uint(ceil(d * (1.0 / c)));        // additions to reach 2^(e+1)
+        const uint m = min(steps - 1u, k);
+        precise float mc = float(m) * c;
+        precise float y = x + mc;  // exact: stays below 2^(e+1)
+        x = y;
+        k -= m;
+        if (k > 0u) {
+            precise float z = x + c;  // the crossing step: rounds like ntsc-rs's
+            x = z;
+            k -= 1u;
+        }
+    }
+    return x;
+}
+
+// hash.rs hash_1d (ESGTSA)
+uint hash_1d(uint v)
+{
+    v = (v ^ 2747636419u) * 2654435769u;
+    v = (v ^ (v >> 16)) * 2654435769u;
+    v = (v ^ (v >> 16)) * 2654435769u;
+    return v;
+}
+
+// simplex.rs gradient_1d: (h & 7) + 1 with copysign(v, mask): negative when h & 8 == 0
+float gradient_1d(uint hash)
+{
+    const uint h = hash >> 28;
+    const float v = float((h & 7u) + 1u);
+    return (h & 8u) == 0u ? -v : v;
+}
+
+// simplex.rs simplex_1d with grid.rs Grid<1> for Simplex
+float simplex_1d<F : IFma>(float x, int seed)
+{
+    precise float fi = floor(x);
+    const int i0 = int(fi);
+    const int i1 = i0 + 1;
+    precise float x0 = x - fi;
+    precise float x1 = x0 - 1.0;
+    const uint gi0 = hash_1d(uint(i0 ^ seed));
+    const uint gi1 = hash_1d(uint(i1 ^ seed));
+    precise float t0 = F.fma3(-x0, x0, 1.0);
+    precise float t20 = t0 * t0;
+    precise float t40 = t20 * t20;
+    const float gx0 = gradient_1d(gi0);
+    precise float t1 = F.fma3(-x1, x1, 1.0);
+    precise float t21 = t1 * t1;
+    precise float t41 = t21 * t21;
+    const float gx1 = gradient_1d(gi1);
+    precise float a = t40 * gx0;
+    precise float b0 = t41 * gx1;
+    precise float b = b0 * x1;
+    precise float r = F.fma3(a, x0, b);
+    return r;
+}
+
+// noise.rs Fbm::generate (lacunarity 2)
+float fbm_1d<F : IFma>(float x, int seed, float frequency, int octaves, float gain)
+{
+    precise float pt = x * frequency;
+    precise float result = simplex_1d<F>(pt, seed);
+    precise float amplitude = gain;
+    [loop] for (int o = 1; o < octaves; ++o) {
+        pt = pt * 2.0;
+        result = F.fma3(simplex_1d<F>(pt, seed), amplitude, result);
+        amplitude = amplitude * gain;
+    }
+    return result;
+}
+
+float plane_load(uint p, uint2 at)
+{
+    if (p == 0u) return pY[at];
+    if (p == 1u) return pI[at];
+    return pQ[at];
+}
+void plane_store(uint p, uint2 at, float v)
+{
+    if (p == 0u) pY[at] = v;
+    else if (p == 1u) pI[at] = v;
+    else pQ[at] = v;
+}
+uint plane_of(uint bits) { return (bits & 1u) != 0u ? 0u : ((bits & 2u) != 0u ? 1u : 2u); }
+
+// add_noise_1d: row + noise * intensity (fx.x frequency, fx.z gain, ix.x octaves, ix.y lanes)
+void noise_add_impl<F : IFma>(uint3 id)
+{
+    id.y += uint(U.ix.w);
+    if (id.x >= U.width || id.y >= U.planeRows) return;
+    const NoiseRow nr = noiseRows[id.y];
+    if (nr.active == 0u) return;
+    const uint n = uint(U.ix.y);
+    precise float c0 = nr.offset + float(id.x % n);
+    const float c = chain_add(c0, float(n), id.x / n);
+    const float noise = fbm_1d<F>(c, nr.seed, U.fx.x, U.ix.x, U.fx.z);
+    const uint p = plane_of(U.planes);
+    precise float add = noise * nr.intensity;
+    precise float v = plane_load(p, id.xy) + add;
+    plane_store(p, id.xy, v);
+}
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void noise_add(uint3 id : SV_DispatchThreadID) { noise_add_impl<MadFma>(id); }
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void noise_add_x(uint3 id : SV_DispatchThreadID) { noise_add_impl<ExactFma>(id); }
+
+// ---- phases 2-3: speckles (row_speckles' transients, head switching's transient) ----
+// The values come from the CPU; a pixel adds those of the transients that
+// cover it in the row's event order, i.e. ntsc-rs's order where transients
+// overlap. A row's events start in non-decreasing x0 and are at most ix.x
+// pixels long, so only those starting in (x - ix.x, x] can cover x.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void add_speckles(uint3 id : SV_DispatchThreadID)
+{
+    const uint y = id.y + uint(U.ix.w);
+    if (id.x >= U.width || y >= U.planeRows) return;
+    const uint2 se = speckleRows[y];
+    if (se.y == 0u) return;
+    const int x = int(id.x);
+    const int lo = x - U.ix.x + 1;
+    uint a = se.x, b = se.x + se.y;
+    [loop] while (a < b) {
+        const uint m = (a + b) / 2u;
+        if (speckles[m].x0 < lo) a = m + 1u;
+        else b = m;
+    }
+    precise float v = pY[uint2(id.x, y)];
+    bool any = false;
+    [loop] for (uint e = a; e < se.x + se.y; ++e) {
+        const Speckle sp = speckles[e];
+        if (sp.x0 > x) break;
+        if (x < sp.x0 + int(sp.count)) {
+            v = v + speckleValues[sp.value_offset + uint(x - sp.x0)];
+            any = true;
+        }
+    }
+    if (any) pY[uint2(id.x, y)] = v;
+}
+
+// ---- phase 3: shift.rs shift_row / shift_row_to ----
+// Output pixel x of a row shifted by s (read from row `srcRow` of the scratch
+// copy): ntsc-rs's per-pixel formula, which differs between its SIMD blocks,
+// (left - right).mul_add(frac, right), and its scalar edges, left * frac +
+// right * (1 - frac); the blocks are simd_safe_range's (ix.y = their width).
+float shifted<F : IFma>(uint x, uint srcRow, float s, int boundary)
+{
+    const int W = int(U.width);
+    const int N = U.ix.y;
+    precise float ts = trunc(s);
+    const float tsc = clamp(ts, -float(W + 4), float(W + 4));  // beyond the row every read is the boundary
+    const int si = int(tsc) - (s < 0.0 ? 1 : 0);
+    precise float fr = s - ts;  // f32::fract
+    precise float frac = s < 0.0 ? 1.0 - abs(fr) : fr;
+    float bv = 0.0;
+    if (boundary == 1) bv = si >= 0 ? pS[uint2(0u, srcRow)] : pS[uint2(uint(W - 1), srcRow)];
+    const int li = int(x) - si - 1;
+    const int ri = li + 1;
+    const float L = (li >= 0 && li < W) ? pS[uint2(uint(li), srcRow)] : bv;
+    const float R = (ri >= 0 && ri < W) ? pS[uint2(uint(ri), srcRow)] : bv;
+    bool simd = false;
+    if (N <= W) {
+        const int safe_start = max(si + 1, 0);
+        const int upper = W - N + min(si, 0);
+        if (upper >= safe_start) {
+            const int end = safe_start + ((upper - safe_start) / N + 1) * N;
+            simd = int(x) >= safe_start && int(x) < end;
+        }
+    }
+    if (simd) {
+        precise float d = L - R;
+        return F.fma3(d, frac, R);
+    }
+    precise float a = L * frac;
+    precise float omf = 1.0 - frac;
+    precise float b = R * omf;
+    precise float r = a + b;
+    return r;
+}
+
+// Row shifts of head switching / tracking noise / edge wave (the row table
+// `shifts`) on the plane in `planes`, which the driver copied to the scratch plane.
+void shift_rows_impl<F : IFma>(uint3 id)
+{
+    id.y += uint(U.ix.w);
+    if (id.x >= U.width || id.y >= U.planeRows) return;
+    const RowShift rs = shifts[id.y];
+    if (rs.boundary < 0) return;
+    if (rs.copy_start >= 0 && int(id.x) < rs.copy_start) return;  // the mid line: before it, unshifted
+    plane_store(plane_of(U.planes), id.xy, shifted<F>(id.x, id.y, rs.shift, rs.boundary));
+}
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void shift_rows(uint3 id : SV_DispatchThreadID) { shift_rows_impl<MadFma>(id); }
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void shift_rows_x(uint3 id : SV_DispatchThreadID) { shift_rows_impl<ExactFma>(id); }
+
+// chroma_delay (ntsc.rs 969-1051) on the plane in `planes` (copied to the
+// scratch plane first): fx.x horizontal shift, ix.x vertical offset in rows,
+// ix.z = 1: rows copied (the horizontal shift is 0). Rows move within their
+// field; rows with no source are 0. For a negative offset ntsc-rs reads
+// `(offset - 1) * width` into the slice that starts after the destination
+// row, i.e. row dst + offset: no off-by-one.
+void chroma_delay_impl<F : IFma>(uint3 id)
+{
+    if (id.x >= U.width || id.y >= U.planeRows) return;
+    const Row r = rows[id.y];
+    const int fr = int(r.field_row), H = int(r.field_rows), off = U.ix.x;
+    int src = fr;
+    bool zero = false;
+    if (off > 0) {
+        if (fr < off) zero = true;
+        else src = fr - off;
+    } else if (off < 0) {
+        const int o = -off;
+        if (fr >= max(H, o) - o) zero = true;
+        else src = fr + o;
+    }
+    const uint p = plane_of(U.planes);
+    if (zero) {
+        plane_store(p, id.xy, 0.0);
+        return;
+    }
+    const uint srcRow = r.field_first + uint(src);
+    if (off != 0 && U.ix.z == 1) plane_store(p, id.xy, pS[uint2(id.x, srcRow)]);
+    else plane_store(p, id.xy, shifted<F>(id.x, srcRow, U.fx.x, 0));
+}
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void chroma_delay(uint3 id : SV_DispatchThreadID) { chroma_delay_impl<MadFma>(id); }
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void chroma_delay_x(uint3 id : SV_DispatchThreadID) { chroma_delay_impl<ExactFma>(id); }
