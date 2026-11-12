@@ -168,8 +168,10 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
         return facade::fail(inst, NTSCRT_ERR_HOST_GPU, err.empty() ? "host GPU API not available" : err);
     }
     try {
+        const bool had = facade::bridge(inst) != nullptr;
         Bridge *br = bridge_for(inst, *host, err);
         if (!br) return facade::fail(inst, NTSCRT_ERR_HOST_GPU, err);
+        if (!had || facade::bridge(inst).get() != br) pt.note = " new_bridge=\"" + br->describe() + "\"";
         if (std::string why = br->check(*dev0); !why.empty()) return facade::fail(inst, NTSCRT_ERR_HOST_GPU, why);
     } catch (const std::exception &e) {
         return facade::fail(inst, NTSCRT_ERR_HOST_GPU, e.what());

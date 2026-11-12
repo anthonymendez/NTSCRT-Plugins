@@ -26,6 +26,9 @@ Tests (see README.md next to this file):
             is pressed if Fusion scripting can press it (only logged, no window, under --headless)
   debugall  "Debug logging for all effects" (button): with the effect's checkbox off, every frame is
             logged in detail while it is on and not after it is off; the switch is left as found
+  bench     (only with --only bench, headless) Edit-page benchmark: render-queue jobs of 300 frames at UHD and
+            1080p, 60 fps, default look / Clean CRT / NTSC off; JSON lines with wall time, the plug-in's
+            ms per render (median, p95), render paths (CPU / GPU) and phase means
   position  Edit-page items an hour into the timeline: the frame ranges Resolve reports, an animated
             look applied there (time, keyframes, first render) plays over the clip like
             ntscrt-cli --timeline (headless with --bundle only)
@@ -280,7 +283,7 @@ def resolve_running():
         return False
 
 
-def start_headless(bundle, log_dir):
+def start_headless(bundle, log_dir, only=None):
     """Start Resolve with -nogui (no windows, so no dialog can block the tests). With `bundle`,
     a copy of that NTSCRT.ofx.bundle is loaded through OFX_PLUGIN_PATH instead of / next to the
     installed one. Returns the Popen."""
@@ -305,6 +308,8 @@ def start_headless(bundle, log_dir):
     # shell's NTSCRT_DEBUG_LOG doesn't turn detailed logging on behind the debug tests' back.
     env.setdefault("NTSCRT_SETTINGS_DIR", str(log_dir))
     env.pop("NTSCRT_DEBUG_LOG", None)
+    if "bench" in (only or ()):
+        env["NTSCRT_OFX_LOG_VERBOSE"] = "1"  # every render's ms and path, for the bench
     # The "position" test's switch: while this file exists the dev copy applies the look it names to
     # new effects (scripts can't set OpenFX params on the Edit page).
     env["NTSCRT_OFX_TEST_PRESET_FILE"] = str(Path(log_dir) / "test-preset.txt")
@@ -1168,6 +1173,114 @@ class Suite:
         self.record("speed", "pass", m, "ms per 1920x1080 frame added by NTSCRT; seek/edit/screenloop: the "
                     "plug-in's own time for one frame (informational)")
 
+    BENCH_LOOKS = (("default", None, ""), ("clean-crt", "Clean CRT", ""), ("ntsc-off", "(defaults)", "ntsc_enabled=0"))
+    BENCH_SIZES = {"uhd": (3840, 2160), "1080p": (1920, 1080)}
+
+    def t_bench(self):
+        """Edit-page benchmark (only with --only bench, headless): for each size in --bench-sizes a
+        project of its own made at that size and --bench-fps (a project's settings are set before it
+        has timelines; timelines' resolutions are never changed), one timeline per look with a Fusion
+        composition clip (animated gradient + noise + title at the timeline's size) and NTSCRT added
+        to it (the look through the dev copy's test preset file), rendered by one render-queue job of
+        --bench-frames frames. Also the clip without the effect (base). Prints one JSON line per run
+        ("BENCH {...}"): wall time, the plug-in's own ms per render (median / p95, from the verbose
+        log: NTSCRT_OFX_LOG_VERBOSE=1 is set by --headless with --only bench), the paths renders took
+        and the mean of each phase (ntscrt_last_timings; NTSCRT_PROFILE=1 in the environment separates
+        GPU phases). Informational: never fails on speed."""
+        if not self.a.headless:
+            return self.record("bench", "skip", notes="needs --headless (its own projects, verbose plug-in log)")
+        fx_ids = [e["id"] for e in self.r.GetEffectsList() if "ntscrt" in (e.get("name", "") + e.get("id", "")).lower()]
+        if not fx_ids:
+            return self.record("bench", "fail", notes="NTSCRT isn't in Resolve's effect list")
+        log = self.plugin_log()
+        preset_file = os.environ["NTSCRT_OFX_TEST_PRESET_FILE"]
+        pm = self.r.GetProjectManager()
+        n = self.a.bench_frames
+        results = []
+        for size in [s for s in self.a.bench_sizes.split(",") if s]:
+            w, h = self.BENCH_SIZES[size]
+            name = f"NTSCRT Resolve Bench {size}"
+            pm.SaveProject()
+            if name in (pm.GetProjectListInCurrentFolder() or []):
+                pm.DeleteProject(name)
+            p = retry(lambda: pm.CreateProject(name), f"create project {name}")
+            for k, v in (("timelineResolutionWidth", str(w)), ("timelineResolutionHeight", str(h)),
+                         ("timelineFrameRate", str(self.a.bench_fps)), ("timelinePlaybackFrameRate", str(self.a.bench_fps))):
+                p.SetSetting(k, v)
+            mp = p.GetMediaPool()
+            codecs = p.GetRenderCodecs("mp4") or {}
+            codec = next((c for d, c in codecs.items() if "NVIDIA" in d and "264" in d), None) or \
+                next((c for d, c in codecs.items() if "264" in d), None)
+            fmt = ("mp4", codec) if codec else ("png", "RGB8")
+            variants = [("base", None, "")] + list(self.BENCH_LOOKS)
+            for label, look, opts in variants:
+                for rep in range(self.a.bench_repeat):
+                    retry(lambda: self.r.OpenPage("edit"), "open the Edit page")
+                    tl = retry(lambda: mp.CreateEmptyTimeline(f"bench {label} {rep} {self.run_id}"), "create a timeline")
+                    retry(lambda: p.SetCurrentTimeline(tl), "switch timeline")
+                    clips = []
+                    while sum(c.GetDuration() for c in clips) < n:  # comp clips are a few seconds long
+                        c = retry(lambda: tl.InsertFusionCompositionIntoTimeline(), "insert a Fusion composition")
+                        cfu = Fu(self, c.GetFusionCompByIndex(1), tl)
+                        cfu.media_out.Input = self.scene(cfu, w, h).Output
+                        clips.append(c)
+                    mark = self.log_size(log)
+                    if label != "base":
+                        for c in clips:
+                            if look:
+                                Path(preset_file).write_text(f"{look}\n0\n{opts}\n", encoding="utf-8")
+                            try:
+                                if not c.AddEffect("ofx", fx_ids[0]):
+                                    raise RuntimeError("AddEffect refused")
+                            finally:
+                                if look:
+                                    os.remove(preset_file)
+                    start = tl.GetStartFrame()
+                    retry(lambda: p.SetCurrentRenderFormatAndCodec(*fmt), "set the render format")
+                    retry(lambda: p.SetRenderSettings({
+                        "SelectAllFrames": False, "MarkIn": start, "MarkOut": start + n - 1, "TargetDir": str(self.out),
+                        "CustomName": f"bench-{size}-{label}-{rep}", "FormatWidth": w, "FormatHeight": h}),
+                        "set render settings")
+                    job = retry(lambda: p.AddRenderJob(), "add a render job")
+                    t0 = time.time()
+                    retry(lambda: p.StartRendering([job], False), "start rendering")
+                    while p.IsRenderingInProgress():
+                        if time.time() - t0 > 1800:
+                            raise RuntimeError("bench render took over 30 minutes")
+                        time.sleep(0.05)
+                    wall = time.time() - t0
+                    st = p.GetRenderJobStatus(job) or {}
+                    p.DeleteRenderJob(job)
+                    time.sleep(0.5)
+                    text = self.log_since_rotated(log, mark)
+                    ms, paths, phases = [], {}, {}
+                    for m in re.finditer(r" render #\d+ t=\S+ .*? ms=([\d.]+)(?: (\S+))?([^\r\n]*)", text):
+                        ms.append(float(m.group(1)))
+                        path = m.group(2) if m.group(2) and not m.group(2).startswith("look=") else "path=?"
+                        paths[path] = paths.get(path, 0) + 1
+                        for k, v in re.findall(r" (in|digital|ntsc|upload|downscale|glitch|crt|out)=([\d.]+)", m.group(3)):
+                            phases.setdefault(k, []).append(float(v))
+                    ms.sort()
+                    q = lambda f: round(ms[min(len(ms) - 1, int(f * len(ms)))], 2) if ms else None  # noqa: E731
+                    row = {"bench": self.a.bench_label, "size": f"{w}x{h}", "fps": self.a.bench_fps, "look": label,
+                           "repeat": rep, "frames": n, "job": st.get("JobStatus"), "codec": "/".join(fmt),
+                           "wall_s": round(wall, 2), "renders": len(ms), "ms_median": q(0.5), "ms_p95": q(0.95),
+                           "paths": {k.replace("path=", ""): v for k, v in paths.items()},
+                           "phase_mean_ms": {k: round(sum(v) / len(v), 2) for k, v in phases.items()},
+                           "profile": bool(os.environ.get("NTSCRT_PROFILE")),
+                           "gpu_env": os.environ.get("NTSCRT_OFX_GPU", "")}
+                    print("BENCH " + json.dumps(row), flush=True)
+                    results.append(row)
+        (self.out / "bench.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
+        self.record("bench", "pass", {"runs": len(results)}, "see BENCH lines / bench.jsonl")
+
+    def log_since_rotated(self, p, offset):
+        """log_since, following one rotation (the plug-in's log moves to *.old.log at 1 MB)."""
+        if self.log_size(p) >= offset:
+            return self.log_since(p, offset)
+        old = p.with_name(p.stem + ".old" + p.suffix)
+        return self.log_since(old, offset) + self.log_since(p, 0)
+
     def screenloop_seek_cost(self, fu, src):
         """Screen Loop on (default look; the Bottom to top loop: zoomed in, auto exposure): a new
         instance renders frame 140, 141, then back to 125 and 100, then 141 again. Resolve renders
@@ -1427,6 +1540,8 @@ class Suite:
                              ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug),
                              ("debugall", self.t_debugall), ("position", self.t_position)):
                 self.run(name, fn)
+            if "bench" in self.a.only:  # long: only when asked for
+                self.run("bench", self.t_bench)
         finally:
             self.close()
         return self.report()
@@ -1457,6 +1572,11 @@ def main():
     ap.add_argument("--headless", action="store_true",
                     help="start Resolve with -nogui for the run and quit it afterwards (Resolve must be closed)")
     ap.add_argument("--bundle", help="with --headless: test this NTSCRT.ofx.bundle without installing it")
+    ap.add_argument("--bench-frames", type=int, default=300, help="bench: frames per render job")
+    ap.add_argument("--bench-sizes", default="uhd,1080p", help="bench: comma-separated uhd, 1080p")
+    ap.add_argument("--bench-fps", type=int, default=60, help="bench: project frame rate")
+    ap.add_argument("--bench-repeat", type=int, default=1, help="bench: render jobs per look and size")
+    ap.add_argument("--bench-label", default="", help="bench: label copied into each JSON line (e.g. the build)")
     a = ap.parse_args()
     a.only = {s.strip() for s in a.only.split(",") if s.strip()}
     if not a.out:
@@ -1469,7 +1589,7 @@ def main():
             Path(a.out).mkdir(parents=True, exist_ok=True)
             r = None
             for attempt in (1, 2):  # Resolve's script server occasionally fails to start: retry once
-                proc = start_headless(a.bundle, a.out)
+                proc = start_headless(a.bundle, a.out, a.only)
                 end = time.time() + 180
                 while not r and time.time() < end and proc.poll() is None:  # Resolve takes a while to start
                     time.sleep(3)

@@ -18,9 +18,11 @@ struct PhaseTimes {
     double ms[kCount] = {};
     bool ran[kCount] = {};
     std::string text;
+    std::string note;  // appended to text once (e.g. the host GPU bridge just made)
 
     void clear(const char *p) {
         path = p;
+        note.clear();
         for (int i = 0; i < kCount; ++i) ms[i] = 0, ran[i] = false;
     }
     void finish() {
@@ -32,6 +34,7 @@ struct PhaseTimes {
                 std::snprintf(b, sizeof b, " %s=%.2f", names[i], ms[i]);
                 text += b;
             }
+        text += note;
     }
     static bool profiling() {
         static const bool on = [] {
