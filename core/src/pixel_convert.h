@@ -23,6 +23,12 @@ AlphaMode alpha_mode(const json &look);
 // alpha vector as "all 1".
 void to_bgra8(const ntscrt_image &src, ImageBGRA8 &out, std::vector<float> *alpha_out,
               AlphaMode mode = AlphaMode::Clip, bool src_premult = false);
+// to_bgra8 into caller memory: rows `pitch` bytes apart, written in order and
+// never read (GPU upload memory). false when the picture needs
+// fill_transparent (Clip mode, some pixel transparent): the rows then aren't
+// the final picture, and the caller converts with to_bgra8 instead.
+bool to_bgra8_rows(const ntscrt_image &src, uint8_t *rows, ptrdiff_t pitch, std::vector<float> *alpha_out,
+                   AlphaMode mode, bool src_premult);
 // Clip mode: replace RGB where alpha is ~0 by the colour of the nearest
 // non-transparent area (pull-push). No-op when nothing is transparent.
 void fill_transparent(ImageBGRA8 &im, const std::vector<float> &alpha);
@@ -55,4 +61,19 @@ void from_bgra8(const ImageBGRA8 &in, const std::vector<float> *alpha, ntscrt_im
 // the look is defined in, as an 8-bit target would store it.
 void from_rgba16f(const uint16_t *px, int w, int h, const std::vector<float> *alpha, ntscrt_image &dst,
                   AlphaMode mode = AlphaMode::Clip, bool premult = false);
+// The same for rows [y0, y1) of a `w`-wide result whose row y0 is at `rows`,
+// rows `pitch` bytes apart (a band read straight from GPU readback memory):
+// writes those rows of dst only. `alpha` as above, for the whole picture.
+void from_bgra8_rows(const uint8_t *rows, ptrdiff_t pitch, int w, int y0, int y1, const std::vector<float> *alpha,
+                     ntscrt_image &dst, AlphaMode mode, bool premult);
+void from_rgba16f_rows(const uint8_t *rows, ptrdiff_t pitch, int w, int y0, int y1, const std::vector<float> *alpha,
+                       ntscrt_image &dst, AlphaMode mode, bool premult);
+
+namespace detail {
+// The SIMD conversion kernels (x86-64 with SSE4.1 + F16C; the same bytes as
+// the scalar code): on by default where the CPU has them, unless
+// NTSCRT_FAST_TRANSFER=0. Tests switch them to compare both paths.
+void set_simd(bool on);
+bool simd();
+}  // namespace detail
 }  // namespace ntscrt

@@ -2,6 +2,7 @@
 // inferred strides, UAV->SRV hazards, samplers, copy, wrap_native_texture.
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 
 #include "gpu_test_util.h"
@@ -143,8 +144,62 @@ void samplers_and_copy(gpu::Device &d) {
     CHECK(read(d, *wrapped) == read(d, *src));
 }
 
+// write() / read(): the zero-copy upload and banded readback give the same
+// bytes as upload() / download(), for any band count, repeatedly (staging reuse).
+void write_read(gpu::Device &d) {
+    const int w = 37, h = 23;
+    for (auto f : {gpu::Format::BGRA8, gpu::Format::RGBA16F, gpu::Format::RGBA32F})
+        for (bool shader_write : {false, true}) {
+            CAPTURE(int(f));
+            CAPTURE(shader_write);
+            const int bpp = f == gpu::Format::RGBA32F ? 16 : f == gpu::Format::RGBA16F ? 8 : 4;
+            const size_t tight = size_t(w) * bpp;
+            auto t = d.create_texture({w, h, f, shader_write, false});
+            for (int round = 0; round < 3; ++round) {
+                std::vector<uint8_t> in(tight * h);
+                for (size_t i = 0; i < in.size(); ++i) in[i] = uint8_t(i * 13 + round * 101);
+                if (f == gpu::Format::RGBA16F)  // finite halves (no NaN payload questions)
+                    for (size_t i = 1; i < in.size(); i += 2) in[i] &= 0x3b;
+                if (f == gpu::Format::RGBA32F)
+                    for (size_t i = 3; i < in.size(); i += 4) in[i] &= 0x3f;
+                d.write(*t, [&](uint8_t *rows, ptrdiff_t pitch) {
+                    CHECK(pitch >= ptrdiff_t(tight));
+                    for (int y = 0; y < h; ++y) std::memcpy(rows + pitch * y, in.data() + tight * y, tight);
+                });
+                std::vector<uint8_t> down(in.size());
+                d.download(*t, down.data(), ptrdiff_t(tight));
+                CHECK(down == in);
+                for (int bands : {1, 2, 5, 23, 40}) {
+                    CAPTURE(bands);
+                    std::vector<uint8_t> out(in.size(), 0);
+                    int next = 0;
+                    d.read(
+                        *t,
+                        [&](const uint8_t *rows, ptrdiff_t pitch, int y0, int y1) {
+                            CHECK(y0 == next);  // in order, no gaps
+                            CHECK(y1 > y0);
+                            next = y1;
+                            for (int y = y0; y < y1; ++y)
+                                std::memcpy(out.data() + tight * y, rows + pitch * (y - y0), tight);
+                        },
+                        bands);
+                    CHECK(next == h);
+                    CHECK(out == in);
+                }
+            }
+        }
+    // A throwing callback leaves the device usable.
+    auto t = d.create_texture({w, h, gpu::Format::BGRA8, true, false});
+    CHECK_THROWS(d.read(*t, [](const uint8_t *, ptrdiff_t, int, int) { throw std::runtime_error("x"); }, 3));
+    CHECK_THROWS(d.write(*t, [](uint8_t *, ptrdiff_t) { throw std::runtime_error("x"); }));
+    std::vector<uint8_t> px(size_t(w) * h * 4, 7);
+    d.upload(*t, px.data(), ptrdiff_t(w) * 4);
+    CHECK(read(d, *t) == px);
+}
+
 void run_all(gpu::Device &d) {
     SUBCASE("formats round-trip") { roundtrip_formats(d); }
+    SUBCASE("write / read (zero-copy, banded)") { write_read(d); }
     SUBCASE("dispatch with constants + structured buffer") { dispatch_scale(d); }
     SUBCASE("UAV buffer then SRV, repeated") { buffer_hazards(d); }
     SUBCASE("samplers, copy, wrap") { samplers_and_copy(d); }
@@ -174,6 +229,14 @@ TEST_CASE("HAL with BGRA8 stored as RGBA8 (no typed BGRA UAV)") {
     REQUIRE(d);
     run_all(*d);
     set_env("NTSCRT_D3D11_NO_BGRA_UAV", nullptr);
+}
+
+TEST_CASE("HAL without D3D11.4 fences (queries)") {
+    set_env("NTSCRT_D3D11_NO_FENCE", "1");
+    auto d = device();
+    set_env("NTSCRT_D3D11_NO_FENCE", nullptr);
+    REQUIRE(d);
+    run_all(*d);
 }
 
 TEST_CASE("wrong backend returns null with a message, no throw") {

@@ -26,6 +26,8 @@ struct Crop {
     static void apply(const json &look, const ImageBGRA8 &in, ImageBGRA8 &out);
     // Same, but moves `in` into `out` when the crop cuts nothing (no copy).
     static void apply(const json &look, ImageBGRA8 &&in, ImageBGRA8 &out);
+    // Does the look's crop cut a width x height picture (apply would change it)?
+    static bool cuts(const json &look, int width, int height);
 };
 
 // ---- Digital video codec (agent C) — CPU, temporal ----------------------------

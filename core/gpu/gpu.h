@@ -38,6 +38,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -110,6 +111,21 @@ public:
     virtual void upload(Texture &t, const void *data, ptrdiff_t row_bytes) = 0;
     // Waits for the work queued before it by itself: no finish() needed first.
     virtual void download(const Texture &t, void *data, ptrdiff_t row_bytes) = 0;
+
+    // Zero-copy variants (appended 2026-11-12, docs/dev/CONTRACT-CHANGES.md).
+    // write: like upload(), but `fn(rows, pitch)` writes the whole picture
+    // (every byte of each row's width * bytes_per_pixel, top row first, rows
+    // `pitch` bytes apart) straight into the memory the GPU copies from. The
+    // memory may be write-combined: write it in order, never read it.
+    using WriteFn = std::function<void(uint8_t *rows, ptrdiff_t pitch)>;
+    virtual void write(Texture &t, const WriteFn &fn);
+    // read: like download(), but hands the rows to `fn` where they landed:
+    // fn(rows, pitch, y0, y1) for consecutive bands of rows [y0, y1), top to
+    // bottom, `rows` pointing at row y0 (texture format and byte order; BGRA8
+    // = B, G, R, A), on the calling thread, valid during the call only. With
+    // bands > 1 the transfer of the next bands overlaps `fn` on this one.
+    using ReadFn = std::function<void(const uint8_t *rows, ptrdiff_t pitch, int y0, int y1)>;
+    virtual void read(const Texture &t, const ReadFn &fn, int bands = 1);
     virtual void upload(Buffer &b, const void *data, size_t bytes, size_t offset = 0) = 0;
 
     // `name` = "<shader file stem>/<entry point>", e.g. "downscale/area_h".

@@ -167,3 +167,24 @@ migrated). NTSCRT-Plugins extensions, all optional:
   `hostparams/src/params.cpp` (scripts that parse it follow); bundled presets can be listed without a core
   instance (`ntscrt::host::bundled_presets_json(resource_dir)`, same JSON as `ntscrt_bundled_presets_json`).
   No ABI change. FxPlug's hidden *Base Look* / *Base Screen Loop* params (ids 8, 9) are kept but no longer read.
+
+## 2026-11-12 — agent Q (fast transfer) — `core/gpu/gpu.h`, `core/stages/stages.h`
+
+**Change.** `gpu::Device` gains two virtual methods with default implementations over `upload` /
+`download` (in `core/gpu/device.cpp`), so other backends need nothing:
+- `write(Texture&, WriteFn)`: `fn(rows, pitch)` writes the whole picture straight into the memory the GPU
+  copies from (D3D11: a pooled `D3D11_USAGE_STAGING` texture with CPU write, mapped with `DO_NOT_WAIT` when a
+  previous copy from it may still run, then `CopyResource`; Metal: the shared staging buffer). Write-only memory
+  (may be write-combined).
+- `read(const Texture&, ReadFn, int bands = 1)`: `fn(rows, pitch, y0, y1)` for bands of rows in order, straight
+  from the readback memory (D3D11: one staging texture per band, a fence value after each band's copy, so
+  band k is converted while the GPU copies k+1; without fences one band after `finish()`. Metal: one band from
+  the shared buffer). BGRA8 textures stored as RGBA8 (no typed BGRA UAV) use the defaults.
+
+`Crop` gains `static bool cuts(const json &look, int width, int height)`.
+
+**Reason.** The OpenFX path spent more time moving pixels than on the GPU stages: a copy of the result into a
+buffer before converting it, an intermediate CPU picture before every upload (and none needed when no CPU stage
+touches the frame), allocations per frame. `write` / `read` let the façade convert straight into upload memory
+and straight out of readback memory; `cuts` tells it when the crop would change the picture (then the CPU
+picture is needed). No ABI change; pixels are byte-identical (docs: CHANGELOG, `bench_transfer --dump`).

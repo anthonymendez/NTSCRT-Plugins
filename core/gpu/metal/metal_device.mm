@@ -171,6 +171,55 @@ public:
         for (int y = 0; y < h; ++y) std::memcpy(dst + stride * y, src + tight * y, tight);
     }
 
+    // upload() without the copy: `fn` fills the shared staging buffer itself.
+    void write(Texture &t, const WriteFn &fn) override {
+        auto &mt = as(t);
+        const int w = mt.d.width, h = mt.d.height;
+        const size_t tight = size_t(w) * bytes_per_pixel(mt.d.format);
+        id<MTLBuffer> staging = [dev_ newBufferWithLength:tight * h options:MTLResourceStorageModeShared];
+        if (!staging) throw std::runtime_error("Metal: staging buffer allocation failed");
+        fn(static_cast<uint8_t *>([staging contents]), ptrdiff_t(tight));  // no lock: the buffer is ours alone
+        Lock lock(context_mutex());
+        id<MTLBlitCommandEncoder> blit = [cmd() blitCommandEncoder];
+        [blit copyFromBuffer:staging
+                 sourceOffset:0
+            sourceBytesPerRow:tight
+          sourceBytesPerImage:tight * h
+                   sourceSize:MTLSizeMake(NSUInteger(w), NSUInteger(h), 1)
+                    toTexture:mt.tex
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];  // the command buffer retains `staging`
+    }
+
+    // download() without the copy: `fn` reads the shared staging buffer (one
+    // band: unified memory, nothing to overlap).
+    void read(const Texture &t, const ReadFn &fn, int) override {
+        auto &mt = as(t);
+        const int w = mt.d.width, h = mt.d.height;
+        const size_t tight = size_t(w) * bytes_per_pixel(mt.d.format);
+        id<MTLBuffer> staging = [dev_ newBufferWithLength:tight * h options:MTLResourceStorageModeShared];
+        if (!staging) throw std::runtime_error("Metal: staging buffer allocation failed");
+        std::unique_lock<std::recursive_mutex> lock(context_mutex());
+        if (external_) throw std::runtime_error("Metal: read while a host command buffer is adopted");
+        id<MTLBlitCommandEncoder> blit = [cmd() blitCommandEncoder];
+        [blit copyFromTexture:mt.tex
+                         sourceSlice:0
+                         sourceLevel:0
+                        sourceOrigin:MTLOriginMake(0, 0, 0)
+                          sourceSize:MTLSizeMake(NSUInteger(w), NSUInteger(h), 1)
+                            toBuffer:staging
+                   destinationOffset:0
+              destinationBytesPerRow:tight
+            destinationBytesPerImage:tight * h];
+        [blit endEncoding];
+        id<MTLCommandBuffer> cb = take_current();
+        lock.unlock();  // other threads encode into a new buffer meanwhile
+        wait(cb);
+        fn(static_cast<const uint8_t *>([staging contents]), ptrdiff_t(tight), 0, h);
+    }
+
     void upload(Buffer &b, const void *data, size_t bytes, size_t offset) override {
         auto &mb = static_cast<MtlBuffer &>(b);
         if (offset + bytes > mb.bytes) throw std::runtime_error("buffer upload out of range");

@@ -8,10 +8,15 @@
 //   bench_transfer [--sizes 3840x2160,1920x1080] [--formats rgba32f,rgba16,rgba8]
 //                  [--looks default,clean_crt,ntsc_off] [--frames 300] [--warmup 30]
 //                  [--fps 60] [--label NAME] [--resources DIR] [--quiet]
+//                  [--pool-threads N]   (worker pool size; 1 = no pool)
+//                  [--alpha]            (a source with transparent and half-transparent areas)
+//                  [--dump DIR]         (writes each case's last frame to DIR/<case>.raw, to compare
+//                                        builds or NTSCRT_FAST_TRANSFER=0 byte for byte)
 //
 // Looks: "default" = every param at its schema default (what a new effect
 // renders), "clean_crt" = the bundled "Clean CRT" preset (NTSC off),
-// "ntsc_off" = the default look with the NTSC signal unticked.
+// "ntsc_off" = the default look with the NTSC signal unticked. Also "spill"
+// (ntsc_off, Transparency: Let effect spill) and "crop" (ntsc_off, 4:3 crop).
 // Frames are rendered back to back (fps only sets the frame rate the look's
 // timing uses). One JSON line per case (prefix "JSON "), then a table.
 #include <ntscrt/ntscrt.h>
@@ -19,6 +24,7 @@
 #include <nlohmann/json.hpp>
 
 #include "ntscrt_host/params.h"
+#include "stages/digital/parallel.h"
 #include "testing.h"
 
 #ifdef _WIN32
@@ -91,7 +97,9 @@ uint16_t to_half(float x) {
 }
 
 // A video-like opaque picture: smooth gradients, a few edges, mild noise.
-std::vector<uint8_t> make_source(int w, int h, const Fmt &fmt) {
+// alpha: the left eighth transparent, the next eighth half transparent
+// (premultiplied), like a title over nothing.
+std::vector<uint8_t> make_source(int w, int h, const Fmt &fmt, bool alpha) {
     std::vector<uint8_t> px(size_t(w) * h * fmt.bpp);
     uint32_t rng = 12345;
     for (int y = 0; y < h; ++y)
@@ -101,6 +109,10 @@ std::vector<uint8_t> make_source(int w, int h, const Fmt &fmt) {
             const float fx = float(x) / float(w), fy = float(y) / float(h);
             float v[4] = {fx, fy, ((x / 64 + y / 64) & 1) ? 0.8f : 0.2f, 1.f};
             for (int c = 0; c < 3; ++c) v[c] = std::clamp(v[c] + n, 0.f, 1.f);
+            if (alpha && x < w / 4) {
+                v[3] = x < w / 8 ? 0.f : 0.5f;
+                for (int c = 0; c < 3; ++c) v[c] *= v[3];
+            }
             uint8_t *p = &px[(size_t(y) * w + x) * fmt.bpp];
             for (int c = 0; c < 4; ++c) {
                 switch (fmt.f) {
@@ -158,7 +170,8 @@ int main(int argc, char **argv) {
     std::string label = "", resources = NTSCRT_BUILT_RESOURCES_DIR;
     int frames = 300, warmup = 30;
     double fps = 60;
-    bool quiet = false;
+    bool quiet = false, alpha = false;
+    std::string dump;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&] { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
@@ -171,6 +184,9 @@ int main(int argc, char **argv) {
         else if (a == "--label") label = next();
         else if (a == "--resources") resources = next();
         else if (a == "--quiet") quiet = true;
+        else if (a == "--alpha") alpha = true;
+        else if (a == "--dump") dump = next();
+        else if (a == "--pool-threads") ntscrt::digital::set_thread_count(std::atoi(next().c_str()));
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
             return 2;
@@ -195,9 +211,14 @@ int main(int argc, char **argv) {
         Built b;
         if (n == "default") {
             b = look_from(nullptr);
-        } else if (n == "ntsc_off") {
+        } else if (n == "ntsc_off" || n == "spill" || n == "crop") {
             b = look_from(nullptr);
             set_at(b.look, "/ntsc/enabled", false);
+            if (n == "spill") set_at(b.look, "/alpha/mode", "spill");
+            if (n == "crop") {
+                set_at(b.look, "/crop/enabled", true);
+                set_at(b.look, "/crop/ratio", "4:3");
+            }
         } else if (n == "clean_crt") {
             const std::string text = read_file(resources + "/presets/Clean CRT.json");
             json preset = json::parse(text, nullptr, false);
@@ -241,7 +262,7 @@ int main(int argc, char **argv) {
                 std::fprintf(stderr, "unknown format %s\n", fn.c_str());
                 return 2;
             }
-            std::vector<uint8_t> src_buf = make_source(w, h, fmt), dst_buf(src_buf.size());
+            std::vector<uint8_t> src_buf = make_source(w, h, fmt, alpha), dst_buf(src_buf.size());
             ntscrt_image src = bottom_up(src_buf, w, h, fmt), dst = bottom_up(dst_buf, w, h, fmt);
             Host host{&src};
             for (const Look &lk : look_list) {
@@ -276,6 +297,12 @@ int main(int argc, char **argv) {
                     }
                 }
                 next_frame += warmup + frames + 1000;
+                if (!dump.empty()) {
+                    const std::string path = dump + "/" + std::to_string(w) + "x" + std::to_string(h) + "_" + fn +
+                                             "_" + lk.name + ".raw";
+                    std::ofstream o(path, std::ios::binary);
+                    o.write(reinterpret_cast<const char *>(dst_buf.data()), std::streamsize(dst_buf.size()));
+                }
                 auto med_of = [&](auto get) {
                     std::vector<double> v;
                     for (const auto &p : ph) v.push_back(get(p));

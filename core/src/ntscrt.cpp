@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -202,6 +203,8 @@ struct ntscrt_instance {
     std::string presets_cache;
     SourceCache sources;
     LookStore looks;
+    std::vector<uint8_t> spare_px;  // last frame's picture buffers, reused (fast_transfer)
+    std::vector<float> spare_alpha;
     PhaseClock clock;  // the last render call's phases (testing::last_phases)
     testing::PhaseTimes phases;
 };
@@ -390,6 +393,15 @@ namespace {
 using SourceFn = std::function<void(ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode)>;
 using EmitFn = std::function<void(const std::shared_ptr<gpu::Texture> &out_gpu, const ImageBGRA8 &cpu_img,
                                   int raw_w, int raw_h, const std::vector<float> *alpha, AlphaMode mode)>;
+// Optional, for frames no CPU stage touches (no Digital, NTSC, crop or Screen
+// Loop): the source (w x h) converted straight into the upload texture
+// (`put`, as get_src would convert it), without a CPU picture in between.
+// put returns false when it couldn't (Clip mode with transparent pixels needs
+// the CPU picture's hole filling): get_src then runs as usual.
+struct DirectSrc {
+    int w = 0, h = 0;
+    std::function<bool(gpu::Device &dev, gpu::Texture &t, std::vector<float> &alpha, AlphaMode mode)> put;
+};
 
 // Looks at other frames during one render call. Entries are dropped oldest
 // frame first past kMax, so a reference from look_at stays valid for at least
@@ -416,11 +428,50 @@ gpu::Format output_format(bool high_precision_host) {
     return high_precision_host && !force8 ? gpu::Format::RGBA16F : gpu::Format::BGRA8;
 }
 
+// NTSCRT_FAST_TRANSFER=0: the 0.5.0-rc.3 transfer path (A/B testing): upload
+// from the CPU picture with upload(), read back into a buffer with download()
+// and convert from there, new picture buffers every frame.
+bool fast_transfer() {
+    static const bool on = [] {
+        const char *e = std::getenv("NTSCRT_FAST_TRANSFER");
+        return !(e && *e == '0');
+    }();
+    return on;
+}
+
+// Readback bands (gpu::Device::read): about 16 MB each, at most 8, so the
+// transfer of the next band overlaps the conversion of this one. (Measured on
+// PCIe 5: 1-4 bands are as fast as each other, more get slower: smaller
+// conversion jobs on the thread pool. On slower links the overlap helps more.)
+// NTSCRT_READBACK_BANDS=N sets the count (1 = no overlap).
+int readback_bands(size_t bytes) {
+    static const int forced = [] {
+        const char *e = std::getenv("NTSCRT_READBACK_BANDS");
+        return e && *e ? std::atoi(e) : 0;
+    }();
+    if (forced > 0) return forced;
+    return int(std::clamp<size_t>(bytes / (size_t(16) << 20), 1, 8));
+}
+
+// fn(y) for each of h rows of row_bytes: on the thread pool when large
+// (blocks of rows, so each task is a decent memcpy).
+template <class Fn> void for_row_blocks(int h, size_t row_bytes, Fn &&fn) {
+    if (size_t(h) * row_bytes < (size_t(1) << 20)) {
+        for (int y = 0; y < h; ++y) fn(y);
+        return;
+    }
+    constexpr int kRows = 8;
+    digital::parallel_for((h + kRows - 1) / kRows, [&](int b) {
+        for (int y = b * kRows, e = std::min(h, y + kRows); y < e; ++y) fn(y);
+    });
+}
+
 // out_fmt: output_format() for the host picture; used when the CRT shader is
 // on (its bypass is an 8-bit picture anyway, kept exactly as before).
 ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
                           const std::shared_ptr<const json> &look_p, const json &feedback, int out_w, int out_h,
-                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit) {
+                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit,
+                          const DirectSrc *direct_src) {
     const json &look = *look_p;
     const std::string_view look_text = args->look_json ? args->look_json : "{}";
     const AlphaMode mode = alpha_mode(look);
@@ -470,10 +521,30 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         return p;
     };
 
+    // This frame's pictures reuse the last frame's buffers (fast_transfer):
+    // no 8-33 MB allocation, page faults and free per frame.
     std::vector<float> alpha;
     ImageBGRA8 img;
-    {
+    struct Keep {  // hands the buffers back for the next frame, however this returns
+        ntscrt_instance *inst;
+        ImageBGRA8 &img;
+        std::vector<float> &alpha;
+        ~Keep() {
+            if (!fast_transfer()) return;
+            if (img.px.capacity() > inst->spare_px.capacity()) inst->spare_px = std::move(img.px);
+            if (alpha.capacity() > inst->spare_alpha.capacity()) inst->spare_alpha = std::move(alpha);
+        }
+    } keep{inst, img, alpha};
+    if (fast_transfer()) alpha = std::move(inst->spare_alpha);
+    // The source goes straight into the upload texture (below) when nothing
+    // on the CPU needs the picture.
+    const bool direct = direct_src && fast_transfer() && inst->dev && !inst->test_lose_device &&
+                        !inst->howl->active(args->feedback_json ? &feedback : nullptr) &&
+                        !inst->digital.active(look) && !inst->ntsc.active(look) &&
+                        !Crop::cuts(look, direct_src->w, direct_src->h);
+    auto convert_source = [&] {
         ImageBGRA8 raw;
+        if (fast_transfer()) raw.px = std::move(inst->spare_px);
         {
             Phase ph(inst->clock, kConvertIn);
             get_src(raw, alpha, mode);
@@ -481,6 +552,13 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         raw_w = raw.width;
         raw_h = raw.height;
         Crop::apply(look, std::move(raw), img);  // no crop: moved, not copied
+        if (fast_transfer() && raw.px.capacity() > inst->spare_px.capacity()) inst->spare_px = std::move(raw.px);
+    };
+    if (direct) {
+        raw_w = img.width = direct_src->w;  // (no pixels: img is only read on the CPU-only path)
+        raw_h = img.height = direct_src->h;
+    } else {
+        convert_source();
     }
     const std::vector<float> *aligned_alpha = img.width == raw_w && img.height == raw_h ? &alpha : nullptr;
 
@@ -528,7 +606,17 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
     auto upload = [&](const ImageBGRA8 &im) {
         Phase ph(inst->clock, kUpload);
         auto t = acquire({im.width, im.height, gpu::Format::BGRA8, false, false});  // only ever read
-        dev.upload(*t, im.px.data(), ptrdiff_t(im.width) * 4);
+        if (fast_transfer()) {
+            // Straight into the GPU's upload memory, rows copied on the thread pool.
+            const size_t tight = size_t(im.width) * 4;
+            dev.write(*t, [&](uint8_t *rows, ptrdiff_t pitch) {
+                for_row_blocks(im.height, tight, [&](int y) {
+                    std::memcpy(rows + ptrdiff_t(y) * pitch, im.row(y), tight);
+                });
+            });
+        } else {
+            dev.upload(*t, im.px.data(), ptrdiff_t(im.width) * 4);
+        }
         return t;
     };
     auto download = [&](const gpu::Texture &t) {
@@ -631,8 +719,22 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             ctx.line_height = inst->digital.active(look) ? digital::chain_line_height(look) : 1;  // One field
             if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
         }
+        std::shared_ptr<gpu::Texture> up;
+        if (direct) {
+            up = acquire({raw_w, raw_h, gpu::Format::BGRA8, false, false});
+            bool ok;
+            {
+                Phase ph(inst->clock, kConvertIn);
+                ok = direct_src->put(dev, *up, alpha, mode);
+            }
+            if (!ok) {  // needs the hole filling: the usual way
+                up.reset();
+                convert_source();
+            }
+        }
+        if (!up) up = upload(img);
         Phase ph(inst->clock, kGpuStages);
-        chain = inst->downscale->run(upload(img), ctx);
+        chain = inst->downscale->run(up, ctx);
         if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
     }
     const gpu::Format fmt = crt_shader_on(look) ? out_fmt : gpu::Format::BGRA8;
@@ -655,7 +757,8 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
 }
 
 ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args, int out_w, int out_h,
-                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit) {
+                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit,
+                          const DirectSrc *direct_src = nullptr) {
     inst->last_error.clear();
     std::shared_ptr<const json> look = inst->looks.get(args->look_json ? args->look_json : "{}");
     if (!look) return fail(inst, NTSCRT_ERR_BAD_PARAMS, "look_json is not valid JSON");
@@ -667,7 +770,7 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
     bool recreated = false;
     for (;;) {
         try {
-            return render_once(inst, args, look, feedback, out_w, out_h, out_fmt, get_src, emit);
+            return render_once(inst, args, look, feedback, out_w, out_h, out_fmt, get_src, emit, direct_src);
         } catch (const std::exception &e) {
             if (!device_lost(inst)) return fail(inst, NTSCRT_ERR_INTERNAL, e.what());
             // The device is gone (driver reset, GPU removed): try a new one once,
@@ -702,6 +805,14 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
             i->phases = i->clock.result();
         }
     } done{inst};
+    const DirectSrc direct{src->width, src->height,
+                           [&](gpu::Device &dev, gpu::Texture &t, std::vector<float> &alpha, AlphaMode mode) {
+                               bool ok = true;
+                               dev.write(t, [&](uint8_t *rows, ptrdiff_t pitch) {
+                                   ok = to_bgra8_rows(*src, rows, pitch, &alpha, mode, premult);
+                               });
+                               return ok;
+                           }};
     return render_impl(
         inst, args, dst->width, dst->height, output_format(high),
         [&](ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode) {
@@ -715,6 +826,23 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
                 return;
             }
             const bool same = dst->width == raw_w && dst->height == raw_h;
+            const std::vector<float> *a = same ? alpha : nullptr;
+            if (fast_transfer()) {
+                // Converted band by band straight from the readback memory
+                // (no copy of the result), the next bands' transfer meanwhile.
+                const bool f16 = out->desc().format == gpu::Format::RGBA16F;
+                const int w = out->desc().width;
+                Phase ph(inst->clock, kReadback);
+                inst->dev->read(
+                    *out,
+                    [&](const uint8_t *rows, ptrdiff_t pitch, int y0, int y1) {
+                        Phase pc(inst->clock, kConvertOut);
+                        if (f16) from_rgba16f_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
+                        else from_bgra8_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
+                    },
+                    readback_bands(size_t(w) * out->desc().height * (f16 ? 8 : 4)));
+                return;
+            }
             if (out->desc().format == gpu::Format::RGBA16F) {
                 std::vector<uint16_t> &px = inst->result16;
                 px.resize(size_t(dst->width) * dst->height * 4);  // fully overwritten by the download
@@ -736,7 +864,8 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
             }
             Phase ph(inst->clock, kConvertOut);
             from_bgra8(result, same ? alpha : nullptr, *dst, mode, premult);
-        });
+        },
+        &direct);
 }
 
 // Metal path (FxPlug): host textures in and out, on the device given at create.
@@ -765,6 +894,13 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         // Normalise any host format to RGBA32F on the GPU, read back once.
         auto f32 = dev.create_texture({sw, sh, gpu::Format::RGBA32F, true, false});
         dev.copy(*src, *f32);
+        if (fast_transfer()) {  // converted straight from the readback memory (one band: all rows)
+            dev.read(*f32, [&](const uint8_t *rows, ptrdiff_t pitch, int, int) {
+                ntscrt_image im{sw, sh, pitch, NTSCRT_RGBA32F, const_cast<uint8_t *>(rows)};
+                to_bgra8(im, raw, &alpha, mode, premult);
+            });
+            return;
+        }
         std::vector<float> px(size_t(sw) * sh * 4);
         dev.download(*f32, px.data(), ptrdiff_t(sw) * 16);
         ntscrt_image im{sw, sh, ptrdiff_t(sw) * 16, NTSCRT_RGBA32F, px.data()};
