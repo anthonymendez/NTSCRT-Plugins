@@ -117,6 +117,15 @@ written but not yet built.
   JSON is parsed once (the host sends the same text for every frame of an unanimated look), the history of
   other frames' looks is bounded, and upload / output / Glitch textures are reused across frames. Output is
   unchanged.
+- Faster frames on large pictures, picture unchanged (byte for byte): the result is converted straight from the
+  GPU's read-back memory, in bands that overlap the transfer, instead of being copied into a buffer first;
+  frames that no CPU stage touches (NTSC signal, Digital video, crop and Screen Loop off, as in *Clean CRT*) go
+  from the host picture straight into the GPU's upload memory; the pixel conversions use SIMD on Windows (same
+  rounding as before) and write the host picture with streaming stores; the frame's picture buffers are kept
+  between frames. In the transfer benchmark a UHD float frame of *Clean CRT* takes ~8 ms instead of ~21 ms,
+  the default look ~55 ms instead of ~69 ms (most of it is the NTSC signal), 1080p *Clean CRT* ~2.1 ms instead
+  of ~4.8 ms (median of 300 frames; Ryzen 9 9950X3D, RTX 5090). `NTSCRT_FAST_TRANSFER=0` brings back the old
+  path for comparison.
 - **Screen Loop seeks:** the loop keeps checkpoints of what it has rendered (every 30 frames and at each window
   start, within 256 MB of GPU memory per effect, `NTSCRT_SCREENLOOP_CHECKPOINT_MB`), so a jump back, or to a
   frame near one rendered before, resumes from the closest one instead of re-running the loop from its window
@@ -258,6 +267,12 @@ written but not yet built.
   has system requirements, known issues, a Licence section and macOS build steps; docs/ENVIRONMENT.md lists
   every environment variable; docs/dev/UPSTREAM-SYNC.md says how to sync with a later upstream release; the
   agent working notes moved to `docs/dev/` (`AGENTS.md`, `CONTRACT-CHANGES.md`).
+- `bench_transfer` (tests/core, run by hand): 300 frames after 30 warm-up as an OpenFX host renders them
+  (bottom-up premultiplied buffers, frames in order), UHD and 1080p, 32-bit float / 16-bit / 8-bit, for the
+  default look, *Clean CRT* and the default look with NTSC off; median / p95 and where the time goes (convert
+  in, CPU stages, upload, GPU stages, readback, convert out) as a table and one JSON line per case; `--dump`
+  writes the frames to compare builds byte for byte. The GPU HAL gains `write` / `read` (zero-copy upload,
+  banded readback; docs/dev/CONTRACT-CHANGES.md).
 - Tests for debug logging for all effects: `test_hostparams` (the shared switch: location, polling, one report
   per change across threads), `test_ofx` (button, status line, detailed renders, a change made outside the
   host) and the Resolve test `debugall`; the mock-host and headless Resolve tests keep the switch in their own
