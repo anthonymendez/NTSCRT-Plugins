@@ -8,7 +8,7 @@ Use the [bug report form](https://github.com/anthonymendez/NTSCRT-Plugins/issues
 thing you can attach is the diagnostics zip from `ntscrt_doctor.py` ([docs/TESTING.md](docs/TESTING.md),
 section 3): it collects the plug-in's log, your Resolve and GPU versions, and the install state, with your
 user name and home folder removed. For a problem with specific frames, turn on **Debug logging** in the
-effect first (same page).
+effect first, or **Turn on debug logging for all effects** for every effect at once (same page).
 
 Security problems: see [SECURITY.md](SECURITY.md) instead of opening an issue.
 

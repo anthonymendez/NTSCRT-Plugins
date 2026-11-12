@@ -15,7 +15,9 @@ Setting one for Resolve:
 | Variable | Values | What it does |
 |---|---|---|
 | `NTSCRT_OFX_LOG` | a file path, or `off` | Where the plug-in's log goes, or `off` for no log. Default: `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log` (Windows), `~/Library/Logs/NTSCRT/ntscrt-ofx.log` (macOS); rotated to `ntscrt-ofx.old.log` at 1 MB. |
-| `NTSCRT_OFX_LOG_VERBOSE` | `1` | Log every render of every NTSCRT effect (normally only the first 20 per effect, every 500th and failures). The *Debug logging* checkbox does this for one effect, with timings and the look. |
+| `NTSCRT_OFX_LOG_VERBOSE` | `1` | Log every render of every NTSCRT effect (normally only the first 20 per effect, every 500th and failures), one short line each. The *Debug logging* checkbox does this for one effect, with timings and the look; `NTSCRT_DEBUG_LOG` for all of them. |
+| `NTSCRT_DEBUG_LOG` | `1` (`0` / `off` = not set) | Detailed debug logging (every frame, with timings and the look, as the *Debug logging* checkbox) for every NTSCRT effect while Resolve runs with it, whatever the effects' checkboxes say. The same as the *Turn on debug logging for all effects* button, without the button's file. Read by the Final Cut plug-in too, but Final Cut's sandboxed renderer doesn't normally see your environment: use the button there. |
+| `NTSCRT_SETTINGS_DIR` | a folder | Where both plug-ins keep the *Debug logging for all effects* switch, the file `debug-logging-all-effects.txt` (on while it exists). Default: the log's default folder, `%LOCALAPPDATA%\NTSCRT` (Windows), `~/Library/Logs/NTSCRT` (macOS), and for Final Cut `~/Library/Containers/<NTSCRT Renderer>/Data/Library/Logs/NTSCRT`. Not moved by `NTSCRT_OFX_LOG`. Tests set it so they never touch your own switch (`test_ofx`, `run_resolve_tests.py --headless`). |
 | `NTSCRT_OFX_NO_OPEN` | `1` | *Open logs folder* only logs the press and opens no window (tests, CI). Headless Resolve (`-nogui`) behaves like this anyway. |
 | `NTSCRT_OFX_DEV_BUNDLE` | a folder | A plug-in bundle inside this folder reports itself as a development build that outranks any installed NTSCRT of the same version (Resolve keeps one plug-in per id and version). Set by `tests/resolve/run_resolve_tests.py --bundle` and `launch_resolve_dev.ps1`. |
 
@@ -38,6 +40,7 @@ Setting one for Resolve:
 | Variable | Values | What it does |
 |---|---|---|
 | `NTSCRT_FXPLUG_FLIP` | `0` or `1` | Overrides the row order the renderer assumes (`1` = bottom row first). For testing image orientation (fxplug/README.md); set with `launchctl setenv`. |
+| `NTSCRT_DEBUG_LOG`, `NTSCRT_SETTINGS_DIR` | as above | As for the OpenFX plug-in, if the renderer sees them (the sandbox usually hides your environment). |
 
 ## Installers
 

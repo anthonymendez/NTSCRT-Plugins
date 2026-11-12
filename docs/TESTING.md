@@ -59,7 +59,9 @@ install line again without `-Version` / `--version` goes back to the latest rele
    shows steps.
 10. **Debug logging:** in *Presets*, tick **Debug logging**, play a few frames, untick it, then click
     **Open logs folder**: Explorer / Finder opens the folder with `ntscrt-ofx.log`, which has one detailed line
-    per frame you played.
+    per frame you played. Then click **Turn on debug logging for all effects**, play a few frames of another
+    clip with NTSCRT (its own checkbox off), and click **Turn off debug logging for all effects**: those frames
+    are in the log in detail too (`debug_by=all`).
 11. Render a few seconds on the Deliver page and play the file back.
 
 **Final Cut Pro** (12.4 or newer, macOS). Only if the release you installed includes the Final Cut plug-in.
@@ -69,7 +71,8 @@ on their release page, and the installer says "skipping Final Cut Pro". Skip thi
 2. Change a few parameters and the preset (include an animated one such as *Glitch pop*, and a
    *Digital video/…* format); scrub; render/share a few seconds. Check the picture isn't upside down.
 3. Put it on a title as in step 8 above.
-4. *Debug Logging* and *Open Logs Folder* as in step 10 (the log is `ntscrt-fxplug.log`, see below).
+4. *Debug Logging*, *Open Logs Folder* and *Debug Logging for All Effects…* as in step 10 (the log is
+   `ntscrt-fxplug.log`, see below).
 
 Note anything that looks wrong, along with what you did just before.
 
@@ -126,6 +129,25 @@ The plug-in always keeps a small log (start-up, the first frames of each effect,
 3. Untick **Debug logging** (it slows rendering a little). Resolve doesn't save it with the project.
 4. Click **Open logs folder**: Explorer / Finder opens the folder with the log. Attach that file, or run the
    doctor above, which collects it.
+
+**Debug logging for everything** (several effects, or a problem you can't pin to one clip): instead of ticking
+each effect, turn it on once for the whole plug-in. Every NTSCRT effect, on every clip, in every project, then
+logs every frame in detail, until you turn it off again (it stays on after restarting Resolve).
+1. Select any NTSCRT effect. In its *Presets* group, click **Turn on debug logging for all effects**. The line
+   above it, *Debug logging, all effects*, says **ON for every NTSCRT effect** (in Resolve the button's name
+   and that line refresh when you reopen the effect's controls). Effects that are already open follow within
+   a second.
+2. Reproduce the problem.
+3. Click the button again (**Turn off debug logging for all effects**): the line says *off*.
+4. Click **Open logs folder** and attach `ntscrt-ofx.log`, or run the doctor, which also reports whether this
+   switch is on.
+
+In **Final Cut** the button is **Debug Logging for All Effects…**: it shows whether it is on and offers to turn
+it on or off. The log is `ntscrt-fxplug.log`.
+
+The switch is a file next to the log, `debug-logging-all-effects.txt`: logging for all effects is on while it
+exists, so you can also delete it to turn it off. Setting the environment variable `NTSCRT_DEBUG_LOG=1` before
+starting Resolve does the same for that session (see [ENVIRONMENT.md](ENVIRONMENT.md)).
 
 Where the logs are:
 - Resolve, Windows: `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log`

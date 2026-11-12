@@ -224,6 +224,7 @@ uint32_t Model::cache_mask(uint32_t pid, bool keyed) const {
     case kBaseFeedback:
     case kDebugLogging:
     case kOpenLogs:
+    case kDebugAll:
     case kTopGroup:
     case kExtrasGroup: return 0;
     default: break;

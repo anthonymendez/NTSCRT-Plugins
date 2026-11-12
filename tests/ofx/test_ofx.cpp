@@ -17,28 +17,39 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 using nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
 // Before the plug-in loads (it reads these once): keep the test runs out of the user's
-// log and never open a file-manager window from "Open logs folder".
+// log and their "Debug logging for all effects" switch (NTSCRT_SETTINGS_DIR: a fresh, empty
+// folder), never open a file-manager window from "Open logs folder".
+const fs::path kSettingsDir = fs::temp_directory_path() / "ntscrt_ofx_test_settings";
 const fs::path kLogFile = [] {
     fs::path p = fs::temp_directory_path() / "ntscrt_ofx_test.log";
     std::error_code ec;
     fs::remove(p, ec);
+    fs::remove_all(kSettingsDir, ec);
     auto u = p.u8string();
     std::string s(u.begin(), u.end());
+    auto su = kSettingsDir.u8string();
+    std::string sd(su.begin(), su.end());
 #ifdef _WIN32
     _putenv_s("NTSCRT_OFX_LOG", s.c_str());
     _putenv_s("NTSCRT_OFX_NO_OPEN", "1");
+    _putenv_s("NTSCRT_SETTINGS_DIR", sd.c_str());
+    _putenv_s("NTSCRT_DEBUG_LOG", "");
 #else
     setenv("NTSCRT_OFX_LOG", s.c_str(), 1);
     setenv("NTSCRT_OFX_NO_OPEN", "1", 1);
+    setenv("NTSCRT_SETTINGS_DIR", sd.c_str(), 1);
+    unsetenv("NTSCRT_DEBUG_LOG");
 #endif
     return p;
 }();
+const fs::path kSwitchFile = kSettingsDir / "debug-logging-all-effects.txt";
 std::string read_log() {
     std::ifstream f(kLogFile);
     std::stringstream ss;
@@ -226,6 +237,14 @@ TEST_CASE("describe: params match the schema") {
     CHECK(dbg->props.s(kOfxParamPropParent) == "grp_host_presets");
     CHECK(f.param("host_open_logs")->type == kOfxParamTypePushButton);
     CHECK(f.param("host_open_logs")->props.s(kOfxParamPropParent) == "grp_host_presets");
+    // "Debug logging for all effects": a button and a read-only status line, nothing saved
+    CHECK(f.param("host_debug_all")->type == kOfxParamTypePushButton);
+    CHECK(f.param("host_debug_all")->props.s(kOfxParamPropParent) == "grp_host_presets");
+    mock::Param *st = f.param("host_debug_all_status");
+    CHECK(st->type == kOfxParamTypeString);
+    CHECK(st->props.s(kOfxParamPropStringMode) == kOfxParamStringIsLabel);
+    CHECK(st->props.i(kOfxParamPropPersistant) == 0);
+    CHECK(st->props.s(kOfxParamPropParent) == "grp_host_presets");
 }
 
 TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
@@ -899,4 +918,70 @@ TEST_CASE("host protocol: non-square pixels render with a warning") {
     bool warned = false;
     for (auto &m : f.host.log) warned |= m.find("non-square pixels") != std::string::npos;
     CHECK(warned);
+}
+
+// "Debug logging for all effects": the button flips the switch file shared by every instance,
+// the status line follows it, and while it is on every render logs in detail although the
+// effect's own checkbox is off; a change made outside the host is picked up within a second.
+TEST_CASE("debug logging for all effects: button, status, renders, outside changes") {
+    std::error_code ec;
+    fs::remove(kSwitchFile, ec);
+    ProtoFixture f;
+    mock::Param *status = f.param("host_debug_all_status");
+    REQUIRE(f.host.action(f.plug, kOfxActionBeginInstanceEdit, f.inst.get()) != kOfxStatFailed);
+    CHECK(status->str == "off");
+    CHECK(f.param("host_debug_logging")->v[0] == 0);
+    CHECK(read_log().find("debug logging for all effects off") != std::string::npos);  // at creation
+
+    size_t mark = read_log().size();
+    REQUIRE(f.changed("host_debug_all") == kOfxStatOK);
+    CHECK(fs::is_regular_file(kSwitchFile));
+    CHECK(status->str == "ON for every NTSCRT effect");
+    CHECK(f.param("host_debug_all")->props.s(kOfxPropLabel) == "Turn off debug logging for all effects");
+    for (double t : {30.0, 31.0}) REQUIRE(f.render(t) == kOfxStatOK);
+    std::string added = read_log().substr(mark);
+    MESSAGE(added);
+    CHECK(added.find("debug logging for all NTSCRT effects turned on") != std::string::npos);
+    CHECK(count(added, " debug render #") == 2);
+    CHECK(count(added, "debug_by=all") == 2);
+    CHECK(count(added, " look={") == 1);
+    CHECK(count(added, "core_ms=") == 2);
+
+    // An effect created while it is on says so.
+    {
+        mark = read_log().size();
+        auto other = f.host.make_instance(f.desc, kOfxImageEffectContextFilter);
+        REQUIRE(f.host.action(f.plug, kOfxActionCreateInstance, other.get()) == kOfxStatOK);
+        CHECK(read_log().substr(mark).find("debug logging for all effects on (") != std::string::npos);
+        f.host.action(f.plug, kOfxActionDestroyInstance, other.get());
+    }
+
+    mark = read_log().size();
+    REQUIRE(f.changed("host_debug_all") == kOfxStatOK);  // pressed again: off
+    CHECK_FALSE(fs::exists(kSwitchFile));
+    CHECK(status->str == "off");
+    REQUIRE(f.render(32) == kOfxStatOK);
+    added = read_log().substr(mark);
+    CHECK(added.find("debug logging for all NTSCRT effects turned off") != std::string::npos);
+    CHECK(count(added, " debug render #") == 0);
+
+    // Turned on outside this host (another Resolve, or the file created by hand): noticed within
+    // about a second, logged once; deleting the file turns it off again.
+    { std::ofstream(kSwitchFile) << "on\n"; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    mark = read_log().size();
+    REQUIRE(f.render(33) == kOfxStatOK);
+    REQUIRE(f.render(34) == kOfxStatOK);
+    added = read_log().substr(mark);
+    CHECK(count(added, "debug logging for all NTSCRT effects is now on") == 1);
+    CHECK(count(added, " debug render #") == 2);
+    fs::remove(kSwitchFile, ec);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    mark = read_log().size();
+    REQUIRE(f.render(35) == kOfxStatOK);
+    added = read_log().substr(mark);
+    CHECK(added.find("debug logging for all NTSCRT effects is now off") != std::string::npos);
+    CHECK(count(added, " debug render #") == 0);
+    REQUIRE(f.host.action(f.plug, kOfxActionBeginInstanceEdit, f.inst.get()) != kOfxStatFailed);
+    CHECK(status->str == "off");
 }

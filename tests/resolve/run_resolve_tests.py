@@ -24,6 +24,8 @@ Tests (see README.md next to this file):
   speed     ms per frame at 1920x1080 for every CRT preset (informational)
   debug     "Debug logging" logs every frame (and doesn't change the picture); "Open logs folder"
             is pressed if Fusion scripting can press it (only logged, no window, under --headless)
+  debugall  "Debug logging for all effects" (button): with the effect's checkbox off, every frame is
+            logged in detail while it is on and not after it is off; the switch is left as found
 
 Resolve loads the plug-in from its OFX folder, or from OFX_PLUGIN_PATH at startup:
 tests/resolve/launch_resolve_dev.ps1 starts Resolve with a build's bundle.
@@ -295,6 +297,10 @@ def start_headless(bundle, log_dir):
         # one plug-in per id + version): this marks the copy as a dev build that outranks it.
         env["NTSCRT_OFX_DEV_BUNDLE"] = str(dev)
     env.setdefault("NTSCRT_OFX_LOG", str(Path(log_dir) / "ntscrt-ofx.log"))
+    # "Debug logging for all effects" lives in --out, not the user's settings folder, and the
+    # shell's NTSCRT_DEBUG_LOG doesn't turn detailed logging on behind the debug tests' back.
+    env.setdefault("NTSCRT_SETTINGS_DIR", str(log_dir))
+    env.pop("NTSCRT_DEBUG_LOG", None)
     if not Path(RESOLVE_EXE).exists():
         raise RuntimeError(f"Resolve not found at {RESOLVE_EXE}")
     print(f"starting Resolve headless ({RESOLVE_EXE} -nogui)" + (f" with {bundle}" if bundle else ""), flush=True)
@@ -1074,6 +1080,96 @@ class Suite:
             notes.append(f"no log at {log} (Resolve started with another NTSCRT_OFX_LOG?)")
         self.record("debug", "fail" if problems else "pass", m, "; ".join(problems + notes))
 
+    def debug_switch_file(self):
+        """The "Debug logging for all effects" switch file the plug-in in this Resolve reads
+        (start_headless points NTSCRT_SETTINGS_DIR into --out; hostparams/ntscrt_host/debug_switch.h)."""
+        name = "debug-logging-all-effects.txt"
+        if self.a.headless:
+            return Path(os.environ.get("NTSCRT_SETTINGS_DIR") or self.a.out) / name
+        if os.environ.get("NTSCRT_SETTINGS_DIR"):  # only right if Resolve was started with the same env
+            return Path(os.environ["NTSCRT_SETTINGS_DIR"]) / name
+        if sys.platform == "win32":
+            return Path(os.environ.get("LOCALAPPDATA", "")) / "NTSCRT" / name
+        return Path.home() / "Library/Logs/NTSCRT" / name
+
+    def t_debugall(self):
+        """"Debug logging for all effects" (host_debug_all): with the effect's own checkbox off, every
+        frame is logged in detail while the switch is on, and not after it is turned off again. The
+        switch is left as it was found (under --headless it lives in --out, not the user's)."""
+        log, sw = self.plugin_log(), self.debug_switch_file()
+        fu, _ = self.new_comp("debugall")
+        src = self.scene(fu)
+        fx = self.ntscrt(fu, src)
+        if fx.GetInput("host_debug_all_status") is None:
+            self.record("debugall", "fail", {"log": str(log)}, "the loaded NTSCRT has no 'Debug logging for all "
+                        "effects' input: Resolve loaded an older build")
+            return
+        was_on = sw.is_file()
+        fx.SetInput("host_debug_logging", 0)
+        n = 3 if self.a.quick else 4
+        m = {"log": str(log), "switch": str(sw), "switch_was_on": was_on}
+        problems, notes = [], []
+
+        def press(want_on):
+            """Press the button until the plug-in logs that the switch is now `want_on`."""
+            start = self.log_size(log)
+            for value in (1, 0, 1):
+                try:
+                    fx.SetInput("host_debug_all", value)
+                except Exception:
+                    pass
+                time.sleep(1)
+                if f"debug logging for all NTSCRT effects turned {'on' if want_on else 'off'}" in self.log_since(log, start):
+                    return True
+            return False
+
+        try:
+            phases = [False, True] if was_on else [True, False]
+            for k, on in enumerate(phases):
+                if not press(on):
+                    if k == 0:
+                        self.record("debugall", "skip", m, "Fusion scripting couldn't press the 'Debug logging for "
+                                    "all effects' button (no log line)")
+                        return
+                    problems.append(f"second press didn't turn it {'on' if on else 'off'}")
+                    break
+                status = fx.GetInput("host_debug_all_status")
+                m[f"status_{'on' if on else 'off'}"] = status
+                if sw.is_file() != on:
+                    problems.append(f"switch file {'missing' if on else 'still there'} after turning it {'on' if on else 'off'}")
+                if isinstance(status, str) and (status.startswith("ON") != on):
+                    problems.append(f"status line says {status!r} with the switch {'on' if on else 'off'}")
+                first = 2 + k * (n + 1)
+                start = self.log_size(log)
+                fu.render({"fx": fx}, (first, first + n - 1), f"debugall-{'on' if on else 'off'}")
+                time.sleep(0.5)
+                lines = [l for l in self.log_since(log, start).splitlines() if " debug render #" in l]
+                times = {l.split(" t=")[1].split()[0] for l in lines if " t=" in l}
+                m[f"debug_lines_{'on' if on else 'off'}"] = len(lines)
+                if on:
+                    if len(times) < n:
+                        problems.append(f"switch on, effect's checkbox off: {len(times)} frames logged in detail, expected {n}")
+                    if not any("debug_by=all" in l and "core_ms=" in l for l in lines):
+                        problems.append("no detailed line marked debug_by=all")
+                    if not any(" look={" in l for l in lines):
+                        problems.append("no line with the full look")
+                elif lines:
+                    problems.append(f"{len(lines)} detailed lines with the switch off")
+        finally:
+            # Never leave the switch other than it was (the user's own, outside --headless).
+            try:
+                if sw.is_file() != was_on:
+                    if was_on:
+                        sw.parent.mkdir(parents=True, exist_ok=True)
+                        sw.write_text("NTSCRT debug logging for all effects (restored by the Resolve tests)\n")
+                    else:
+                        sw.unlink()
+                    notes.append("switch restored by the test")
+            except OSError as e:
+                problems.append(f"couldn't restore the switch file {sw}: {e}")
+        m["switch_on_after"] = sw.is_file()
+        self.record("debugall", "fail" if problems else "pass", m, "; ".join(problems + notes))
+
     # -- main -------------------------------------------------------------------
     def main(self):
         self.open_project()
@@ -1081,7 +1177,8 @@ class Suite:
             for name, fn in (("version", self.t_version), ("alpha", self.t_alpha), ("edit", self.t_edit),
                              ("order", self.t_order), ("cli", self.t_cli),
                              ("animated", self.t_animated), ("depth", self.t_depth), ("precision", self.t_precision),
-                             ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug)):
+                             ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug),
+                             ("debugall", self.t_debugall)):
                 self.run(name, fn)
         finally:
             self.close()
@@ -1107,7 +1204,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", help="CMake build dir (finds ntscrt-cli and the bundle's resources)")
     ap.add_argument("--out", default=None, help="output folder (default: a new temp folder)")
-    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,animated,depth,precision,sizes,speed,debug)")
+    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,animated,depth,precision,sizes,speed,debug,debugall)")
     ap.add_argument("--quick", action="store_true", help="fewer frames")
     ap.add_argument("--keep-project", action="store_true", help="stay in the test project afterwards")
     ap.add_argument("--headless", action="store_true",

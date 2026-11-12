@@ -53,6 +53,13 @@ written but not yet built.
   it is best rendered in frame order (sequential render 2), stops fetching earlier frames when the host aborts
   a render, takes interlaced sources as whole frames and renders both fields of a frame as that frame (a field
   at t + 0.5 used the next frame), and asks the host for RGBA when the source is RGB.
+- **Debug logging for all effects:** a *Turn on / off debug logging for all effects* button next to *Debug
+  logging* (Final Cut: *Debug Logging for All Effects…*) logs every frame of every NTSCRT effect in detail, on
+  every clip and in every project, until it is pressed again, without ticking each effect; a status line shows
+  whether it is on. It is a switch outside the project (`debug-logging-all-effects.txt` next to the log), seen
+  by open effects within a second, logged when effects are created and when it changes, and reported by
+  `ntscrt_doctor.py`. `NTSCRT_DEBUG_LOG=1` does the same for one Resolve session; `NTSCRT_SETTINGS_DIR` moves
+  the switch (tests). See docs/TESTING.md.
 
 ### Changed
 - One parameter model for both plug-ins: the new host-independent library `hostparams/` builds the look, applies
@@ -207,6 +214,10 @@ written but not yet built.
   has system requirements, known issues, a Licence section and macOS build steps; docs/ENVIRONMENT.md lists
   every environment variable; docs/dev/UPSTREAM-SYNC.md says how to sync with a later upstream release; the
   agent working notes moved to `docs/dev/` (`AGENTS.md`, `CONTRACT-CHANGES.md`).
+- Tests for debug logging for all effects: `test_hostparams` (the shared switch: location, polling, one report
+  per change across threads), `test_ofx` (button, status line, detailed renders, a change made outside the
+  host) and the Resolve test `debugall`; the mock-host and headless Resolve tests keep the switch in their own
+  folder (`NTSCRT_SETTINGS_DIR`) and ignore the shell's `NTSCRT_DEBUG_LOG`.
 
 ## [0.4.0] - 2026-11-10
 

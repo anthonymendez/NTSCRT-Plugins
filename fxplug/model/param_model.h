@@ -14,6 +14,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "ntscrt_host/debug_switch.h"
 #include "ntscrt_host/file_log.h"
 #include "ntscrt_host/params.h"
 
@@ -46,6 +47,7 @@ enum HostParamID : uint32_t {
     kExtrasGroup = 10,      // "Preset & timing" subgroup
     kDebugLogging = 11,     // toggle: log every frame (diagnostics; never in the look or presets)
     kOpenLogs = 12,         // push button: show the log folder in Finder
+    kDebugAll = 13,         // push button: debug logging for all NTSCRT effects on / off (host::DebugSwitch)
 };
 constexpr uint32_t kLastHostID = 99;  // host extras live in [1, 99]
 constexpr uint32_t kFirstMappedID = 100;     // param_ids.json assigns [100, 4999]
