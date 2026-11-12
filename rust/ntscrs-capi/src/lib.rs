@@ -18,6 +18,7 @@ use ntsc_rs::settings::{SettingDescriptor, SettingKind, SettingsList};
 use ntsc_rs::yiq_fielding::{BlitInfo, Bgrx, DeinterlaceMode, Rgbx, YiqOwned, YiqView};
 use ntsc_rs::NtscEffect;
 
+mod gpu_noise;
 mod gpu_plan;
 
 pub struct NtscInstance {

@@ -87,9 +87,12 @@ dependencies = [
 name = "ntscrs-capi"
 version = "0.1.0"
 dependencies = [
+ "fearless_simd",
  "ntsc-rs",
+ "num_cpus",
  "rand",
  "rand_xoshiro",
+ "rayon-core",
  "siphasher",
 ]
 

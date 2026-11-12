@@ -91,8 +91,18 @@ enum {
     NTSC_GPU_K_ROTATE_CONST = 5,     /* rotate (I,Q): a = sin, b = cos */
     NTSC_GPU_K_ROTATE_ROWS = 6,      /* rotate (I,Q) by the row table's sin/cos */
     NTSC_GPU_K_CHROMA_LOSS = 7,      /* zero I,Q on flagged rows */
-    NTSC_GPU_K_VERT_BLEND = 8        /* chroma_vert_blend per field */
+    NTSC_GPU_K_VERT_BLEND = 8,       /* chroma_vert_blend per field */
+    NTSC_GPU_K_NOISE = 9,            /* video_noise_line on `planes`: mode = seed pass (ntsc_gpu_row_seeds), a = frequency,
+                                        b = intensity * 0.25, pad[0] = octaves, pad[1] = 1: intensity per row
+                                        (NtscGpuRowShift::intensity of tracking noise) */
+    NTSC_GPU_K_SPECKLES = 10,        /* add the stage's speckle events (ntsc_gpu_speckles) to Y */
+    NTSC_GPU_K_SHIFT_ROWS = 11,      /* shift_row on `planes` by the stage's row table (ntsc_gpu_row_shifts) */
+    NTSC_GPU_K_CHROMA_DELAY = 12     /* chroma_delay on I, Q: a = horizontal shift, mode = vertical offset (rows),
+                                        pad[0] = 1: rows copied, not shifted (horizontal shift 0) */
 };
+/* K_DEMOD with a comb mode and pad[0] = 1: the notch on the rows of 1-row fields, the comb on the others. */
+#define NTSC_GPU_SEEDS_TRACKING 3u /* ntsc_gpu_row_seeds pass of tracking noise's noise lines */
+#define NTSC_GPU_SHIFT_NONE (-1)   /* NtscGpuRowShift::boundary of a row left alone */
 #define NTSC_GPU_ROW_CHROMA_LOSS 1u
 #define NTSC_GPU_INIT_ZERO 0
 #define NTSC_GPU_INIT_FIRST_SAMPLE 1
@@ -145,20 +155,21 @@ typedef struct NtscGpuPlanInfo {
     float horizontal_scale, vertical_scale;
 } NtscGpuPlanInfo;
 
-typedef struct NtscGpuRowSeed { /* phase 2: one per plane row */
+typedef struct NtscGpuRowSeed { /* one per plane row */
     uint32_t seed_lo, seed_hi;  /* the row's Xoshiro seed */
     int32_t noise_seed;         /* rng.next_u32() (Fbm seed) */
     float offset;               /* rng.random::<f32>() * width */
 } NtscGpuRowSeed;
 
-typedef struct NtscGpuRowShift { /* phase 3: one per plane row */
-    float shift;
-    int32_t boundary;   /* 0 constant 0, 1 extend */
-    int32_t copy_start; /* -1 = whole row */
-    float transient_intensity;
+typedef struct NtscGpuRowShift { /* one per plane row */
+    float shift;        /* pixels, shift_row semantics */
+    int32_t boundary;   /* 0 constant 0, 1 extend, NTSC_GPU_SHIFT_NONE = row untouched */
+    int32_t copy_start; /* head switching's mid line: first pixel taken from the shifted row; -1 = whole row */
+    float intensity;    /* head switching: the mid line's transient intensity (its values are speckles);
+                           tracking noise: the row's noise-line intensity (already * 0.25) */
 } NtscGpuRowShift;
 
-typedef struct NtscGpuSpeckle { /* phases 2-3: one per transient */
+typedef struct NtscGpuSpeckle { /* one per transient, in ntsc-rs's order (rows ascending) */
     uint32_t row;
     int32_t x0;
     uint32_t count;
@@ -174,13 +185,19 @@ int32_t ntsc_gpu_plan(const NtscInstance *inst, uint32_t width, uint32_t height,
                       NtscGpuPass *passes, uint32_t max_passes, NtscGpuRow *rows, NtscGpuOutRow *out);
 
 /* Per-row noise seeds of a noise pass (0 composite, 1 chroma I, 9 chroma Q,
- * 10 luma: ntsc-rs's noise_seeds). `out`: `height` entries. 0 = ok. */
+ * 10 luma: ntsc-rs's noise_seeds; NTSC_GPU_SEEDS_TRACKING: tracking noise's
+ * rows, others zero). `out`: `height` entries. 0 = ok. */
 int32_t ntsc_gpu_row_seeds(const NtscInstance *inst, uint32_t width, uint32_t height, int64_t frame_index,
                            float scale_x, float scale_y, int32_t seed_offset, uint32_t pass, NtscGpuRowSeed *out);
 
-/* Phase 3 / phases 2-3 tables: formats fixed, not implemented yet (return -1). */
+/* Per-row shifts of `stage` (NTSC_ST_HEAD_SWITCHING, _TRACKING_NOISE, _EDGE_WAVE).
+ * `out`: `height` entries. 0 = ok, 1 = bad arguments / other stage. */
 int32_t ntsc_gpu_row_shifts(const NtscInstance *inst, uint32_t width, uint32_t height, int64_t frame_index,
                             float scale_x, float scale_y, int32_t seed_offset, uint32_t stage, NtscGpuRowShift *out);
+/* Speckle events of `stage` (NTSC_ST_SNOW, _TRACKING_NOISE, _HEAD_SWITCHING: the
+ * mid line's transient): each adds values[value_offset + i] to Y at (x0 + i, row),
+ * in list order. *num_events / *num_values = the counts; 3 = they exceed
+ * max_events / max_values (nothing copied: call again with room). 0 = ok. */
 int32_t ntsc_gpu_speckles(const NtscInstance *inst, uint32_t width, uint32_t height, int64_t frame_index,
                           float scale_x, float scale_y, int32_t seed_offset, uint32_t stage, NtscGpuSpeckle *events,
                           uint32_t max_events, float *values, uint32_t max_values, uint32_t *num_events,
@@ -195,6 +212,12 @@ int32_t ntsc_debug_process_yiq(const NtscInstance *inst, int32_t fmt, const uint
 
 /* Bit per NTSC_ST_* stage the GPU implements. */
 uint32_t ntsc_gpu_implemented_stages(void);
+
+/* The SIMD width of ntsc-rs's loops on this CPU (fearless_simd `S::f32s::N` of
+ * Level::new(): 8 on AVX2, 4 on SSE4.2 / NEON / no SIMD). The GPU needs it:
+ * the noise coordinates advance in chunks of it and shift_row uses its FMA
+ * formula only in whole blocks of it. */
+uint32_t ntsc_gpu_simd_lanes(void);
 
 #ifdef __cplusplus
 }
