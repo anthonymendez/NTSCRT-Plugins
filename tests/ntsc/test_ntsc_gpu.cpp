@@ -260,7 +260,19 @@ struct Report {
     }
 };
 
+// The parity rule is enforced on D3D11 (fused mad, or the double kernels on
+// WARP). On Metal, where the route is off in this phase (unverified, fast
+// math), a reduced set of cases runs and only reports its numbers.
+bool strict() {
+    Gpu &g = gpu_env();
+    return g.dev && g.dev->backend() == gpu::Backend::D3D11;
+}
+
 void check_tol(const std::string &name, const Diff &d, const Tol &t) {
+    if (!strict()) {
+        MESSAGE("report only (" << name << "): max " << d.max << ", " << d.frac() * 100 << "% differ");
+        return;
+    }
     CAPTURE(name);
     CAPTURE(d.max);
     CAPTURE(d.frac());
@@ -357,9 +369,34 @@ TEST_CASE("ntsc gpu: row seeds are ntsc-rs's (phase noise rows match through the
     ntsc_free(inst);
 }
 
+TEST_CASE("ntsc gpu: every kernel compiles on this device") {
+    Gpu &g = gpu_env();
+    if (!g.dev) return;
+    // On Metal this compiles the MSL library at runtime: the build only translates the Slang.
+    for (const char *k : {"from_bgra8", "to_bgra8", "row_filter", "luma_box", "chroma_into_luma", "demod_luma",
+                          "demodulate", "rotate_chroma", "chroma_loss", "vert_blend", "probe_fma"}) {
+        CAPTURE(k);
+        gpu::Kernel *kk = nullptr;
+        CHECK_NOTHROW(kk = g.dev->kernel(std::string("ntsc_gpu/") + k));
+        CHECK(kk != nullptr);
+    }
+    // The exact-FMA variants use doubles in HLSL (fma() on Metal): needed only where mad() isn't fused.
+    for (const char *k : {"from_bgra8_x", "to_bgra8_x", "row_filter_x"}) {
+        try {
+            g.dev->kernel(std::string("ntsc_gpu/") + k);
+        } catch (const std::exception &e) {
+            CHECK_MESSAGE(std::string(g.ntsc->fma_mode()) != "double", k << ": " << e.what());
+        }
+    }
+}
+
 TEST_CASE("ntsc gpu: parity with ntsc-rs, each pass alone") {
     Gpu &g = gpu_env();
     if (!g.dev) return;
+    if (!strict()) {
+        MESSAGE("not on D3D11: the per-pass matrix runs on D3D11 only in this phase");
+        return;
+    }
     NtscStage st;
     Report rep;
     const std::vector<std::string> pics = {"gradient", "bars", "noise", "edges"};
@@ -391,6 +428,7 @@ TEST_CASE("ntsc gpu: parity with ntsc-rs, all GPU passes together, every field m
     const Size sizes[] = {{720, 480, 1.0, true}, {333, 247, 1.0, true}, {720, 480, 0.5, false}, {5, 6, 1.0, true}};
     for (int field = 0; field <= 5; ++field)
         for (const Size &sz : sizes) {
+            if (!strict() && (field != 4 || sz.w != 333)) continue;  // Metal: one report-only case
             json s = with(gpu_full_settings(), {{"use_field", field}, {"scale_with_video_size", sz.video_size}});
             const json look = look_of(s);
             Diff total;
@@ -427,6 +465,7 @@ TEST_CASE("ntsc gpu: parity on the bundled presets that run entirely on the GPU"
         st.gpu_plan(ctx_for(look, 0, 0, 1.0), 1920, 1080, plan);
         if (!plan.supported()) continue;
         ++ran;
+        if (!strict()) continue;
         Diff total;
         for (const std::string &pk : {"gradient", "edges"})
             for (int64_t frame : {0, 1, 30}) {
@@ -462,6 +501,7 @@ TEST_CASE("ntsc gpu: stage-by-stage YIQ planes match ntsc-rs") {
     if (!g.dev) return;
     NtscStage st;
     for (int field : {4, 0, 3}) {
+        if (!strict() && field != 4) continue;
         json s = with(gpu_full_settings(), {{"use_field", field}});
         const json look = look_of(s);
         const ImageBGRA8 src = picture("edges", 333, 247);
@@ -479,13 +519,17 @@ TEST_CASE("ntsc gpu: stage-by-stage YIQ planes match ntsc-rs") {
             const std::vector<float> short_gpu = g.ntsc->planes(*tex, plan, int(plan.passes.size()) - 1);
             float m = 0;
             for (size_t i = 0; i < rust.size(); ++i) m = std::max(m, std::abs(rust[i] - short_gpu[i]));
-            CHECK(m > 1e-3f);
+            if (strict()) CHECK(m > 1e-3f);
         }
         for (const StageDiff &d : diffs) {
             CAPTURE(ntsc_stage_name(d.stage));
             // Float differences of a few ulps of the planes' range (|Y| < ~2) at most:
             // the same operations, fused where ntsc-rs fuses.
-            for (int p = 0; p < 3; ++p) CHECK(d.max[p] <= 1e-4f);
+            if (strict())
+                for (int p = 0; p < 3; ++p) CHECK(d.max[p] <= 1e-4f);
+            else
+                MESSAGE("report only: " << ntsc_stage_name(d.stage) << " Y " << d.max[0] << " I " << d.max[1]
+                                        << " Q " << d.max[2]);
         }
     }
 }
@@ -651,7 +695,7 @@ TEST_CASE("ntsc gpu pipeline: unset or 0 changes nothing; an unsupported setting
                b.timings.find("software device") != std::string::npos));
     }
 
-    if (ntscrt::testing::stats(inst).has_gpu) {
+    if (ntscrt::testing::stats(inst).has_gpu && gputest::native_backend() == gpu::Backend::D3D11) {
         gputest::set_env("NTSCRT_NTSC_GPU", "force");  // also on WARP
         const Rendered c = render(inst, gpu_ok, src, 4);
         CHECK(c.timings.find("ntsc_route=gpu") != std::string::npos);

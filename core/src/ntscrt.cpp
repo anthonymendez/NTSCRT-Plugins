@@ -729,8 +729,17 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
                 }
             }
             if (ok) {
-                auto up = upload(img);
-                pic = inst->ntsc_gpu->run(*up, inst->ntsc_plan);
+                try {
+                    auto up = upload(img);
+                    pic = inst->ntsc_gpu->run(*up, inst->ntsc_plan);
+                } catch (const std::exception &e) {
+                    if (device_lost(inst)) throw;  // render_impl replaces the device
+                    ok = false;                    // e.g. a kernel that didn't compile: ntsc-rs instead
+                    why = std::string("GPU error: ") + e.what();
+                    pic.reset();
+                }
+            }
+            if (ok) {
                 pt.note += " ntsc_route=gpu";
             } else {
                 pt.note += " ntsc_route=cpu (" + why + ")";
