@@ -390,6 +390,23 @@ std::vector<double> components(const ParamDef &p, const json &v) {
 // line, a noise level near 0) are followed closely, as ntsc-rs's random events depend on them.
 constexpr double kKeyRelTolerance = 0.02;
 
+// Values whose per-frame curve is keyed exactly (a key wherever it isn't a straight line): the
+// Glitch receiver's timing knobs (core/stages/glitch/receiver.cpp kParams, timing = true), which
+// it integrates over every earlier frame, and ntsc-rs's scale settings, whose filters change in
+// steps (a 0.2% change moved pixels by 10/255 on average in test_ofx).
+bool keyed_exactly(const ParamDef &p) {
+    static const char *const glitch_timing[] = {"signal_strength", "vertical_hold", "horizontal_hold", "afc_speed",
+                                                "hum", "head_switch", "timebase_jitter", "crinkle", "head_clog",
+                                                "tracking", "search_speed"};
+    const std::string g = "/glitch/values/", n = "/ntsc/settings/";
+    if (p.path.rfind(g, 0) == 0) {
+        for (const char *id : glitch_timing)
+            if (p.path.compare(g.size(), std::string::npos, id) == 0) return true;
+        return false;
+    }
+    return p.path.rfind(n, 0) == 0 && p.path.size() > 6 && p.path.compare(p.path.size() - 6, 6, "_scale") == 0;
+}
+
 // flat: only constant segments (integers: hosts round or truncate an interpolated int).
 std::vector<int64_t> bends(const std::vector<std::vector<double>> &v, const std::vector<double> &tol, bool flat) {
     const int64_t n = int64_t(v.size());
@@ -453,7 +470,7 @@ double display_span(const ParamDef &p) {
 double key_tolerance(const ParamDef &p, double factor) {
     if (p.type != PType::Float && p.type != PType::Color) return 0;
     double tol = kKeyTolerance * display_span(p);
-    if (p.has_step && p.step > 0) tol = std::max(tol, 0.5 * p.step);
+    if (p.path.rfind("/shader/params/", 0) == 0 && p.has_step && p.step > 0) tol = std::max(tol, 0.5 * p.step);
     return factor * tol + 1e-9;
 }
 
@@ -484,7 +501,8 @@ bool within_key_tolerance(const Schema &s, const json &a, const json &b, std::st
     return false;
 }
 
-PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available, int64_t at) {
+PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available, int64_t at,
+                       bool guards) {
     namespace tl = ntscrt::timeline;
     PresetKeys out;
     if (is_feedback_preset(preset)) return out;
@@ -493,9 +511,70 @@ PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t 
     if (!t.animated()) return out;
     const int64_t P = tl::pass_frames(t, fps);
     out.pass = P;
-    // The keyed stretch: whole passes from the origin, covering `at`, a quarter of it before
-    // `at` when the effect is long, inside the effect when its length is known.
-    const int64_t cap = kMaxKeyedFrames;
+
+    // One pass of looks: later passes repeat it. Per param, the frames of a pass that get a key.
+    std::vector<json> looks;
+    looks.reserve(size_t(P));
+    for (int64_t i = 0; i < P; ++i) looks.push_back(tl::look_at(up, t, s.timeline, tl::time_of_frame(i, P)));
+    struct Moving {
+        size_t index;
+        std::vector<json> v;    // the value on each frame of a pass
+        std::vector<char> want; // numbers: frames of a pass with a key
+        bool stepped;
+    };
+    std::vector<Moving> moving;
+    int64_t per_pass = 0;  // keys one pass takes
+    for (size_t pi = 0; pi < s.params.size(); ++pi) {
+        const ParamDef &p = s.params[pi];
+        if (p.feedback || !p.in_presets) continue;
+        std::vector<json> v;
+        v.reserve(looks.size());
+        bool still = true;
+        for (const auto &l : looks) {
+            v.push_back(*preset_value_raw(p, l, false));
+            if (still && !same_value(v.back(), v.front())) still = false;
+        }
+        if (still || !p.animatable) {  // a param the host can't key: the timeline's first value
+            out.keys[pi].emplace_back(0, v.front());
+            continue;
+        }
+        Moving m{pi, std::move(v), {}, p.type == PType::Bool || p.type == PType::Choice};
+        if (m.stepped) {
+            for (int64_t n = 0; n < P; ++n)  // two keys per change, the wrap back to frame 0 included
+                if (!same_value(m.v[size_t(n)], m.v[size_t((n + 1) % P)])) per_pass += 2;
+        } else {
+            // Numbers: the frames of a pass where the curve bends.
+            std::vector<std::vector<double>> c;
+            c.reserve(m.v.size());
+            for (const auto &x : m.v) c.push_back(components(p, x));
+            const size_t nc = c.front().size();
+            std::vector<double> tol(nc, 0.0);  // integers and keyed_exactly: exact
+            const bool crt = p.path.rfind("/shader/params/", 0) == 0;
+            if (p.type != PType::Int && !keyed_exactly(p)) {
+                for (size_t k = 0; k < nc; ++k) {
+                    double lo = c.front()[k], hi = lo;
+                    for (const auto &x : c) lo = std::min(lo, x[k]), hi = std::max(hi, x[k]);
+                    const double swing = hi - lo;
+                    tol[k] = std::max(1e-9, kKeyTolerance * std::min(swing, display_span(p)));
+                    // CRT values snap to their step: a fine grid (many steps over the swing) is
+                    // followed as a line, a coarse one exactly.
+                    if (crt && p.has_step && p.step > 0 && swing >= 20 * p.step) tol[k] = std::max(tol[k], 0.5 * p.step);
+                }
+            }
+            m.want.assign(size_t(P), 0);
+            for (int64_t b : bends(c, tol, p.type == PType::Int))
+                for (int64_t d = guards ? -1 : 0; d <= (guards ? 1 : 0); ++d)
+                    if (b + d >= 0 && b + d < P) m.want[size_t(b + d)] = 1;
+            for (char w : m.want) per_pass += w;
+        }
+        moving.push_back(std::move(m));
+    }
+
+    // The keyed stretch: whole passes from the origin, as many as kMaxPresetKeys allows (at
+    // least one, at most kMaxKeyedFrames), covering `at` with a quarter of it before `at` when
+    // the effect is longer, inside the effect when its length is known.
+    const int64_t passes = std::max<int64_t>(1, kMaxPresetKeys / std::max<int64_t>(1, per_pass));
+    const int64_t cap = std::max(P, std::min(kMaxKeyedFrames, passes * P));
     const int64_t hi = available > 0 ? available - 1 : INT64_MAX / 4;
     at = std::clamp<int64_t>(at, 0, hi);
     auto down = [&](int64_t f) { return f <= 0 ? 0 : f / P * P; };
@@ -507,66 +586,29 @@ PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t 
     out.frames = std::min(hi, first + cap - 1) - first + 1;
     const int64_t last = first + out.frames - 1;
 
-    // One pass of looks: later passes repeat it.
-    std::vector<json> looks;
-    looks.reserve(size_t(P));
-    for (int64_t i = 0; i < P; ++i) looks.push_back(tl::look_at(up, t, s.timeline, tl::time_of_frame(i, P)));
-    for (size_t pi = 0; pi < s.params.size(); ++pi) {
-        const ParamDef &p = s.params[pi];
-        if (p.feedback || !p.in_presets) continue;
-        std::vector<json> v;
-        v.reserve(looks.size());
-        bool still = true;
-        for (const auto &l : looks) {
-            v.push_back(*preset_value_raw(p, l, false));
-            if (still && !same_value(v.back(), v.front())) still = false;
-        }
-        auto &keys = out.keys[pi];
-        if (still || !p.animatable) {  // a param the host can't key: the timeline's first value
-            keys.emplace_back(0, v.front());
-            continue;
-        }
-        if (p.type == PType::Bool || p.type == PType::Choice) {
+    for (const Moving &m : moving) {
+        auto &keys = out.keys[m.index];
+        if (m.stepped) {
             for (int64_t n = first; n <= last; ++n) {
-                const json &x = v[size_t(n % P)];
+                const json &x = m.v[size_t(n % P)];
                 if (!keys.empty()) {
                     if (same_value(keys.back().second, x)) continue;
                     // The old value again just before the change: hosts that interpolate a
-                    // checkbox / menu (Fusion) then still switch exactly at frame n.
+                    // checkbox / menu then still switch exactly at frame n.
                     if (keys.back().first < n - 1) keys.emplace_back(n - 1, keys.back().second);
                 }
                 keys.emplace_back(n, x);
             }
             continue;
         }
-        // Numbers: the frames of a pass where the curve bends, with their neighbours.
-        std::vector<std::vector<double>> c;
-        c.reserve(v.size());
-        for (const auto &x : v) c.push_back(components(p, x));
-        const size_t nc = c.front().size();
-        std::vector<double> tol(nc, 0.0);  // integers: exact
-        if (p.type != PType::Int) {
-            for (size_t k = 0; k < nc; ++k) {
-                double lo = c.front()[k], up_ = lo;
-                for (const auto &x : c) lo = std::min(lo, x[k]), up_ = std::max(up_, x[k]);
-                const double swing = up_ - lo;
-                tol[k] = std::max(1e-9, kKeyTolerance * std::min(swing, display_span(p)));
-                // CRT values snap to their step: a fine grid (many steps over the swing) is
-                // followed as a line, a coarse one exactly.
-                if (p.has_step && p.step > 0 && swing >= 20 * p.step) tol[k] = std::max(tol[k], 0.5 * p.step);
-            }
-        }
-        std::vector<char> want(size_t(P), 0);
-        for (int64_t b : bends(c, tol, p.type == PType::Int))
-            for (int64_t d = -1; d <= 1; ++d)
-                if (b + d >= 0 && b + d < P) want[size_t(b + d)] = 1;
         for (int64_t n = first; n <= last; ++n)
-            if (want[size_t(n % P)] || n == last) keys.emplace_back(n, v[size_t(n % P)]);
+            if (m.want[size_t(n % P)] || n == last) keys.emplace_back(n, m.v[size_t(n % P)]);
     }
     return out;
 }
 
-PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t available, int64_t at) {
+PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t available, int64_t at,
+                       bool guards) {
     PresetPlan plan;
     auto loop_values = [&](const json &fb) {
         for (size_t i = 0; i < s.params.size(); ++i)
@@ -577,7 +619,7 @@ PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t 
         return plan;
     }
     plan.replaces_look = true;
-    plan.look = preset_keys(s, preset, fps, available, at);
+    plan.look = preset_keys(s, preset, fps, available, at, guards);
     if (!plan.look.animated()) {
         const json up = ntscrt::digital::migrate::upgraded(preset);
         for (size_t i = 0; i < s.params.size(); ++i)

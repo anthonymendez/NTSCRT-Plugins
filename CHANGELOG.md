@@ -22,10 +22,13 @@ written but not yet built.
 
 ### Added
 - **Animated presets:** choosing *Glitch pop*, *15 second glitches* or another bundled look with upstream
-  timeline keys now plays its animation. The keys become keyframes (one per frame on each moving control, two
-  per change on checkboxes and menus), starting at the clip's first frame and repeated until the clip's end (at
-  most 3600 frames; the last values hold after that), evaluated as the NTSCRT app does (easing, step snapping,
-  held toggles). The timeline lasts its duration at the clip's frame rate.
+  timeline keys now plays its animation. The keys become keyframes, evaluated as the NTSCRT app does (easing,
+  step snapping, held toggles): on each moving control a key where its curve bends (Resolve draws straight lines
+  between keys; within 0.5% of the control's range of the app's value on every frame, exact for whole numbers,
+  Glitch timing controls and wherever a value holds), two per change on checkboxes and menus. The timeline lasts
+  its duration at the clip's frame rate and loops from the clip's first frame; the keys cover whole loops around
+  the playhead, as many as about 3000 keyframes allow (at least one loop, at most 3600 frames; the first / last
+  values hold outside them).
 - **Digital video formats** (Webcam (2005), Video call, MiniDV, Early web video, CD-ROM (Video 1), Datamosh) in the
   Preset menu as *Digital video/…*, as in upstream 0.20: they switch Digital video on and set its controls and the
   Downscale width, leaving the rest of the look alone. They come after this release's new looks in the menu.
@@ -62,6 +65,15 @@ written but not yet built.
   the switch (tests). See docs/TESTING.md.
 
 ### Changed
+- **Glitch** and **Digital video** (with Datamosh) past the first minute of an effect look slightly different
+  from 0.5.0-rc.2: the Glitch receiver's simulated history (sync, vertical roll, colour lock) restarts at every
+  minute boundary of the effect (a minute of timecode: 01:00:00:00, 01:01:00:00, ...; 60 s of the rounded frame
+  rate), as if the TV were switched on there, and Datamosh can't drop the first keyframe of a minute, so the
+  stream never reaches further back. A rolling picture (Vertical hold off centre) can jump once a minute. The
+  first minute of an effect renders exactly as before (the NTSCRT app's behaviour); this bounds what a frame or
+  an edit costs anywhere else (seconds per hour of timeline before). Existing projects with Glitch on render
+  differently past their first minute, and on an Adjustment Clip, whose frames are timeline frames, everywhere
+  but in the timeline's first minute.
 - One parameter model for both plug-ins: the new host-independent library `hostparams/` builds the look, applies
   presets (keyframes, Digital video formats, choice applies, migration), evaluates the grey-out / hide rules,
   orders the Preset menus and writes the log for the Resolve and the Final Cut plug-in alike, replacing
@@ -123,6 +135,23 @@ written but not yet built.
   serial numbers / hardware UUIDs), and trims crash reports to the crash itself. Non-text files are left out.
 
 ### Fixed
+- Resolve: **choosing an animated preset an hour into a timeline** (the default 01:00:00:00 start), on an
+  Adjustment Clip, froze Resolve for about a minute and put the animation an hour before the clip. Resolve gives
+  an Adjustment Clip timeline frame numbers with a made-up 0..1999 range, so the keys went to frames 0..3599
+  (97,200 keyframes for *5 second blips* at 60 fps) and the next frame rebuilt the look of every frame since
+  frame 0 for the Glitch receiver (216,000 looks, 37 s at UHD). The keys now cover the playhead and are sparse
+  (2,620 for that preset, written in ~0.1 s), and the first frame after it takes ~35 ms in the mock host at
+  640x360 instead of 28 s. Frames numbered from the clip's start are used whenever the host time lies in the
+  clip's range (clips on the Edit page, Fusion); otherwise frame numbers are timeline frames.
+- Resolve: an hour or more into a timeline, the first frame and every Glitch or Downscale edit no longer
+  re-simulate the Glitch receiver from the timeline's start (~2.6 s at 640x360, ~5 s at UHD in Resolve; now
+  ~10 ms, the same as at the start): its history, and Digital video's stream with Datamosh, restart every
+  minute of the effect (see Changed). Keyframed (animated) looks only re-read the keyframed controls for the
+  earlier frames the receiver replays, not all ~300.
+- Resolve, Adjustment Clips and other items without media: Digital video and Screen Loop got none of the
+  earlier frames they read (the plug-in refused frames outside the made-up 0..1999 range), and the effect told
+  Resolve it needed frames 1999 to the current one (214,000 frames an hour in). Both now use the frames around
+  the current one.
 - Resolve: far into a timeline (an hour in, the default 01:00:00:00 start), choosing a preset, editing the
   CRT shader or pressing *Load* with no file no longer re-runs the Glitch receiver from the timeline's first
   frame (seconds per hour; in 0.4.0 every edit there took ~45 s at UHD). Param edits no longer freeze
@@ -178,6 +207,17 @@ written but not yet built.
   settings.
 
 ### Developer
+- Tests for long timelines: `test_ofx` applies *5 second blips* an hour into a 60 fps timeline on a mock
+  Adjustment Clip (Resolve's made-up 0..1999 range) and on a clip starting at frame 216000 (keyframes, apply
+  time, first render, Glitch edit, playback and seeks against renders after a purge), compares the edits an hour
+  in with the same edits near frame 0, and renders sparse keys against a key on every frame (identical pixels);
+  `test_hostparams` checks every bundled animated preset's keys against the per-frame evaluation at four frame
+  rates (linear and smooth-spline hosts). The Resolve test `position` puts the effect on Edit-page items starting
+  at 01:00:10:00, logs the frame ranges Resolve reports, applies an animated look there (through
+  `NTSCRT_OFX_TEST_PRESET_FILE`, as scripts can't set OpenFX params on the Edit page) and compares the frames
+  with `ntscrt-cli --timeline`; it also measures how the Edit and Fusion pages interpolate keyframes (linearly).
+  The plug-in logs the host's frame ranges when an effect is created, at its first render and when a preset is
+  applied.
 - `test_howl_seek`: Screen Loop through the C ABI on the GPU, cold seeks, scrubbing and playing on after a seek
   checked byte-identical to playing from frame 0 (checkpoints on and off); engine tests for checkpoints and
   pipelined passes; `bench_screenloop` (playback and seek timings, run by hand); the Resolve `speed` test lists

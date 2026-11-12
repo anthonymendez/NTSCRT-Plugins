@@ -842,7 +842,7 @@ AnimatedTimings animated_preset_an_hour_in(bool adjustment_clip, const char *pre
         ++moving;
         CAPTURE(p->name);
         CHECK(p->keys.begin()->first <= T);
-        CHECK(p->keys.rbegin()->first >= T + 1000);
+        CHECK(p->keys.rbegin()->first >= T + 299);  // at least a pass after the playhead
         if (!adjustment_clip) CHECK(p->keys.begin()->first >= 216000);  // nothing before the clip
     }
     CHECK(moving > 5);
@@ -892,7 +892,7 @@ TEST_CASE("high frame number: an animated preset an hour in is applied and rende
         std::printf("[timing] %s\n", o.str().c_str());
         // 0.5.0-rc.2: 97,200 keys (every frame of 3,600, an hour before the clip); the first
         // render after it built 216,000 looks.
-        CHECK(r.keys < 15000);
+        CHECK(r.keys <= 3100);
         CHECK(r.apply_ms < 1000);
         CHECK(r.first_ms < 1000);
         CHECK(r.glitch_ms < 1000);

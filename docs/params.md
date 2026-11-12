@@ -158,14 +158,35 @@ choices hold; Digital structure controls (frame rate, keyframe interval, codec, 
 key; keys carry the whole ntsc settings object (it replaces the look's), the other sections merge over the
 look's values. A look with keys animates whatever `enabled` says (upstream opens the timeline when one loads).
 
-**Host time:** the timeline starts at the effect's first frame (OFX: the source clip's first frame, the frame
-the core calls 0) and lasts `duration` seconds at the host's frame rate: `N = round(duration × fps)` frames,
-frame `n` at `t = (n mod N) / (N - 1)`, so it **loops** until the effect ends, as upstream's playback does (the
-timeline's own `fps` is ignored: it is upstream's rate for stills). Applying the preset clears every look
-param's keyframes and writes host keyframes for the params that move: one per frame for numbers (exact at
-every frame whatever interpolation the host uses between keys), two per change for bools and choices (the old value on the frame before, the new one on the frame it changes, so hosts that interpolate them still switch on the right frame); params
-that hold still get a plain value. At most 3600 frames are keyed (the last values hold after that); with an
-unknown effect length, one pass. Both plug-ins get these keys from the shared model (`plan_preset`).
+**Host time:** the timeline starts at the effect's first frame (the frame the core calls 0) and lasts
+`duration` seconds at the host's frame rate: `N = round(duration × fps)` frames, frame `n` at
+`t = (n mod N) / (N - 1)`, so it **loops** until the effect ends, as upstream's playback does (the timeline's
+own `fps` is ignored: it is upstream's rate for stills). OFX: frame 0 is the source clip's first frame when the
+host time lies inside the clip's frame range (Fusion, and Resolve's Edit page for clips: times from 0 at the
+clip's start). Resolve gives effects without media (an Adjustment Clip) timeline times, an hour or more in,
+with a made-up range of 0..1999: then frame numbers are host times (frame 0 = the timeline's frame 0) and the
+effect's length is unknown.
+
+Applying the preset clears every look param's keyframes and writes **sparse** host keyframes for the params
+that move (`preset_keys`): numbers get a key where their per-frame curve bends (a piecewise-linear fit within
+0.5% of the value's swing, capped at 0.5% of its slider range and at 2% of the value itself, half a step for
+finely stepped CRT values; exact, i.e. a key wherever the curve isn't a straight line, for integers, the Glitch
+receiver's timing controls and ntsc-rs's `*_scale` settings, and wherever the value holds still). That is exact
+for hosts that interpolate linearly between keys: Resolve's Edit and Fusion pages (measured by the Resolve test
+`position`) and FxPlug, whose keys are made with linear segments (`guards` adds a key either side of each bend
+for smooth-spline hosts). Bools and choices get two keys per change (the old value on the frame before, the new
+one on the frame it changes). Params that hold still get a plain value. The keyed stretch is whole passes from
+frame 0, as many as about `kMaxPresetKeys` (3000) keys allow (at least one pass, at most 3600 frames), covering
+the playhead (a quarter of it before the playhead when the effect is longer) and inside the effect when its
+length is known; before it the timeline's first values hold, after it the last ones. `tests/hostparams` checks
+every bundled animated preset against the per-frame evaluation, and `test_ofx` renders sparse keys and a key on
+every frame to the same pixels. Both plug-ins get these keys from the shared model (`plan_preset`).
+
+**Histories:** the stages that simulate a history from frame 0 (the Glitch receiver, Digital video's stream
+with Datamosh) restart it every minute of the effect (`core/src/sim_segment.h`; whole seconds of the rounded
+frame rate, so a minute or an hour of timecode is always a boundary): a frame depends only on the frames since
+its minute started. The first minute is upstream's behaviour; the bound keeps an edit an hour into a timeline
+as cheap as one at its start.
 
 ## One model for both plug-ins (`hostparams/`)
 Everything above is implemented once, in the host-independent library `hostparams/` (`ntscrt::host`,

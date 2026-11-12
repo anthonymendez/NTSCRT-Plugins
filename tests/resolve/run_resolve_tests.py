@@ -866,6 +866,94 @@ class Suite:
                 items.append((kind, it))
         return items
 
+    def sample_keys(self, text):
+        """The keys of one param the plug-in logged when it applied a look: (host name, [(t, v)])."""
+        mk = re.search(r"; keys of ([A-Za-z0-9_]+):([^\r\n]*)", text)
+        if not mk:
+            return None, []
+        keys = []
+        for kv in mk.group(2).split(","):
+            t, _, v = kv.partition("=")
+            try:
+                keys.append((float(t), float(v)))
+            except ValueError:
+                pass
+        return mk.group(1), keys
+
+    @staticmethod
+    def linear(keys, t):
+        if t <= keys[0][0]:
+            return keys[0][1]
+        for (ta, va), (tb, vb) in zip(keys, keys[1:]):
+            if ta <= t <= tb:
+                return va + (vb - va) * (t - ta) / (tb - ta) if tb > ta else vb
+        return keys[-1][1]
+
+    def interpolation(self, tl, item, fx_id, log):
+        """How Resolve interpolates the plug-in's keyframes, on the Fusion page and the Edit page: an
+        eased look's sparse keys (no guard keys), the values the host hands the plug-in between keys
+        against straight lines between them, as a fraction of the value's swing (0 = linear, which
+        the sparse keys assume; hostparams preset_keys)."""
+        out = {}
+        name = "5 second blips"
+        preset_file = os.environ["NTSCRT_OFX_TEST_PRESET_FILE"]
+        # Fusion: the instance applies the look when the tool is created; GetInput reads the spline.
+        fu, _ = self.new_comp("interp-fusion")
+        src = self.scene(fu)
+        mark = self.log_size(log)
+        Path(preset_file).write_text(f"{name}\n0\n", encoding="utf-8")
+        fx = self.ntscrt(fu, src)
+        os.remove(preset_file)
+        pname, keys = self.sample_keys(self.log_since(log, mark))
+        if keys and len(keys) > 2:
+            span = (max(v for _, v in keys) - min(v for _, v in keys)) or 1.0
+            last = int(min(keys[-1][0], 299))
+            devs = [abs((fx.GetInput(pname, f) or 0) - self.linear(keys, f)) for f in range(0, last + 1)]
+            out["fusion"] = {"param": pname, "keys": len(keys), "max_dev_of_swing": round(max(devs) / span, 5)}
+        # Edit page: another comp clip; every render logs its look (debug logging for all effects).
+        retry(lambda: self.p.SetCurrentTimeline(tl), "switch timeline")
+        tl.SetCurrentTimecode("01:00:40:00")
+        clip = tl.InsertFusionCompositionIntoTimeline()
+        if not clip:
+            return out
+        cfu = Fu(self, clip.GetFusionCompByIndex(1), tl)
+        cfu.media_out.Input = self.scene(cfu).Output
+        mark = self.log_size(log)
+        Path(preset_file).write_text(f"{name}\n0\n", encoding="utf-8")
+        eff = clip.AddEffect("ofx", fx_id)
+        os.remove(preset_file)
+        if not eff:
+            return out
+        switch = Path(self.a.out) / "debug-logging-all-effects.txt"
+        switch.write_text("on\n", encoding="utf-8")
+        time.sleep(1.5)  # the plug-in re-reads the switch once a second
+        try:
+            rel = clip.GetStart() - tl.GetStartFrame()
+            out["edit_clip"] = [clip.GetStart(), clip.GetEnd(), len(clip.GetEffects("ofx") or [])]
+            self.render_timeline(tl, (rel + 5, rel + 64), "interp-edit")
+        finally:
+            switch.unlink()
+        text = self.log_since(log, mark)
+        out["edit_renders_logged"] = len(re.findall(r" render #\d+ ", text))
+        pname, keys = self.sample_keys(text)
+        p = next((q for q in self.schema["params"] if re.sub(r"[^A-Za-z0-9_]", "_", q["id"]) == pname), None)
+        if keys and len(keys) > 2 and p:
+            span = (max(v for _, v in keys) - min(v for _, v in keys)) or 1.0
+            ptr = [k for k in p["path"].split("/") if k]
+            devs = []
+            for t, lk in re.findall(r" debug render #\d+ t=([\d.]+) .*? look=(\{.*?\}) (?:feedback=|$)", text, re.M):
+                try:
+                    v = json.loads(lk)
+                    for k in ptr:
+                        v = v[k]
+                    devs.append(abs(float(v) - self.linear(keys, float(t))))
+                except (ValueError, KeyError, TypeError):
+                    pass
+            if devs:
+                out["edit_page"] = {"param": pname, "keys": len(keys), "frames": len(devs),
+                                    "max_dev_of_swing": round(max(devs) / span, 5)}
+        return out
+
     def t_position(self):
         """The effect on Edit-page items starting at 01:00:10:00 and later: what frame range and
         times Resolve reports (logged by the plug-in), and an animated look applied there (through
@@ -973,6 +1061,10 @@ class Suite:
                 problems.append(f"{kind}: keyed {info['keyed_from']}..{info['keyed_to']} doesn't cover the clip's frames ({t_first})")
             if info["keyframes"] > 20000:
                 problems.append(f"{kind}: {info['keyframes']} keyframes")
+        try:
+            m["interpolation"] = self.interpolation(tl, None, fx_ids[0], log)
+        except Exception as e:  # informational
+            m["interpolation"] = f"error: {e}"
         self.record("position", "fail" if problems else "pass", m, "; ".join(problems))
 
     def t_depth(self):

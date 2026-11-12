@@ -188,9 +188,15 @@ Building from source instead: see [Build from source](#build-from-source) below,
 ## Known issues and limitations
 
 - **Animated presets are keyframed, not linked.** Choosing *Glitch pop*, *15 second glitches* and the other
-  animated looks writes their animation as keyframes (one per frame on each moving control), repeated from the
-  clip's first frame to its end (at most 3600 frames, two minutes at 30 fps; the last values hold after
-  that). Changing the clip's length or frame rate later doesn't re-time them: choose the preset again.
+  animated looks writes their animation as keyframes (where each moving control's curve bends), looping from
+  the clip's first frame, for whole loops around the playhead: as many as about 3000 keyframes allow, at most
+  3600 frames (the first / last values hold outside them; on a long clip, choose the preset again further on
+  to key there). Changing the clip's length or frame rate later doesn't re-time them: choose the preset again.
+  On an Adjustment Clip Resolve doesn't say where the clip starts: the loop is in step with the timeline's
+  frame 0 instead.
+- **Glitch's simulated TV restarts every minute** of an effect (a minute of timecode): a rolling picture
+  (Vertical hold off centre) can jump at those boundaries. It keeps frames and edits fast however far into
+  the timeline they are.
   **Save preset…** saves the look at the playhead, not the animation.
 - **Seeks can take a moment** with Digital video or Screen Loop on: they depend on earlier frames, so after
   a jump the plug-in renders those first (Digital video back to its last keyframe, Screen Loop over its

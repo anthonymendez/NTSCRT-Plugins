@@ -148,16 +148,17 @@ std::optional<json> preset_value(const ParamDef &p, const json &preset, bool fee
 // An animated look (upstream timeline keys) as host keyframes.
 //
 // The timeline plays from the effect's first frame (frame offset 0, the "origin") and loops
-// every `pass` frames. The keyed stretch is [first, first + frames): at most kMaxKeyedFrames,
-// starting on a pass boundary (so it plays the loop in phase with the origin), covering the
-// frame `at` (the playhead when the preset is applied) and starting at the origin when that
-// fits. Before it the timeline's first values hold, after it its last ones.
+// every `pass` frames. The keyed stretch is [first, first + frames): whole passes from a pass
+// boundary (so it plays the loop in phase with the origin), as many as kMaxPresetKeys keys allow
+// (at least one, at most kMaxKeyedFrames frames), covering the frame `at` (the playhead when the
+// preset is applied) and starting at the origin when that fits. Before it the timeline's first values hold, after it its last ones.
 //
 // Keys are sparse: numbers get a key where the per-frame curve bends (a piecewise-linear fit,
 // within kKeyTolerance of the curve's swing, half a step for finely stepped CRT values, exact
-// for integers), each with a guard key on the frames either side so that hosts interpolating
-// with smooth splines (Fusion) stay on the same straight lines as linear ones. Bools and
-// choices get keys where the value changes (old value the frame before, new one on it).
+// for integers and wherever the value holds), for hosts that interpolate linearly between keys
+// (Resolve's Edit and Fusion pages: measured by tests/resolve "position"; FxPlug: keys made with
+// linear segments). Bools and choices get keys where the value changes (old value the frame
+// before, new one on it).
 struct PresetKeys {
     int64_t pass = 0;    // frames one timeline pass spans at the host rate (0 = not animated)
     int64_t first = 0;   // first keyed frame (offset from the effect's first frame, a multiple of pass)
@@ -168,11 +169,18 @@ struct PresetKeys {
     bool animated() const { return pass > 0; }
 };
 constexpr int64_t kMaxKeyedFrames = 3600;  // longest stretch keyed (the last values then hold)
+// Keys a preset writes, about: the stretch is as many whole passes as fit (at least one). Writing
+// keys costs the host time (Resolve: ~50 us each headless, more with its interface), 0.5.0-rc.2's
+// 97,200 for one preset froze Resolve's interface for about a minute.
+constexpr int64_t kMaxPresetKeys = 3000;
 constexpr double kKeyTolerance = 0.005;     // sparse keys: max deviation, as a fraction of a value's swing
 // fps: the host frame rate; available: frames from the effect's first frame to its last
 // (<= 0 = unknown length); at: the frame to cover (offset from the first frame).
 // Not animated (pass 0) without timeline keys.
-PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available, int64_t at = 0);
+// guards: also key the frames either side of each bend, for hosts that interpolate numbers with
+// smooth splines (Resolve's Edit and Fusion pages and FxPlug's linear segments don't need them).
+PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available, int64_t at = 0,
+                       bool guards = false);
 // The value a host interpolating linearly between `keys` (sorted by frame) gives at frame n
 // (held before the first / after the last; bools and choices step). Tests and diagnostics.
 json interpolated_key_value(const ParamDef &p, const std::vector<std::pair<int64_t, json>> &keys, double n);
@@ -197,7 +205,8 @@ struct PresetPlan {
     PresetKeys look;             // look.keys: every look param presets set (see above)
     std::vector<std::pair<size_t, json>> feedback;  // Screen Loop params: (index, value)
 };
-PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t available, int64_t at = 0);
+PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t available, int64_t at = 0,
+                       bool guards = false);
 
 // ---- choice "applies", Digital video formats -------------------------------
 // Values a Digital video format's (or an option's) "applies" map writes: (param, value).

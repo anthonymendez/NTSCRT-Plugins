@@ -358,7 +358,7 @@ TEST_CASE("model: animated presets become keyframes matching the upstream timeli
     }
     CHECK_FALSE(m.plan_preset(load("presets/Clean VHS.json"), 30, 100).animated());
     CHECK_FALSE(m.plan_preset(load("presets/Screen Loop/Bottom to top.json"), 30, 100).animated());
-    CHECK(m.plan_preset(load("presets/Glitch pop.json"), 30, 0).frames == host::kMaxKeyedFrames);  // unknown length
+    CHECK(m.plan_preset(load("presets/Glitch pop.json"), 30, 0).frames % 60 == 0);  // unknown length: whole passes
 }
 
 TEST_CASE("model: Horizontal resolution applies, Custom demotion, Digital video formats") {

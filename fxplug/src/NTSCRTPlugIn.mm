@@ -561,9 +561,10 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
 // Applies a preset (bundled or a loaded file) as the shared model plans it (Model::plan_preset,
 // the same plan the OpenFX plug-in follows): a look preset replaces the look, so every look
 // parameter presets set loses its keyframes; an animated one (upstream timeline keys) then gets
-// sparse host keyframes, the timeline looping from the effect's first frame, for a stretch of at
-// most kMaxKeyedFrames around the playhead (the whole effect when it is shorter). A Screen Loop file (or a look file's "screen_loop") sets the Screen Loop
-// parameters and turns Screen Loop on unless it says "enabled": false. FxKeyframeAPI_v3's
+// sparse host keyframes (linear segments), the timeline looping from the effect's first frame,
+// for a stretch of whole loops around the playhead (host::preset_keys: about kMaxPresetKeys keys,
+// at most kMaxKeyedFrames frames, the whole effect when it is shorter). A Screen Loop file (or a
+// look file's "screen_loop") sets the Screen Loop parameters and turns Screen Loop on unless it says "enabled": false. FxKeyframeAPI_v3's
 // addKeyframe carries no value: a keyframe is added at the time, then the value is set there.
 - (void)applyPreset:(const json &)preset atTime:(CMTime)t {
     id<FxParameterSettingAPI_v5> set = [_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];

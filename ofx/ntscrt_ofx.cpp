@@ -847,16 +847,18 @@ private:
     // NTSCRT_OFX_TEST_PRESET_FILE names exists, a development copy (NTSCRT_OFX_DEV_BUNDLE)
     // applies the bundled look its first line names to each new effect whose Preset menu is
     // still "(none)", as if chosen there with the playhead at the time on its second line
-    // (default 0). tests/resolve/run_resolve_tests.py (test "position") writes it.
+    // (default 0); a third line "guards=1" adds guard keys (preset_keys).
+    // tests/resolve/run_resolve_tests.py (test "position") writes it.
     void apply_test_preset() {
         const char *e = std::getenv("NTSCRT_OFX_TEST_PRESET_FILE");
         if (!e || !*e || !dev_copy()) return;
         try {
             std::ifstream f(std::filesystem::u8path(e));
-            std::string name, when;
+            std::string name, when, opts;
             if (!f || !std::getline(f, name)) return;
             std::getline(f, when);
-            while (!name.empty() && (name.back() == '' || name.back() == ' ')) name.pop_back();
+            std::getline(f, opts);
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
             int cur = 0;
             preset_->getValue(cur);
             if (cur != 0) return;
@@ -867,7 +869,7 @@ private:
                 applying_ = true;
                 preset_->setValue(int(i + 1));
                 applying_ = false;
-                apply_preset(g_.looks[i].data, t);
+                apply_preset(g_.looks[i].data, t, opts.find("guards=1") != std::string::npos);
                 std::ostringstream o;
                 o.setf(std::ios::fixed);
                 o.precision(1);
@@ -970,18 +972,20 @@ private:
     // presets set loses its keyframes; an animated preset (upstream timeline keys)
     // then gets sparse host keyframes: the timeline loops every duration seconds from
     // the effect's first frame (host_range), keyed for a stretch of whole loops around
-    // the playhead t (at most kMaxKeyedFrames; outside it the first / last values hold).
+    // the playhead t (about kMaxPresetKeys keys, at most kMaxKeyedFrames frames; outside it the
+    // first / last values hold).
     // See docs/params.md.
-    void apply_preset(const json &preset, double t) {
+    void apply_preset(const json &preset, double t, bool guards = false) {
         const auto t0 = std::chrono::steady_clock::now();
         const TimeRange range = host_range(t);
         const int64_t available = range.known ? int64_t(std::llround(range.last - range.origin)) + 1 : 0;
         const PresetPlan plan =
-            plan_preset(g_.schema, preset, source_frame_rate(), available, frame_of(t, range.origin, false));
+            plan_preset(g_.schema, preset, source_frame_rate(), available, frame_of(t, range.origin, false), guards);
         applying_ = true;
         beginEditBlock(plan.replaces_look ? "NTSCRT preset" : "NTSCRT Screen Loop preset");
         try {
             size_t keyed = 0, params = 0;
+            std::string sample;
             for (const auto &[i, entries] : plan.look.keys) {
                 try {
                     static_cast<OFX::ValueParam *>(params_[i])->deleteAllKeys();
@@ -993,6 +997,14 @@ private:
                     for (const auto &[n, v] : entries) set_key(i, v, range.origin + double(n));
                     keyed += entries.size();
                     ++params;
+                    if (sample.empty() && g_.schema.params[i].type == PType::Float) {
+                        // One param's keys in the log: how the host interpolates them can be checked.
+                        std::ostringstream k;
+                        k << g_.schema.params[i].name << ":";
+                        for (size_t j = 0; j < entries.size() && j < 40; ++j)
+                            k << (j ? "," : "") << range.origin + double(entries[j].first) << "=" << entries[j].second.dump();
+                        sample = k.str();
+                    }
                 }
             }
             for (const auto &[i, v] : plan.feedback) set_value(i, v, t);
@@ -1004,7 +1016,7 @@ private:
                   << range.origin << (range.known ? "" : ", clip range unknown") << "), " << keyed << " keyframes on "
                   << params << " params in "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()
-                  << " ms;" << host_ranges_text();
+                  << " ms;" << host_ranges_text() << (guards ? "; guard keys" : "") << "; keys of " << sample;
                 dlog::write(o.str());
             }
         } catch (...) {
