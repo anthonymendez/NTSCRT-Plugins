@@ -1,0 +1,286 @@
+// ntscrt_render_host_gpu against ntscrt_render_cpu on the same frames, with this
+// test as a fake CUDA host (Windows, NVIDIA GPU): frames in CUDA device memory in
+// OpenFX layout (bottom row first, padded rows), a non-blocking stream of the
+// primary context. Skipped without nvcuda.dll / a CUDA device (CI runners) or when
+// the core's D3D11 device is on another GPU.
+//
+// Tolerance (docs/dev/HOST-GPU.md): every channel within 1/255 (+1e-5) of the CPU
+// path's value and at most 0.2% of the values different at all (beyond 1e-5) —
+// the GPU's division (unpremultiplying in Clip mode, Spill's straight output) can
+// land on the other side of an 8-bit rounding step; opaque frames match exactly.
+#include <doctest/doctest.h>
+#include <ntscrt/ntscrt.h>
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
+namespace {
+
+uint16_t f2h(float x) {  // round to nearest; fine for test data in 0..1
+    uint32_t f;
+    std::memcpy(&f, &x, 4);
+    const uint32_t s = (f >> 16) & 0x8000u;
+    int e = int((f >> 23) & 0xff) - 127 + 15;
+    if (e <= 0) return uint16_t(s);
+    return uint16_t(s | (uint32_t(e) << 10) | (((f & 0x7fffff) + 0x1000) >> 13));
+}
+float h2f(uint16_t h) {
+    const int e = (h >> 10) & 31, m = h & 1023;
+    float v = e == 0 ? std::ldexp(float(m), -24) : std::ldexp(float(m + 1024), e - 25);
+    return (h & 0x8000) ? -v : v;
+}
+
+size_t bpp(ntscrt_pixel_format f) { return f == NTSCRT_RGBA32F ? 16 : f == NTSCRT_RGBA16F ? 8 : 4; }
+
+// One RGBA host image in OpenFX layout (row 0 in memory = bottom row).
+struct HostImage {
+    int w = 0, h = 0;
+    ntscrt_pixel_format f = NTSCRT_RGBA32F;
+    size_t pitch = 0;
+    std::vector<uint8_t> mem;
+    void init(int W, int H, ntscrt_pixel_format F) {
+        w = W, h = H, f = F;
+        pitch = size_t(w) * bpp(f) + 48;  // padded rows, as hosts may have
+        mem.assign(pitch * h, 0);
+    }
+    void set(int x, int ytop, const float v[4]) {
+        uint8_t *p = mem.data() + pitch * size_t(h - 1 - ytop) + size_t(x) * bpp(f);
+        for (int c = 0; c < 4; ++c) {
+            if (f == NTSCRT_RGBA32F) std::memcpy(p + c * 4, &v[c], 4);
+            else if (f == NTSCRT_RGBA16F) { uint16_t q = f2h(v[c]); std::memcpy(p + c * 2, &q, 2); }
+            else p[c] = uint8_t(std::lround(std::fmin(1.f, std::fmax(0.f, v[c])) * 255.f));
+        }
+    }
+    float get(int x, int ytop, int c) const {
+        const uint8_t *p = mem.data() + pitch * size_t(h - 1 - ytop) + size_t(x) * bpp(f);
+        if (f == NTSCRT_RGBA32F) { float v; std::memcpy(&v, p + c * 4, 4); return v; }
+        if (f == NTSCRT_RGBA16F) { uint16_t q; std::memcpy(&q, p + c * 2, 2); return h2f(q); }
+        return p[c] / 255.f;
+    }
+    ntscrt_image cpu() {  // top row first, negative stride (what the OpenFX plug-in passes)
+        return ntscrt_image{w, h, -ptrdiff_t(pitch), f, mem.data() + pitch * size_t(h - 1)};
+    }
+};
+
+enum class Alpha { Opaque, Straight, Premult };
+
+void fill(HostImage &im, int frame, Alpha alpha) {
+    for (int y = 0; y < im.h; ++y)
+        for (int x = 0; x < im.w; ++x) {
+            float v[4];
+            v[0] = float((x * 7 + frame * 13) % im.w) / float(im.w);
+            v[1] = float((y * 5 + x) % im.h) / float(im.h);
+            v[2] = 0.5f + 0.45f * std::sin(0.05f * float(x + y) + 0.3f * float(frame));
+            v[3] = 1.f;
+            if (alpha != Alpha::Opaque) {
+                // A soft blob: opaque middle, a ramp, fully transparent corners.
+                const float dx = (x - im.w * 0.5f) / (im.w * 0.5f), dy = (y - im.h * 0.5f) / (im.h * 0.5f);
+                v[3] = std::fmin(1.f, std::fmax(0.f, 1.6f - 1.4f * std::sqrt(dx * dx + dy * dy)));
+                if (alpha == Alpha::Premult)
+                    for (int c = 0; c < 3; ++c) v[c] *= v[3];
+            }
+            im.set(x, y, v);
+        }
+}
+
+#ifdef _WIN32
+// The CUDA driver API calls this test makes as the host (cuda.h, CUDA 12).
+struct FakeCudaHost {
+    using CUresult = int;
+    using CUdeviceptr = unsigned long long;
+    HMODULE dll = nullptr;
+    CUresult(__stdcall *Init)(unsigned) = nullptr;
+    CUresult(__stdcall *DeviceGet)(int *, int) = nullptr;
+    CUresult(__stdcall *PrimaryCtxRetain)(void **, int) = nullptr;
+    CUresult(__stdcall *CtxPushCurrent)(void *) = nullptr;
+    CUresult(__stdcall *CtxPopCurrent)(void **) = nullptr;
+    CUresult(__stdcall *StreamCreate)(void **, unsigned) = nullptr;
+    CUresult(__stdcall *StreamSynchronize)(void *) = nullptr;
+    CUresult(__stdcall *MemAlloc)(CUdeviceptr *, size_t) = nullptr;
+    CUresult(__stdcall *MemFree)(CUdeviceptr) = nullptr;
+    CUresult(__stdcall *MemcpyHtoD)(CUdeviceptr, const void *, size_t) = nullptr;
+    CUresult(__stdcall *MemcpyDtoH)(void *, CUdeviceptr, size_t) = nullptr;
+    void *ctx = nullptr, *stream = nullptr;
+    std::string why;
+
+    bool start() {
+        dll = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!dll) return (why = "no nvcuda.dll"), false;
+        auto load = [&](auto &fn, const char *n) {
+            fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(GetProcAddress(dll, n));
+            return fn != nullptr;
+        };
+        if (!(load(Init, "cuInit") && load(DeviceGet, "cuDeviceGet") &&
+              load(PrimaryCtxRetain, "cuDevicePrimaryCtxRetain") && load(CtxPushCurrent, "cuCtxPushCurrent_v2") &&
+              load(CtxPopCurrent, "cuCtxPopCurrent_v2") && load(StreamCreate, "cuStreamCreate") &&
+              load(StreamSynchronize, "cuStreamSynchronize") && load(MemAlloc, "cuMemAlloc_v2") &&
+              load(MemFree, "cuMemFree_v2") && load(MemcpyHtoD, "cuMemcpyHtoD_v2") &&
+              load(MemcpyDtoH, "cuMemcpyDtoH_v2")))
+            return (why = "nvcuda.dll lacks an entry point"), false;
+        int dev = 0;
+        if (Init(0) != 0 || DeviceGet(&dev, 0) != 0) return (why = "no CUDA device"), false;
+        if (PrimaryCtxRetain(&ctx, dev) != 0 || CtxPushCurrent(ctx) != 0) return (why = "no CUDA context"), false;
+        if (StreamCreate(&stream, 1 /* CU_STREAM_NON_BLOCKING */) != 0) return (why = "no CUDA stream"), false;
+        return true;
+    }
+    CUdeviceptr upload(const HostImage &im) {
+        CUdeviceptr p = 0;
+        REQUIRE(MemAlloc(&p, im.mem.size()) == 0);
+        REQUIRE(MemcpyHtoD(p, im.mem.data(), im.mem.size()) == 0);
+        return p;
+    }
+    void download(CUdeviceptr p, HostImage &im) {
+        REQUIRE(StreamSynchronize(stream) == 0);
+        REQUIRE(MemcpyDtoH(im.mem.data(), p, im.mem.size()) == 0);
+    }
+};
+#endif
+
+struct Diff {
+    double max = 0;
+    size_t off = 0, n = 0;
+};
+Diff compare(const HostImage &a, const HostImage &b) {
+    Diff d;
+    for (int y = 0; y < a.h; ++y)
+        for (int x = 0; x < a.w; ++x)
+            for (int c = 0; c < 4; ++c) {
+                const double e = std::fabs(double(a.get(x, y, c)) - double(b.get(x, y, c)));
+                d.max = std::fmax(d.max, e);
+                d.off += e > 1e-5;
+                ++d.n;
+            }
+    return d;
+}
+
+struct Case {
+    const char *name;
+    const char *look;
+    ntscrt_pixel_format f;
+    Alpha alpha;
+    double scale = 1.0;
+    int pad = 0;  // source smaller than the frame by this much on each side
+};
+
+}  // namespace
+
+TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
+#ifndef _WIN32
+    MESSAGE("CUDA host frames are Windows-only: skipped");
+#else
+    FakeCudaHost cuda;
+    if (!cuda.start()) {
+        MESSAGE("no CUDA (" << cuda.why << "): skipped");
+        return;
+    }
+    const std::string res = NTSCRT_BUILT_RESOURCES_DIR;
+    const Case cases[] = {
+        {"default look (NTSC on: download route), float", "{}", NTSCRT_RGBA32F, Alpha::Opaque},
+        {"NTSC off (direct route), float", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA32F, Alpha::Opaque},
+        {"NTSC off, half float", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA16F, Alpha::Opaque},
+        {"NTSC off, 8-bit", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA8, Alpha::Opaque},
+        {"default look, 8-bit", "{}", NTSCRT_RGBA8, Alpha::Opaque},
+        {"NTSC off, premultiplied, Clip (holes: CPU conversion)", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA32F,
+         Alpha::Premult},
+        {"NTSC off, straight, Spill", R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})", NTSCRT_RGBA32F,
+         Alpha::Straight},
+        {"NTSC off, premultiplied, Spill", R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})", NTSCRT_RGBA32F,
+         Alpha::Premult},
+        {"default look, premultiplied, Spill, half", R"({"alpha":{"mode":"spill"}})", NTSCRT_RGBA16F, Alpha::Premult},
+        {"NTSC off, render scale 0.5", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA32F, Alpha::Opaque, 0.5},
+        {"NTSC off, crop 4:3", R"({"ntsc":{"enabled":false},"crop":{"enabled":true,"ratio":"4:3"}})",
+         NTSCRT_RGBA32F, Alpha::Opaque},
+        {"NTSC off, source smaller than the frame, Spill",
+         R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})", NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 9},
+        {"NTSC off, source smaller than the frame, Clip", R"({"ntsc":{"enabled":false}})", NTSCRT_RGBA32F,
+         Alpha::Opaque, 1.0, 9},
+        {"Digital video on (download route)", R"({"ntsc":{"enabled":false},"digital":{"enabled":true}})",
+         NTSCRT_RGBA32F, Alpha::Opaque},
+    };
+    for (const Case &k : cases) {
+        const std::string case_name = k.name;
+        CAPTURE(case_name);
+        const int W = 333, H = 197;
+        ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, res.c_str()};
+        ntscrt_instance *cpu = nullptr, *gpu = nullptr;
+        REQUIRE(ntscrt_create(&ci, &cpu) == NTSCRT_OK);
+        REQUIRE(ntscrt_create(&ci, &gpu) == NTSCRT_OK);
+        const int premult = k.alpha == Alpha::Premult ? 1 : 0;
+        bool skipped = false;
+        for (int frame = 0; frame < 3 && !skipped; ++frame) {
+            HostImage src, frame_src, out_cpu, out_gpu;
+            src.init(W - 2 * k.pad, H - 2 * k.pad, k.f);
+            fill(src, frame, k.alpha);
+            // The CPU path gets the frame padded with transparent black, as the plug-in does.
+            frame_src.init(W, H, k.f);
+            for (int y = 0; y < src.h; ++y)
+                std::memcpy(frame_src.mem.data() + frame_src.pitch * size_t(y + k.pad) + size_t(k.pad) * bpp(k.f),
+                            src.mem.data() + src.pitch * size_t(y), size_t(src.w) * bpp(k.f));
+            out_cpu.init(W, H, k.f);
+            out_gpu.init(W, H, k.f);
+
+            ntscrt_render_args ra{};
+            ra.frame_index = frame;
+            ra.fps = 30;
+            ra.look_json = k.look;
+            ra.render_scale = k.scale;
+            ra.source_premultiplied = premult;
+            ntscrt_image s = frame_src.cpu(), d = out_cpu.cpu();
+            const ntscrt_status cs = ntscrt_render_cpu(cpu, &ra, &s, &d);
+            REQUIRE_MESSAGE(cs == NTSCRT_OK, ntscrt_last_error(cpu));
+
+            auto dsrc = cuda.upload(src);
+            auto ddst = cuda.upload(out_gpu);
+            ntscrt_host_gpu host{NTSCRT_HOST_GPU_CUDA, cuda.stream};
+            ntscrt_gpu_image gs{src.w, src.h, ptrdiff_t(src.pitch), k.f, 1, reinterpret_cast<void *>(dsrc), 0};
+            ntscrt_gpu_image gd{W, H, ptrdiff_t(out_gpu.pitch), k.f, 1, reinterpret_cast<void *>(ddst), 0};
+            const ntscrt_status gs_st = ntscrt_render_host_gpu(gpu, &ra, &host, &gs, k.pad, k.pad, &gd);
+            if (gs_st == NTSCRT_ERR_HOST_GPU && frame == 0 &&
+                std::string(ntscrt_last_error(gpu)).find("another GPU") != std::string::npos) {
+                MESSAGE("core device on another GPU than CUDA device 0: skipped (" << ntscrt_last_error(gpu) << ")");
+                skipped = true;
+            } else {
+                REQUIRE_MESSAGE(gs_st == NTSCRT_OK, ntscrt_last_error(gpu));
+                cuda.download(ddst, out_gpu);
+                const Diff df = compare(out_cpu, out_gpu);
+                MESSAGE(std::string(k.name) << " frame " << frame << ": " << std::string(ntscrt_last_timings(gpu)) << "; max diff "
+                               << df.max * 255 << "/255, " << df.off << " of " << df.n << " values differ");
+                CHECK(df.max <= 1.0 / 255 + 1e-5);
+                CHECK(double(df.off) <= 0.002 * double(df.n));
+            }
+            cuda.MemFree(dsrc);
+            cuda.MemFree(ddst);
+        }
+        ntscrt_destroy(cpu);
+        ntscrt_destroy(gpu);
+    }
+#endif
+}
+
+TEST_CASE("host GPU entry points refuse what they can't do, without writing") {
+    ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, NTSCRT_BUILT_RESOURCES_DIR};
+    ntscrt_instance *inst = nullptr;
+    REQUIRE(ntscrt_create(&ci, &inst) == NTSCRT_OK);
+    CHECK(ntscrt_host_gpu_supported(NTSCRT_HOST_GPU_OPENCL) == 0);
+    CHECK(ntscrt_host_gpu_supported(NTSCRT_HOST_GPU_NONE) == 0);
+    int dummy = 0;
+    ntscrt_render_args ra{};
+    ra.look_json = "{}";
+    ntscrt_host_gpu host{NTSCRT_HOST_GPU_OPENCL, nullptr};
+    ntscrt_gpu_image im{8, 8, 8 * 16, NTSCRT_RGBA32F, 1, &dummy, 0};
+    CHECK(ntscrt_render_host_gpu(inst, &ra, &host, &im, 0, 0, &im) == NTSCRT_ERR_HOST_GPU);
+    CHECK(std::string(ntscrt_last_error(inst)).find("OpenCL") != std::string::npos);
+    ntscrt_gpu_image bad = im;
+    bad.format = NTSCRT_RGBA16;  // no GPU format for 16-bit unorm
+    host.api = NTSCRT_HOST_GPU_CUDA;
+    CHECK(ntscrt_render_host_gpu(inst, &ra, &host, &bad, 0, 0, &bad) == NTSCRT_ERR_INVALID_ARG);
+    ntscrt_destroy(inst);
+}

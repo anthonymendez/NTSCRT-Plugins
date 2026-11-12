@@ -20,6 +20,8 @@
 #include "../stages/digital/parallel.h"
 #include "../stages/stages.h"
 #include "embedded_schema.h"
+#include "facade.h"
+#include "host_gpu.h"
 #include "pixel_convert.h"
 #include "testing.h"
 
@@ -160,6 +162,10 @@ struct ntscrt_instance {
     std::string presets_cache;
     SourceCache sources;
     LookStore looks;
+    // Host GPU frames (host_gpu.cpp): the bridge to the host's GPU memory, made
+    // on the first such render, and where the last render's time went.
+    std::unique_ptr<hostgpu::Bridge> bridge;
+    PhaseTimes times;
 };
 
 namespace {
@@ -179,6 +185,7 @@ gpu::Backend pick_backend(ntscrt_gpu_backend b) {
 
 void drop_gpu(ntscrt_instance *inst) {
     // The stages and pooled textures belong to the device: they go first.
+    inst->bridge.reset();
     inst->tex_pool.clear();
     inst->howl.reset();
     inst->howl_crt.reset();
@@ -342,9 +349,9 @@ namespace {
 //          device exists, else `cpu_img` (CPU stages only, out_w x out_h).
 //          `alpha` is NULL when it doesn't line up with the result (crop on).
 //          raw_w x raw_h: the source picture's size.
-using SourceFn = std::function<void(ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode)>;
-using EmitFn = std::function<void(const std::shared_ptr<gpu::Texture> &out_gpu, const ImageBGRA8 &cpu_img,
-                                  int raw_w, int raw_h, const std::vector<float> *alpha, AlphaMode mode)>;
+using facade::DirectFn;
+using facade::EmitFn;
+using facade::SourceFn;
 
 // Looks at other frames during one render call. Entries are dropped oldest
 // frame first past kMax, so a reference from look_at stays valid for at least
@@ -363,20 +370,24 @@ bool crt_shader_on(const json &look) {
 // hosts (the shader's last pass, supersampling and placement keep their
 // precision instead of being quantized to 1/255), BGRA8 for 8-bit ones.
 // Everything before the CRT stage stays 8-bit: that's where the look is defined.
-gpu::Format output_format(bool high_precision_host) {
+}  // namespace
+gpu::Format facade::output_format(bool high_precision_host) {
     static const bool force8 = [] {
         const char *e = std::getenv("NTSCRT_OUTPUT_8BIT");
         return e && *e && *e != '0';
     }();
     return high_precision_host && !force8 ? gpu::Format::RGBA16F : gpu::Format::BGRA8;
 }
+namespace {
+using facade::output_format;
 
 // out_fmt: output_format() for the host picture; used when the CRT shader is
 // on (its bypass is an 8-bit picture anyway, kept exactly as before).
 ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
                           const std::shared_ptr<const json> &look_p, const json &feedback, int out_w, int out_h,
-                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit) {
+                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit, const DirectFn *direct) {
     const json &look = *look_p;
+    PhaseTimes &pt = inst->times;
     const std::string_view look_text = args->look_json ? args->look_json : "{}";
     const AlphaMode mode = alpha_mode(look);
     const bool premult = args->source_premultiplied != 0;
@@ -424,19 +435,37 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
 
     std::vector<float> alpha;
     ImageBGRA8 img;
-    {
+    // Host GPU frames with no CPU stage on: the frame stays on the GPU (converted
+    // and cropped there), nothing comes down.
+    std::shared_ptr<gpu::Texture> direct_src;
+    if (direct && inst->dev && !inst->test_lose_device && !inst->digital.active(look) && !inst->ntsc.active(look) &&
+        !(args->feedback_json && inst->howl->active(&feedback))) {
+        PhaseScope ps(pt, PhaseTimes::In, inst->dev.get());
+        direct_src = (*direct)(mode, look, raw_w, raw_h);
+    }
+    if (!direct_src) {
+        PhaseScope ps(pt, PhaseTimes::In);
         ImageBGRA8 raw;
         get_src(raw, alpha, mode);
         raw_w = raw.width;
         raw_h = raw.height;
         Crop::apply(look, std::move(raw), img);  // no crop: moved, not copied
     }
-    const std::vector<float> *aligned_alpha = img.width == raw_w && img.height == raw_h ? &alpha : nullptr;
+    const std::vector<float> *aligned_alpha =
+        direct_src ? (direct_src->desc().width == raw_w && direct_src->desc().height == raw_h ? &alpha : nullptr)
+                   : (img.width == raw_w && img.height == raw_h ? &alpha : nullptr);
 
     if (!inst->dev) {
         // No GPU: CPU stages only (degraded, but never a black frame).
-        if (inst->digital.active(look)) inst->digital.process(img, ctx);
-        if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
+        if (inst->digital.active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Digital);
+            inst->digital.process(img, ctx);
+        }
+        if (inst->ntsc.active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Ntsc);
+            inst->ntsc.process(img, ctx);
+        }
+        PhaseScope ps(pt, PhaseTimes::Out);
         if (img.width != out_w || img.height != out_h) {
             // Cropped: placed like the CRT bypass would, so all of dst is written.
             ImageBGRA8 boxed;
@@ -562,18 +591,42 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
         inst->howl->after_frame(*chain, feedback, ctx);  // feeds the loop the chain input
     } else {
-        if (inst->digital.active(look)) inst->digital.process(img, ctx);
+        if (inst->digital.active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Digital);
+            inst->digital.process(img, ctx);
+        }
         ctx.line_height = inst->digital.active(look) ? digital::chain_line_height(look) : 1;  // One field
-        if (inst->ntsc.active(look)) inst->ntsc.process(img, ctx);
-        chain = inst->downscale->run(upload(img), ctx);
-        if (inst->glitch->active(look)) chain = inst->glitch->run(chain, ctx);
+        if (inst->ntsc.active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Ntsc);
+            inst->ntsc.process(img, ctx);
+        }
+        std::shared_ptr<gpu::Texture> pic = direct_src;
+        if (!pic) {
+            PhaseScope ps(pt, PhaseTimes::Upload, &dev);
+            pic = upload(img);
+        }
+        {
+            PhaseScope ps(pt, PhaseTimes::Downscale, &dev);
+            chain = inst->downscale->run(pic, ctx);
+        }
+        pic.reset();
+        if (inst->glitch->active(look)) {
+            PhaseScope ps(pt, PhaseTimes::Glitch, &dev);
+            chain = inst->glitch->run(chain, ctx);
+        }
     }
     const gpu::Format fmt = crt_shader_on(look) ? out_fmt : gpu::Format::BGRA8;
     auto out = acquire({out_w, out_h, fmt, true, true});
-    inst->crt->render(*chain, *out, ctx);
+    {
+        PhaseScope ps(pt, PhaseTimes::Crt, &dev);
+        inst->crt->render(*chain, *out, ctx);
+    }
     chain.reset();
     // No finish() here: emit's download (or the Metal path's own finish) waits.
-    emit(out, img, raw_w, raw_h, aligned_alpha, mode);
+    {
+        PhaseScope ps(pt, PhaseTimes::Out);
+        emit(out, img, raw_w, raw_h, aligned_alpha, mode);
+    }
     inst->device_resets = 0;  // a good GPU frame
 
     // The CRT shader couldn't run: the frame shows the picture without it.
@@ -585,7 +638,8 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
 }
 
 ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args, int out_w, int out_h,
-                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit) {
+                          gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit,
+                          const DirectFn *direct = nullptr) {
     inst->last_error.clear();
     std::shared_ptr<const json> look = inst->looks.get(args->look_json ? args->look_json : "{}");
     if (!look) return fail(inst, NTSCRT_ERR_BAD_PARAMS, "look_json is not valid JSON");
@@ -597,7 +651,7 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
     bool recreated = false;
     for (;;) {
         try {
-            return render_once(inst, args, look, feedback, out_w, out_h, out_fmt, get_src, emit);
+            return render_once(inst, args, look, feedback, out_w, out_h, out_fmt, get_src, emit, direct);
         } catch (const std::exception &e) {
             if (!device_lost(inst)) return fail(inst, NTSCRT_ERR_INTERNAL, e.what());
             // The device is gone (driver reset, GPU removed): try a new one once,
@@ -617,13 +671,32 @@ ntscrt_status render_impl(ntscrt_instance *inst, const ntscrt_render_args *args,
 
 }  // namespace
 
+ntscrt_status facade::render(ntscrt_instance *inst, const ntscrt_render_args *args, int out_w, int out_h,
+                             gpu::Format out_fmt, const SourceFn &get_src, const EmitFn &emit,
+                             const DirectFn *direct) {
+    return render_impl(inst, args, out_w, out_h, out_fmt, get_src, emit, direct);
+}
+ntscrt_status facade::fail(ntscrt_instance *inst, ntscrt_status s, std::string msg) {
+    return ::fail(inst, s, std::move(msg));
+}
+gpu::Device *facade::device(ntscrt_instance *inst) { return inst->dev.get(); }
+std::unique_ptr<hostgpu::Bridge> &facade::bridge(ntscrt_instance *inst) { return inst->bridge; }
+PhaseTimes &facade::times(ntscrt_instance *inst) { return inst->times; }
+
 extern "C" {
+
+const char *ntscrt_last_timings(ntscrt_instance *inst) { return inst ? inst->times.text.c_str() : ""; }
 
 ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args *args, const ntscrt_image *src,
                                 ntscrt_image *dst) {
     if (!inst || !args || !src || !dst || !src->data || !dst->data) return NTSCRT_ERR_INVALID_ARG;
     const bool premult = args->source_premultiplied != 0;
     const bool high = dst->format == NTSCRT_RGBA16 || dst->format == NTSCRT_RGBA16F || dst->format == NTSCRT_RGBA32F;
+    inst->times.clear("cpu");
+    struct Done {
+        ntscrt_instance *i;
+        ~Done() { i->times.finish(); }
+    } done{inst};
     return render_impl(
         inst, args, dst->width, dst->height, output_format(high),
         [&](ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode) {
@@ -717,6 +790,11 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         else dev.finish();
     };
     const gpu::Format df = dst->desc().format;
+    inst->times.clear("metal-texture");
+    struct Done {
+        ntscrt_instance *i;
+        ~Done() { i->times.finish(); }
+    } done{inst};
     return render_impl(inst, args, dw, dh, output_format(df == gpu::Format::RGBA16F || df == gpu::Format::RGBA32F),
                        get_src, emit);
 }
