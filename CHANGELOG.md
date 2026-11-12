@@ -71,6 +71,14 @@ written but not yet built.
   by open effects within a second, logged when effects are created and when it changes, and reported by
   `ntscrt_doctor.py`. `NTSCRT_DEBUG_LOG=1` does the same for one Resolve session; `NTSCRT_SETTINGS_DIR` moves
   the switch (tests). See docs/TESTING.md.
+- Experimental, off by default: **the NTSC signal on the GPU** (`NTSCRT_NTSC_GPU=1`, Windows), the first part of
+  a port of ntsc-rs to compute shaders, with the same pictures bit for bit. It covers the filter, modulation and
+  colour passes so far (the bundled *Mild VHS* runs entirely on it: about 3.5 ms instead of 40 ms of ntsc-rs per
+  UHD frame on an RTX 5090); frames that use the noise or VHS-distortion passes, Screen Loop, a Mac or a
+  software GPU stay on ntsc-rs. See docs/dev/NTSC-GPU.md.
+- The experimental GPU NTSC signal (`NTSCRT_NTSC_GPU=1`) now covers every ntsc-rs setting: noise, snow, head
+  switching, tracking noise, chroma delay and edge wave too, still bit for bit the same pictures. All bundled
+  presets and the default look run entirely on the GPU (Screen Loop, a Mac or a software GPU still use ntsc-rs).
 
 ### Changed
 - **Glitch** and **Digital video** (with Datamosh) past the first minute of an effect look slightly different

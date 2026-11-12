@@ -1,4 +1,6 @@
 ntscrt_add_test(test_ntsc test_ntsc.cpp)
+# GPU port of the stage: parity with ntsc-rs, fallback rules (docs/dev/NTSC-GPU.md).
+ntscrt_add_test(test_ntsc_gpu test_ntsc_gpu.cpp)
 
 # Dumps ntsc-rs descriptors + house defaults for tools/gen_schema.py
 # (snapshot committed as core/params/ntsc_descriptors.json).

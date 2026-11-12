@@ -213,3 +213,30 @@ benchmark phases. `fast_transfer()`, `readback_bands()` and `for_row_blocks()` m
 (`gpu-cpuconvert`). No ABI change.
 
 **Reason.** Both branches added a direct source and a phase clock at the same place in `render_once`.
+
+## 2026-11-12 — agent U — `core/stages/stages.h` (NtscStage), `rust/ntscrs-capi` C ABI
+
+**Change.** `NtscStage` gains two methods (nothing existing changes): `gpu_plan(ctx, width, height, plan,
+stage_mask)` (the GPU port's plan of a frame, from the same settings handling as `process`) and
+`debug_planes(in, ctx, stage_mask, &plane_rows)` (ntsc-rs's own YIQ planes with a subset of its stages).
+`stages.h` forward-declares `NtscGpuPlan` (`stages/ntsc/gpu/ntsc_gpu.h`). The shim's header adds the
+`ntsc_gpu_*` exports, `ntsc_debug_process_yiq` and their structs; `ntsc_process_frame(_ex)` are unchanged
+(`process_impl` now takes its `NtscEffect` from `effect_for`, which the plan exports share). `testing::PhaseTimes`
+gains `ntsc` (informational, part of `cpu_stages`). No ABI change of the core.
+
+**Reason.** Phase 1 of the GPU port of ntsc-rs (docs/dev/NTSC-GPU.md): the pipeline asks the stage for the
+frame's plan and runs it on the GPU when every pass is implemented; the parity harness compares the two paths
+pass by pass.
+
+## 2026-11-12 — agent W — `core/stages/stages.h` (NtscStage), `rust/ntscrs-capi` C ABI
+
+**Change.** `NtscStage::gpu_plan` gains a defaulted last parameter `bool tables = true` and `NtscStage` a
+method `void gpu_tables(NtscGpuPlan &) const` (the plan's row seeds, row shifts and speckle lists; with
+`tables = false` the caller adds them, e.g. on another thread). `NtscGpuPlan` (`ntsc_gpu.h`) gains the tables
+and their frame arguments. The shim implements `ntsc_gpu_row_shifts` / `ntsc_gpu_speckles` (stubs before;
+layouts unchanged, `NtscGpuRowShift::transient_intensity` renamed `intensity` with a per-stage meaning), adds
+`ntsc_gpu_simd_lanes`, pass kinds 9-12, `NTSC_GPU_SEEDS_TRACKING` and `NTSC_GPU_SHIFT_NONE`. No ABI change of
+the core.
+
+**Reason.** Phases 2-3 of the GPU port of ntsc-rs (docs/dev/NTSC-GPU.md): every stage on the GPU; the tables'
+CPU time overlaps the picture's upload.

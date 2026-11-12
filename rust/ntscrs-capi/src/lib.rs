@@ -18,6 +18,9 @@ use ntsc_rs::settings::{SettingDescriptor, SettingKind, SettingsList};
 use ntsc_rs::yiq_fielding::{BlitInfo, Bgrx, DeinterlaceMode, Rgbx, YiqOwned, YiqView};
 use ntsc_rs::NtscEffect;
 
+mod gpu_noise;
+mod gpu_plan;
+
 pub struct NtscInstance {
     settings: NtscEffectFullSettings,
 }
@@ -219,6 +222,20 @@ pub unsafe extern "C" fn ntsc_settings_from_json(
 pub const NTSC_RGBA8: i32 = 0;
 pub const NTSC_BGRA8: i32 = 1;
 
+/// The NtscEffect a frame is rendered with (shared by process_impl and the
+/// GPU plan exports, so both see the same settings by construction).
+pub(crate) fn effect_for(inst: &NtscInstance, scale_factor: [f32; 2], seed_offset: i32) -> NtscEffect {
+    let mut effect: NtscEffect = (&inst.settings).into();
+    effect.random_seed = effect.random_seed.wrapping_add(seed_offset);
+    // ntsc-rs ignores scale_factor when the "scale_settings" group is off;
+    // a non-unit factor (proxy render) still has to apply, so fall back to
+    // the group's neutral defaults (1.0, 1.0, not with video size).
+    if scale_factor != [1.0, 1.0] && effect.scale.is_none() {
+        effect.scale = Some(ScaleSettings::default());
+    }
+    effect
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn process_impl(
     inst: *const NtscInstance,
@@ -246,14 +263,7 @@ unsafe fn process_impl(
     let frame = frame_index.max(0) as usize;
 
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let mut effect: NtscEffect = (&inst.settings).into();
-        effect.random_seed = effect.random_seed.wrapping_add(seed_offset);
-        // ntsc-rs ignores scale_factor when the "scale_settings" group is off;
-        // a non-unit factor (proxy render) still has to apply, so fall back to
-        // the group's neutral defaults (1.0, 1.0, not with video size).
-        if scale_factor != [1.0, 1.0] && effect.scale.is_none() {
-            effect.scale = Some(ScaleSettings::default());
-        }
+        let effect = effect_for(inst, scale_factor, seed_offset);
         let field = effect.use_field.to_yiq_field(frame);
         let mut yiq_buf = vec![0f32; YiqView::buf_length_for(dims, field)];
         let mut view = YiqView::from_parts(&mut yiq_buf, dims, field);
