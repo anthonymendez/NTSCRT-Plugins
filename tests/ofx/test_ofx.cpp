@@ -1278,6 +1278,35 @@ TEST_CASE("host protocol: getFramesNeeded follows the temporal stages") {
     }
 }
 
+// Resolve's Adjustment Clip: timeline times (an hour in) and a made-up source range of 0..1999.
+// 0.5.0-rc.2 clamped the time into that range and declared 1999..t (214,000 frames), and refused
+// every earlier frame Digital video or Screen Loop asked for.
+TEST_CASE("host protocol: times outside the source's range (Resolve's Adjustment Clip)") {
+    ProtoFixture f;
+    f.src().props.set(kOfxImageEffectPropFrameRange, {0.0, 1999.0});
+    f.src().any_frame_last = 250000;
+    f.inst->clips[kOfxImageEffectOutputClipName]->any_frame_last = 250000;
+    const double T = 216079;
+    auto [a, b] = f.needed(T);
+    CHECK(a == T);
+    CHECK(b == T);
+    // Digital video with Datamosh drops every keyframe: the stream reaches back to the minute's start
+    // (216000 = 01:00:00:00 at 60 fps; the mock clip runs at 25 fps: 01:00:00:00 = 90000), not frame 0.
+    f.set("digital.enabled", 1);
+    f.set("digital.keyframe_interval", 1);
+    f.set("digital.datamosh", 1);
+    auto [c, d] = f.needed(T);
+    CHECK(d == T);
+    CHECK(c >= 216000 - 60);  // the segment start (a multiple of 1500 frames at 25 fps) minus one keyframe interval
+    CHECK(c <= T);
+    const size_t mark = f.src().fetched.size();
+    REQUIRE(f.render(T) == kOfxStatOK);
+    auto [lo, hi] = f.fetched_range(mark);
+    CHECK(lo >= c);  // fetched what was declared, and earlier frames were delivered
+    CHECK(hi <= T);
+    CHECK(f.src().fetched.size() - mark > 1);
+}
+
 TEST_CASE("host protocol: isIdentity only when every stage is off") {
     ProtoFixture f;
     auto identity = [&](double t, std::string *clip = nullptr) {
