@@ -15,7 +15,7 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 ## [Unreleased]
 
 Animated presets, the Digital video formats in the Preset menu and a second codec (Microsoft Video 1, for the
-CD-ROM look), synced with upstream NTSCRT v0.20.0. Faster seeks and edits, less memory with several effects,
+CD-ROM look), synced with upstream NTSCRT v0.21.0. Faster seeks and edits, less memory with several effects,
 half-float CRT output on 16-bit and float timelines, and fixes for Horizontal resolution and preset files.
 Installs are now checked against the release's checksums. Still Resolve-only: the Final Cut plug-in is
 written but not yet built.
@@ -82,6 +82,14 @@ written but not yet built.
   Resolve does (table in docs/params.md): looks are built from the controls alone (no hidden saved preset copy),
   the Screen Loop menu's Off / (Custom) switch the Screen Loop checkbox, conditions and choice labels are read
   the same way, the Preset menu keeps the released order, Seed goes up to 2147483647.
+- Synced with upstream NTSCRT v0.21.0 (was v0.20.0): Digital video gains **Low-light noise** (grain that grows in
+  dark scenes, up to 8x, as a camera turns up its gain) and **Halo width** (how far Sharpening's outlines reach,
+  1-4 px), and the bundled look *Cheap camcorder*. Both new controls default to off / 1 px, so existing projects
+  and looks keep their settings; but upstream changed the sensor-noise random pattern (rows no longer repeat), so
+  any look with Sensor noise above 0 shows different grain of the same strength (mean difference per pixel, of 255:
+  *Chunky webcam* 2.6 to 5.8, *CD-ROM (low quality)* about 4.9, *Webcam (low quality)* about 1.0, the Webcam
+  (2005), Video call and MiniDV formats 1.2 to 3.4); looks without Sensor noise (Early web video, CD-ROM (Video 1),
+  Datamosh) are unchanged.
 - Synced with upstream NTSCRT v0.20.0 (was v0.18.0). Digital video: **CCD response** replaces Exposure and
   Black level (a 90s 3-CCD camcorder's auto exposure, flare, knee and setup lift); Aliasing samples red,
   green and blue a third of a pixel apart (rainbow moiré) and boosts fine detail above 50%; Lens softness is

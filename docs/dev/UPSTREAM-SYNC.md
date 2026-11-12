@@ -208,3 +208,17 @@ Proposal, in order of value per effort:
   *CD-ROM (low quality)*; Compression group first. App-only (not ported): the CRT_DIGITAL `width=` and
   CRT_EXPORT_MP4 automation hooks, the panel's codec-dependent hiding (here: `visible_if` on `codec`),
   preview sizing, README; licences handled separately.
+- **v0.21.0** (`8b26092`, from v0.20.0 `c6ab639`; the first real run of `sync_upstream.py`): Digital video
+  **Low-light noise** (`low_light_noise`, default 0: Sensor noise × up to 8 as the frame's median luma falls
+  below sRGB 100) and **Halo width** (`sharpening_width`, 1–4 px, default 1 = the old 3×3 sharpening): new
+  ids (FxPlug 449/450), and every format writes both at those defaults (the `digital_formats` change); no
+  breaking change, no migration. The sensor noise's per-row RNG seeds are hashed: same strength, new grain,
+  so every look with Sensor noise > 0 renders different grain (checked: with the old seeding, old looks are
+  bit-identical to v0.20.0; self-goldens of those looks regenerated). Bundled look *Cheap camcorder*
+  (appended to `released_preset_order()`, added to `DIGITAL_LOOKS` and the self-goldens). Tests:
+  `testHaloWidth`, `testLowLightNoiseGrowsInTheDark`. Not ported: `DigitalParam.startingValues` (a new
+  window's stage starts off but set to Cheap camcorder): the schema keeps the controls' defaults, which
+  preset application fills missing values from (see `core/stages/digital/renderer.h`); upstream's first
+  switch-on in such a window applies the Webcam format anyway (`digitalFormatApplied` is still false).
+  App-only: the panel graying Low-light noise / Halo width out while Sensor noise / Sharpening is 0 (both
+  stay enabled here), README, DEVELOPMENT.md. No `Timeline.swift`, vendor-pin or new-file (port map) changes.

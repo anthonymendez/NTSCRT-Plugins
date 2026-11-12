@@ -36,6 +36,15 @@ Lens softness is dropped. `digital.legacy` holds the 0.4.0 plug-in controls a sa
 written only while non-zero): `legacy.quality` (old curve) stands in for `values.quality` while that is at
 its default 0.749; legacy Exposure / Black level set CCD response while it is 0.
 
+Upstream 0.21 added `low_light_noise` (0…1, default 0: Sensor noise grows up to 8× as the frame's median
+brightness falls below sRGB 100) and `sharpening_width` (Halo width, 1…4 capture px, default 1 = the 3×3
+sharpening of earlier versions). Both defaults leave older looks unchanged, so a look without them (any look
+saved before 0.21) renders as before; the Digital video formats write them at those defaults. Upstream's
+new-window starting values (the *Cheap camcorder* look) are not schema defaults: a new instance starts from
+the controls' defaults, and *Cheap camcorder* is a bundled look. 0.21 also changed the sensor noise's random
+pattern (each row's seed is hashed, so rows no longer repeat the row six above a pixel along): a look with
+Sensor noise above 0 renders different grain of the same strength.
+
 With Fields on One field (the default since upstream 0.20) and the Downscale on, the chain after the
 Digital stage gets the field: half the Downscale's lines, each two picture rows tall (the CRT draws a
 scanline per field line); Screen Loop keeps square lines.
