@@ -412,6 +412,34 @@ TEST_CASE("ntsc gpu: parity with ntsc-rs, all GPU passes together, every field m
         }
 }
 
+TEST_CASE("ntsc gpu: parity on the bundled presets that run entirely on the GPU") {
+    Gpu &g = gpu_env();
+    if (!g.dev) return;
+    NtscStage st;
+    Report rep;
+    int ran = 0;
+    for (auto &e : fs::directory_iterator(fs::path(NTSCRT_SOURCE_DIR) / "presets")) {
+        if (e.path().extension() != ".json") continue;
+        std::ifstream f(e.path(), std::ios::binary);
+        const json look = json::parse(f);
+        if (!st.active(look)) continue;
+        NtscGpuPlan plan;
+        st.gpu_plan(ctx_for(look, 0, 0, 1.0), 1920, 1080, plan);
+        if (!plan.supported()) continue;
+        ++ran;
+        Diff total;
+        for (const std::string &pk : {"gradient", "edges"})
+            for (int64_t frame : {0, 1, 30}) {
+                total.add(run_case(st, look, picture(pk, 1920, 1080), frame, 0, 1.0, kModem));
+                total.add(run_case(st, look, picture(pk, 1280, 720), frame, 5, 0.5, kModem));
+            }
+        const std::string name = "preset " + e.path().stem().string();
+        rep.line(name, total, Tol{});
+        check_tol(name, total, Tol{});
+    }
+    CHECK(ran >= 1);  // "Mild VHS" in this phase
+}
+
 TEST_CASE("ntsc gpu: a field of one row with the vertical blend stays on ntsc-rs (which fails the frame)") {
     // ntsc-rs's chroma_vert_blend slices two rows of a field's scratch buffer and
     // panics on a 1-row field (pictures 1-3 rows tall, depending on the field

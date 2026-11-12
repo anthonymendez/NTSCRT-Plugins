@@ -213,3 +213,17 @@ benchmark phases. `fast_transfer()`, `readback_bands()` and `for_row_blocks()` m
 (`gpu-cpuconvert`). No ABI change.
 
 **Reason.** Both branches added a direct source and a phase clock at the same place in `render_once`.
+
+## 2026-11-12 — agent U — `core/stages/stages.h` (NtscStage), `rust/ntscrs-capi` C ABI
+
+**Change.** `NtscStage` gains two methods (nothing existing changes): `gpu_plan(ctx, width, height, plan,
+stage_mask)` (the GPU port's plan of a frame, from the same settings handling as `process`) and
+`debug_planes(in, ctx, stage_mask, &plane_rows)` (ntsc-rs's own YIQ planes with a subset of its stages).
+`stages.h` forward-declares `NtscGpuPlan` (`stages/ntsc/gpu/ntsc_gpu.h`). The shim's header adds the
+`ntsc_gpu_*` exports, `ntsc_debug_process_yiq` and their structs; `ntsc_process_frame(_ex)` are unchanged
+(`process_impl` now takes its `NtscEffect` from `effect_for`, which the plan exports share). `testing::PhaseTimes`
+gains `ntsc` (informational, part of `cpu_stages`). No ABI change of the core.
+
+**Reason.** Phase 1 of the GPU port of ntsc-rs (docs/dev/NTSC-GPU.md): the pipeline asks the stage for the
+frame's plan and runs it on the GPU when every pass is implemented; the parity harness compares the two paths
+pass by pass.
