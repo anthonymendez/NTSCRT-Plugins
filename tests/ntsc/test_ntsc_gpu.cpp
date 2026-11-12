@@ -667,14 +667,24 @@ TEST_CASE("ntsc gpu: stage-by-stage YIQ planes match ntsc-rs") {
     Gpu &g = gpu_env();
     if (!g.dev) return;
     NtscStage st;
-    for (int field : {4, 0, 3}) {
-        if (!strict() && field != 4) continue;
-        json s = with(gpu_full_settings(), {{"use_field", field}});
+    // The full effect in three field modes, then the new stages' extremes on top of it.
+    std::vector<std::pair<std::string, json>> variants;
+    for (int field : {4, 0, 3}) variants.emplace_back("full_f" + std::to_string(field), json{{"use_field", field}});
+    variants.emplace_back("heavy_f5", json::parse(R"({"use_field": 5, "snow_intensity": 20, "snow_anisotropy": 0.9,
+        "head_switching_horizontal_shift": -60, "head_switching_mid_line_position": 0.1,
+        "head_switching_mid_line_jitter": 1.0, "tracking_noise_height": 700, "tracking_noise_snow_intensity": 0.5,
+        "tracking_noise_wave_intensity": 50, "chroma_delay_horizontal": -2.5, "chroma_delay_vertical": -3,
+        "vhs_edge_wave": 6.0, "vhs_edge_wave_detail": 5, "composite_noise_detail": 5, "luma_noise_detail": 4,
+        "chroma_noise_detail": 3})"));
+    variants.emplace_back("delay_down_f1", json::parse(R"({"use_field": 1, "chroma_delay_horizontal": 0,
+        "chroma_delay_vertical": 4, "head_switching_mid_line_position": 1.3, "head_switching_mid_line_jitter": 0})"));
+    for (const auto &[name, extra] : variants) {
+        if (!strict() && name != "full_f4") continue;
+        json s = with(gpu_full_settings(), extra);
         // NTSCRT_NTSC_GPU_STAGE_SETTINGS=<json>: other settings on top (debugging)
         if (const char *o = std::getenv("NTSCRT_NTSC_GPU_STAGE_SETTINGS"); o && *o) s = with(s, json::parse(o));
         const json look = look_of(s);
         const ImageBGRA8 src = picture("edges", 333, 247);
-        const std::string name = "full_f" + std::to_string(field);
         auto diffs = stage_by_stage(st, name, look, src, 5, 3, 1.0);
         CHECK(diffs.size() >= 20);
         {
