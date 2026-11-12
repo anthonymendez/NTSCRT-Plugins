@@ -219,7 +219,7 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
         if (mode != AlphaMode::Clip) return false;
         if (!transparent) {
             InParams p = in_params(mode);
-            auto flags = dev.create_texture({fh, 1, gpu::Format::R32F, true, false});
+            auto flags = bridge().scratch(dev, {fh, 1, gpu::Format::R32F, true, false});
             gpu::Bindings b;
             b.constants = &p;
             b.constants_size = sizeof p;
@@ -239,7 +239,7 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
         p.cy = uint32_t(r.y);
         p.cw = uint32_t(r.width);
         p.ch = uint32_t(r.height);
-        auto pic = dev.create_texture({r.width, r.height, gpu::Format::BGRA8, true, false});
+        auto pic = bridge().scratch(dev, {r.width, r.height, gpu::Format::BGRA8, true, false});
         gpu::Bindings b;
         b.constants = &p;
         b.constants_size = sizeof p;

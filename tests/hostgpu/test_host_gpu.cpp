@@ -17,10 +17,7 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
+#include "fake_cuda_host.h"
 
 namespace {
 
@@ -91,58 +88,6 @@ void fill(HostImage &im, int frame, Alpha alpha) {
         }
 }
 
-#ifdef _WIN32
-// The CUDA driver API calls this test makes as the host (cuda.h, CUDA 12).
-struct FakeCudaHost {
-    using CUresult = int;
-    using CUdeviceptr = unsigned long long;
-    HMODULE dll = nullptr;
-    CUresult(__stdcall *Init)(unsigned) = nullptr;
-    CUresult(__stdcall *DeviceGet)(int *, int) = nullptr;
-    CUresult(__stdcall *PrimaryCtxRetain)(void **, int) = nullptr;
-    CUresult(__stdcall *CtxPushCurrent)(void *) = nullptr;
-    CUresult(__stdcall *CtxPopCurrent)(void **) = nullptr;
-    CUresult(__stdcall *StreamCreate)(void **, unsigned) = nullptr;
-    CUresult(__stdcall *StreamSynchronize)(void *) = nullptr;
-    CUresult(__stdcall *MemAlloc)(CUdeviceptr *, size_t) = nullptr;
-    CUresult(__stdcall *MemFree)(CUdeviceptr) = nullptr;
-    CUresult(__stdcall *MemcpyHtoD)(CUdeviceptr, const void *, size_t) = nullptr;
-    CUresult(__stdcall *MemcpyDtoH)(void *, CUdeviceptr, size_t) = nullptr;
-    void *ctx = nullptr, *stream = nullptr;
-    std::string why;
-
-    bool start() {
-        dll = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (!dll) return (why = "no nvcuda.dll"), false;
-        auto load = [&](auto &fn, const char *n) {
-            fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(GetProcAddress(dll, n));
-            return fn != nullptr;
-        };
-        if (!(load(Init, "cuInit") && load(DeviceGet, "cuDeviceGet") &&
-              load(PrimaryCtxRetain, "cuDevicePrimaryCtxRetain") && load(CtxPushCurrent, "cuCtxPushCurrent_v2") &&
-              load(CtxPopCurrent, "cuCtxPopCurrent_v2") && load(StreamCreate, "cuStreamCreate") &&
-              load(StreamSynchronize, "cuStreamSynchronize") && load(MemAlloc, "cuMemAlloc_v2") &&
-              load(MemFree, "cuMemFree_v2") && load(MemcpyHtoD, "cuMemcpyHtoD_v2") &&
-              load(MemcpyDtoH, "cuMemcpyDtoH_v2")))
-            return (why = "nvcuda.dll lacks an entry point"), false;
-        int dev = 0;
-        if (Init(0) != 0 || DeviceGet(&dev, 0) != 0) return (why = "no CUDA device"), false;
-        if (PrimaryCtxRetain(&ctx, dev) != 0 || CtxPushCurrent(ctx) != 0) return (why = "no CUDA context"), false;
-        if (StreamCreate(&stream, 1 /* CU_STREAM_NON_BLOCKING */) != 0) return (why = "no CUDA stream"), false;
-        return true;
-    }
-    CUdeviceptr upload(const HostImage &im) {
-        CUdeviceptr p = 0;
-        REQUIRE(MemAlloc(&p, im.mem.size()) == 0);
-        REQUIRE(MemcpyHtoD(p, im.mem.data(), im.mem.size()) == 0);
-        return p;
-    }
-    void download(CUdeviceptr p, HostImage &im) {
-        REQUIRE(StreamSynchronize(stream) == 0);
-        REQUIRE(MemcpyDtoH(im.mem.data(), p, im.mem.size()) == 0);
-    }
-};
-#endif
 
 struct Diff {
     double max = 0;
@@ -176,7 +121,7 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
 #ifndef _WIN32
     MESSAGE("CUDA host frames are Windows-only: skipped");
 #else
-    FakeCudaHost cuda;
+    fakecuda::FakeCudaHost cuda;
     if (!cuda.start()) {
         MESSAGE("no CUDA (" << cuda.why << "): skipped");
         return;
@@ -237,8 +182,10 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
             const ntscrt_status cs = ntscrt_render_cpu(cpu, &ra, &s, &d);
             REQUIRE_MESSAGE(cs == NTSCRT_OK, ntscrt_last_error(cpu));
 
-            auto dsrc = cuda.upload(src);
-            auto ddst = cuda.upload(out_gpu);
+            auto dsrc = cuda.upload(src.mem.data(), src.mem.size());
+            REQUIRE(dsrc != 0);
+            auto ddst = cuda.upload(out_gpu.mem.data(), out_gpu.mem.size());
+            REQUIRE(ddst != 0);
             ntscrt_host_gpu host{NTSCRT_HOST_GPU_CUDA, cuda.stream};
             ntscrt_gpu_image gs{src.w, src.h, ptrdiff_t(src.pitch), k.f, 1, reinterpret_cast<void *>(dsrc), 0};
             ntscrt_gpu_image gd{W, H, ptrdiff_t(out_gpu.pitch), k.f, 1, reinterpret_cast<void *>(ddst), 0};
@@ -249,7 +196,7 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
                 skipped = true;
             } else {
                 REQUIRE_MESSAGE(gs_st == NTSCRT_OK, ntscrt_last_error(gpu));
-                cuda.download(ddst, out_gpu);
+                REQUIRE(cuda.download(ddst, out_gpu.mem.data(), out_gpu.mem.size()));
                 const Diff df = compare(out_cpu, out_gpu);
                 MESSAGE(std::string(k.name) << " frame " << frame << ": " << std::string(ntscrt_last_timings(gpu)) << "; max diff "
                                << df.max * 255 << "/255, " << df.off << " of " << df.n << " values differ");

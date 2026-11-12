@@ -142,6 +142,11 @@ def read_png(path):
 
 def read_png_channel16(path, c):
     """Channel `c` of a 16-bit RGB / RGBA PNG at full precision (0..65535)."""
+    return read_png16(path, (c,))[0]
+
+
+def read_png16(path, channels=(0, 1, 2)):
+    """Channels of a 16-bit RGB / RGBA PNG at full precision (0..65535), one list each."""
     data = Path(path).read_bytes()
     pos, idat, ihdr = 8, [], None
     while pos < len(data):
@@ -158,7 +163,7 @@ def read_png_channel16(path, c):
     bpp = (3 if ct == 2 else 4) * 2
     stride = w * bpp
     raw = zlib.decompress(b"".join(idat))
-    prev, out, i = bytearray(stride), [], 0
+    prev, outs, i = bytearray(stride), [[] for _ in channels], 0
     for _ in range(h):
         f, line = raw[i], bytearray(raw[i + 1:i + 1 + stride])
         i += 1 + stride
@@ -176,9 +181,10 @@ def read_png_channel16(path, c):
                 p = a + b - cc
                 pa, pb, pc = abs(p - a), abs(p - b), abs(p - cc)
                 line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else cc)) & 255
-        out.extend((line[k] << 8) | line[k + 1] for k in range(c * 2, stride, bpp))
+        for out, c in zip(outs, channels):
+            out.extend((line[k] << 8) | line[k + 1] for k in range(c * 2, stride, bpp))
         prev = line
-    return out
+    return outs
 
 
 def write_png(path, img):
@@ -298,7 +304,10 @@ def start_headless(bundle, log_dir, only=None):
             raise RuntimeError(f"--bundle: {b} is not an NTSCRT.ofx.bundle")
         dev = Path(tempfile.gettempdir()) / "ntscrt-ofx-dev"
         shutil.rmtree(dev, ignore_errors=True)
-        shutil.copytree(b, dev / "NTSCRT.ofx.bundle")
+        # copy, not copy2: a fresh modification time, so Resolve describes the plug-in again instead
+        # of reusing what it cached for the last copy (path, mtime and size). Fusion keeps the GPU
+        # render flags it saw then: an NTSCRT_OFX_GPU=0 session would leave the next one on CPU images.
+        shutil.copytree(b, dev / "NTSCRT.ofx.bundle", copy_function=shutil.copy)
         env["OFX_PLUGIN_PATH"] = str(dev)
         # An installed NTSCRT of the same version would otherwise win over the copy (Resolve keeps
         # one plug-in per id + version): this marks the copy as a dev build that outranks it.
@@ -1173,6 +1182,68 @@ class Suite:
         self.record("speed", "pass", m, "ms per 1920x1080 frame added by NTSCRT; seek/edit/screenloop: the "
                     "plug-in's own time for one frame (informational)")
 
+    def t_gpupath(self):
+        """Frames for the GPU-path A/B (--gpu-ab runs this test once with NTSCRT_OFX_GPU=0 and once
+        with the GPU path, then compares): Fusion comps at 1920x1080 (the default look: ntsc-rs, so the
+        picture comes down once; NTSC off: all on the GPU; Clean CRT; 8-bit and half-float sources;
+        a title over transparency in Clip and Spill mode) and the effect on an Edit-page clip, each
+        delivered as 16-bit PNGs, and the sources without the effect (gpupath-src-*: the A/B checks
+        Resolve gave both sessions the same pictures). Every Fusion tool works in float: with CPU images
+        Fusion hands a plug-in its tools' own depth, with GPU images always float (the int8 / float16
+        cases show that difference). Passes when it rendered; the comparison is --gpu-ab's."""
+        codecs = self.p.GetRenderCodecs("png") or {}
+        codec = next((c for c in codecs.values() if "16" in str(c)), None) or "RGB8"
+        frames = (0, 3) if self.a.quick else (0, 5)
+        made = []
+        fu, _ = self.new_comp("gpupath")
+        src = self.scene(fu, 1920, 1080)
+        tools = [t for t in fu.comp.GetToolList(False).values()
+                 if t.GetAttrs("TOOLS_RegID") in ("Background", "FastNoise", "TextPlus", "Merge")]
+        for t in tools:
+            t.SetInput("Depth", 4)
+        fu.media_out.Input = src.Output
+        made += self.render_timeline(fu.tl, frames, "gpupath-src", codec=codec).values()
+        cases = [("default", {}), ("ntsc-off", {"ntsc_enabled": 0}),
+                 ("clean-crt", {"host_preset": self.look_preset_index("Clean CRT")})]
+        for label, params in cases:
+            fx = self.ntscrt(fu, src, **params)
+            fu.media_out.Input = fx.Output
+            made += self.render_timeline(fu.tl, frames, f"gpupath-{label}", codec=codec).values()
+        for depth, label in ((1, "int8"), (3, "float16")):
+            for t in tools:
+                t.SetInput("Depth", depth)
+            fx = self.ntscrt(fu, src, ntsc_enabled=0)
+            fu.media_out.Input = fx.Output
+            made += self.render_timeline(fu.tl, (2, 3), f"gpupath-{label}", codec=codec).values()
+        for t in tools:
+            t.SetInput("Depth", 4)
+        afu, _ = self.new_comp("gpupath-alpha")
+        bg = afu.add("Background", TopLeftRed=0.2, TopLeftGreen=0.2, TopLeftBlue=0.25, TopLeftAlpha=1, Depth=4)
+        title = self.title(afu, 0.2)
+        title.SetInput("Depth", 4)
+        m = afu.add("Merge", Background=bg, Foreground=title, Depth=4)
+        afu.media_out.Input = m.Output
+        made += self.render_timeline(afu.tl, (1, 2), "gpupath-src-alpha", codec=codec).values()
+        for mode in (0, 1):  # Clip, Spill: the title over a background after the effect
+            fx = self.ntscrt(afu, title, alpha_mode=mode)
+            m = afu.add("Merge", Background=bg, Foreground=fx, Depth=4)
+            afu.media_out.Input = m.Output
+            made += self.render_timeline(afu.tl, (1, 2), f"gpupath-alpha{mode}", codec=codec).values()
+        fx_ids = [e["id"] for e in self.r.GetEffectsList() if "ntscrt" in (e.get("name", "") + e.get("id", "")).lower()]
+        tl = self.new_timeline("gpupath-edit")
+        clip = retry(lambda: tl.InsertFusionCompositionIntoTimeline(), "insert a Fusion composition")
+        cfu = Fu(self, clip.GetFusionCompByIndex(1), tl)
+        cfu.media_out.Input = self.scene(cfu).Output
+        made += self.render_timeline(tl, (0, 3), "gpupath-src-edit", codec=codec).values()
+        if fx_ids and clip.AddEffect("ofx", fx_ids[0]):
+            made += self.render_timeline(tl, (0, 3), "gpupath-edit", codec=codec).values()
+        log = self.plugin_log().read_text(encoding="utf-8", errors="replace") if self.plugin_log().exists() else ""
+        paths = {}
+        for pth in re.findall(r" ms=[\d.]+ (\S+)", log):
+            paths[pth] = paths.get(pth, 0) + 1
+        self.record("gpupath", "pass", {"images": len(made), "codec": codec, "paths": paths},
+                    "frames for --gpu-ab")
+
     BENCH_LOOKS = (("default", None, ""), ("clean-crt", "Clean CRT", ""), ("ntsc-off", "(defaults)", "ntsc_enabled=0"))
     BENCH_SIZES = {"uhd": (3840, 2160), "1080p": (1920, 1080)}
 
@@ -1542,6 +1613,8 @@ class Suite:
                 self.run(name, fn)
             if "bench" in self.a.only:  # long: only when asked for
                 self.run("bench", self.t_bench)
+            if "gpupath" in self.a.only:  # --gpu-ab
+                self.run("gpupath", self.t_gpupath)
         finally:
             self.close()
         return self.report()
@@ -1577,8 +1650,17 @@ def main():
     ap.add_argument("--bench-fps", type=int, default=60, help="bench: project frame rate")
     ap.add_argument("--bench-repeat", type=int, default=1, help="bench: render jobs per look and size")
     ap.add_argument("--bench-label", default="", help="bench: label copied into each JSON line (e.g. the build)")
+    ap.add_argument("--gpu-ab", action="store_true",
+                    help="with --headless: render the gpupath frames with NTSCRT_OFX_GPU=0 (CPU path) and with the GPU "
+                         "path in two Resolve sessions and compare them (docs/dev/HOST-GPU.md tolerance)")
     a = ap.parse_args()
     a.only = {s.strip() for s in a.only.split(",") if s.strip()}
+    if a.gpu_ab:
+        return gpu_ab(a)
+    return run_session(a)
+
+
+def run_session(a):
     if not a.out:
         import tempfile
         a.out = os.path.join(tempfile.gettempdir(), "ntscrt-resolve-tests",
@@ -1623,6 +1705,89 @@ def main():
                 proc.wait(60)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+def gpu_ab(a):
+    """--gpu-ab: the gpupath frames from a CPU-path session and a GPU-path session, compared."""
+    import copy
+    import tempfile
+    if not a.headless:
+        print("--gpu-ab needs --headless (one Resolve session per path)", file=sys.stderr)
+        return 2
+    base = Path(a.out or os.path.join(tempfile.gettempdir(), "ntscrt-resolve-tests",
+                                      datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-gpu-ab"))
+    keep = os.environ.get("NTSCRT_OFX_GPU")
+    dirs = {}
+    try:
+        for label, env in (("cpu", "0"), ("gpu", None)):
+            if env is None:
+                os.environ.pop("NTSCRT_OFX_GPU", None)
+            else:
+                os.environ["NTSCRT_OFX_GPU"] = env
+            sub = copy.copy(a)
+            sub.gpu_ab, sub.only, sub.out = False, {"gpupath"}, str(base / label)
+            dirs[label] = Path(sub.out)
+            os.environ.pop("NTSCRT_OFX_LOG", None)
+            rc = run_session(sub)
+            if rc != 0:
+                print(f"--gpu-ab: the {label} session failed ({rc})", file=sys.stderr)
+                return rc
+    finally:
+        if keep is None:
+            os.environ.pop("NTSCRT_OFX_GPU", None)
+        else:
+            os.environ["NTSCRT_OFX_GPU"] = keep
+    results, worst = [], 0
+    for ref in sorted(dirs["cpu"].glob("gpupath-*.png")):
+        got = dirs["gpu"] / ref.name
+        if not got.exists():
+            results.append({"image": ref.name, "missing": True})
+            continue
+        try:
+            ra, ga = read_png16(ref), read_png16(got)
+            scale = 1
+        except ValueError:  # an 8-bit PNG codec
+            ra = [read_png(ref).channel(c) for c in range(3)]
+            ga = [read_png(got).channel(c) for c in range(3)]
+            scale = 257
+        diffs = [abs(x - y) * scale for ca, cb in zip(ra, ga) for x, y in zip(ca, cb)]
+        mx = max(diffs)
+        off = sum(1 for d in diffs if d > 0)
+        worst = max(worst, mx)
+        results.append({"image": ref.name, "max_diff_of_255": round(mx / 257, 3), "values_differing": off,
+                        "values": len(diffs), "mean_diff_of_255": round(sum(diffs) / len(diffs) / 257, 5)})
+    gpu_log = (dirs["gpu"] / "ntscrt-ofx.log").read_text(encoding="utf-8", errors="replace")
+    cpu_log = (dirs["cpu"] / "ntscrt-ofx.log").read_text(encoding="utf-8", errors="replace")
+    count = lambda t, k: len(re.findall(k, t))  # noqa: E731
+    summary = {"images": len(results), "worst_max_diff_of_255": round(worst / 257, 3),
+               "gpu_session_renders": {"gpu-direct": count(gpu_log, r" path=gpu-direct"),
+                                       "gpu-download": count(gpu_log, r" path=gpu-download"),
+                                       "gpu-cpuconvert": count(gpu_log, r" path=gpu-cpuconvert"),
+                                       "cpu": count(gpu_log, r" path=cpu"), "fallback": count(gpu_log, r"cpu-fallback")},
+               "cpu_session_renders": {"cpu": count(cpu_log, r" path=cpu"), "gpu": count(cpu_log, r" path=gpu-")}}
+    # Informational: the sources themselves (they should match: Resolve rendered the same pictures), and
+    # the int8 / float16 Fusion cases, where the GPU session's plug-in gets float images (Fusion converts
+    # for GPU plug-ins) and so writes a half-float result where the CPU session's writes 8 / 16 bits.
+    for r in results:
+        r["checked"] = not any(r["image"].startswith(p) for p in ("gpupath-src", "gpupath-int8", "gpupath-float16"))
+    problems = [r["image"] for r in results if r["checked"] and (r.get("missing") or r["max_diff_of_255"] > 1.0 + 1e-6 or
+                r["values_differing"] > 0.002 * r["values"])]
+    problems += [f"source {r['image']} differs between the sessions" for r in results
+                 if r["image"].startswith("gpupath-src") and not r.get("missing") and r["max_diff_of_255"] > 0]
+    if summary["gpu_session_renders"]["gpu-direct"] + summary["gpu_session_renders"]["gpu-download"] == 0:
+        problems.append("the GPU session never took the GPU path")
+    if summary["gpu_session_renders"]["cpu"] or summary["gpu_session_renders"]["fallback"]:
+        problems.append("renders of the GPU session got CPU images or fell back to the CPU path")
+    if summary["cpu_session_renders"]["gpu"]:
+        problems.append("the CPU session took the GPU path")
+    doc = {"summary": summary, "problems": problems, "results": results}
+    (base / "gpu-ab.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    print("GPU_AB " + json.dumps(summary))
+    for r in results:
+        print("GPU_AB_IMAGE " + json.dumps(r))
+    print(f"{'FAIL' if problems else 'PASS'} gpu-ab: {', '.join(problems) if problems else 'GPU path matches the CPU path'}"
+          f" -> {base}")
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

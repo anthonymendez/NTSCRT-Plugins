@@ -167,3 +167,13 @@ migrated). NTSCRT-Plugins extensions, all optional:
   `hostparams/src/params.cpp` (scripts that parse it follow); bundled presets can be listed without a core
   instance (`ntscrt::host::bundled_presets_json(resource_dir)`, same JSON as `ntscrt_bundled_presets_json`).
   No ABI change. FxPlug's hidden *Base Look* / *Base Screen Loop* params (ids 8, 9) are kept but no longer read.
+- 2026-11-11, agent R (host GPU frames), `ntscrt.h`: appended `ntscrt_host_gpu_api`, `ntscrt_host_gpu`,
+  `ntscrt_gpu_image`, the status `NTSCRT_ERR_HOST_GPU` (6, a macro so the enum is untouched),
+  `ntscrt_host_gpu_supported`, `ntscrt_render_host_gpu`, `ntscrt_host_gpu_read` / `_write` and
+  `ntscrt_last_timings` (ABI version unchanged: additive; existing functions unchanged). Reason: Resolve hands
+  OpenFX plug-ins CUDA (Windows) / Metal (macOS) images when they ask; rendering them without a trip through CPU
+  memory needs the core to copy GPU to GPU into its own device (docs/dev/HOST-GPU.md). `core/src/ntscrt.cpp`:
+  `render_once` takes an optional direct GPU source (used when no CPU stage is on) and times its phases; the
+  shared renderer and the instance's GPU state are reachable from other façade files through the new private
+  `core/src/facade.h`; `ntscrt_instance` gains the bridge and the phase times. New files only otherwise
+  (`core/src/host_gpu*.{h,cpp,mm}`, `phase_times.h`, `core/src/shaders/hostgpu_*.slang`, `tests/hostgpu/`).

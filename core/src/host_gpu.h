@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "../gpu/gpu.h"
 
@@ -43,6 +44,27 @@ public:
     virtual bool rebind(const ntscrt_host_gpu &host) = 0;
     // Host GPU, for logs ("CUDA: NVIDIA GeForce RTX 5090").
     virtual std::string describe() const = 0;
+
+    // A texture of `d` from this bridge's pool (none of the caller's still holding it),
+    // for the per-frame pictures of the GPU path: no allocation per frame.
+    std::shared_ptr<gpu::Texture> scratch(gpu::Device &dev, const gpu::TextureDesc &d) {
+        for (auto &t : scratch_) {
+            const gpu::TextureDesc &e = t->desc();
+            if (t.use_count() == 1 && e.width == d.width && e.height == d.height && e.format == d.format &&
+                e.shader_write == d.shader_write && e.render_target == d.render_target && scratch_dev_ == &dev)
+                return t;
+        }
+        if (scratch_dev_ != &dev) scratch_.clear();
+        scratch_dev_ = &dev;
+        auto t = dev.create_texture(d);
+        if (scratch_.size() >= 4) scratch_.erase(scratch_.begin());
+        scratch_.push_back(t);
+        return t;
+    }
+
+private:
+    std::vector<std::shared_ptr<gpu::Texture>> scratch_;
+    gpu::Device *scratch_dev_ = nullptr;
 };
 
 // nullptr + err when `api` isn't available in this build / on this machine.

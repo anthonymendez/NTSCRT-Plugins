@@ -202,15 +202,22 @@ bool wrap_padded(OFX::Image &im, const OfxRectI &r, ntscrt_image &out, std::vect
 
 // ---- host GPU frames (OpenFX CUDA / Metal render) ---------------------------
 // NTSCRT_OFX_GPU=0 (or off): don't offer GPU render to the host, so it hands over
-// CPU images as before (A/B tests, a problem with a driver). Read at load.
-bool gpu_render_allowed() {
-    static const bool v = [] {
+// CPU images as before (A/B tests, a problem with a driver). NTSCRT_OFX_GPU=1 also
+// offers Metal on macOS, which is off by default until it has run on a Mac (CUDA is
+// on by default). Read at load.
+int gpu_env() {  // -1 unset, 0 off, 1 on
+    static const int v = [] {
         const char *e = std::getenv("NTSCRT_OFX_GPU");
-        if (!e || !*e) return true;
+        if (!e || !*e) return -1;
         const std::string s(e);
-        return !(s == "0" || s == "off" || s == "OFF" || s == "false");
+        return (s == "0" || s == "off" || s == "OFF" || s == "false") ? 0 : 1;
     }();
     return v;
+}
+bool gpu_render_allowed() { return gpu_env() != 0; }
+bool offer_gpu(ntscrt_host_gpu_api api) {
+    if (gpu_env() == 0 || !ntscrt_host_gpu_supported(api)) return false;
+    return api == NTSCRT_HOST_GPU_CUDA || gpu_env() == 1;
 }
 
 // The host's GPU API for this render, if it handed over GPU images.
@@ -1578,8 +1585,8 @@ void NtscrtFactory::describe(OFX::ImageEffectDescriptor &desc) {
             o << "; host GPU render: CUDA " << h->supportsCudaRender << " (streams " << h->supportsCudaStream
               << "), OpenCL " << h->supportsOpenCLRender << ", Metal " << h->supportsMetalRender
               << "; offered: " << (gpu_render_allowed() ? "" : "none (NTSCRT_OFX_GPU=0)")
-              << (gpu_render_allowed() && ntscrt_host_gpu_supported(NTSCRT_HOST_GPU_CUDA) ? "CUDA" : "")
-              << (gpu_render_allowed() && ntscrt_host_gpu_supported(NTSCRT_HOST_GPU_METAL) ? "Metal" : "");
+              << (offer_gpu(NTSCRT_HOST_GPU_CUDA) ? "CUDA" : "") << (offer_gpu(NTSCRT_HOST_GPU_METAL) ? "Metal" : "")
+              << (gpu_render_allowed() && !offer_gpu(NTSCRT_HOST_GPU_CUDA) && !offer_gpu(NTSCRT_HOST_GPU_METAL) ? "none" : "");
         dlog::write(o.str());
     }
     desc.setLabels("NTSCRT", "NTSCRT", "NTSCRT analog TV / VHS / CRT");
@@ -1613,8 +1620,8 @@ void NtscrtFactory::describe(OFX::ImageEffectDescriptor &desc) {
     // core copies them GPU to GPU into its own D3D11 / Metal device (ntscrt_render_host_gpu,
     // docs/dev/HOST-GPU.md). Not OpenCL: an OpenCL context made by the host can't share
     // the core's textures. NTSCRT_OFX_GPU=0 offers nothing (CPU images, as before 0.5.0).
-    const bool cuda = gpu_render_allowed() && ntscrt_host_gpu_supported(NTSCRT_HOST_GPU_CUDA);
-    const bool metal = gpu_render_allowed() && ntscrt_host_gpu_supported(NTSCRT_HOST_GPU_METAL);
+    const bool cuda = offer_gpu(NTSCRT_HOST_GPU_CUDA);
+    const bool metal = offer_gpu(NTSCRT_HOST_GPU_METAL);  // opt-in (NTSCRT_OFX_GPU=1) until run on a Mac
     desc.setSupportsOpenCLBuffersRender(false);
     desc.setSupportsCudaRender(cuda);
     desc.setSupportsCudaStream(cuda);  // work goes on the host's stream; render returns without waiting

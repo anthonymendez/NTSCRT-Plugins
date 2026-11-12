@@ -20,6 +20,7 @@ Setting one for Resolve:
 | `NTSCRT_SETTINGS_DIR` | a folder | Where both plug-ins keep the *Debug logging for all effects* switch, the file `debug-logging-all-effects.txt` (on while it exists). Default: the log's default folder, `%LOCALAPPDATA%\NTSCRT` (Windows), `~/Library/Logs/NTSCRT` (macOS), and for Final Cut `~/Library/Containers/<NTSCRT Renderer>/Data/Library/Logs/NTSCRT`. Not moved by `NTSCRT_OFX_LOG`. Tests set it so they never touch your own switch (`test_ofx`, `run_resolve_tests.py --headless`). |
 | `NTSCRT_OFX_NO_OPEN` | `1` | *Open logs folder* only logs the press and opens no window (tests, CI). Headless Resolve (`-nogui`) behaves like this anyway. |
 | `NTSCRT_OFX_TEST_PRESET_FILE` | a file path | Testing only, development copies only (`NTSCRT_OFX_DEV_BUNDLE`): while this file exists, each new effect whose Preset menu is *(none)* gets the bundled look its first line names, as if chosen with the playhead at the frame on its second line (third line `guards=1`: with guard keys). Set by `run_resolve_tests.py --headless`; its `position` test writes the file, as scripts can't set OpenFX params on Resolve's Edit page. |
+| `NTSCRT_OFX_GPU` | `0` (or `off`), `1` | `0`: don't offer GPU render to Resolve, so it hands the effect CPU images as before 0.5.0 (the CPU path; for A/B tests or a driver problem). Unset: CUDA is offered on Windows with an NVIDIA driver (Resolve's CUDA mode), frames then stay on the GPU ([docs/dev/HOST-GPU.md](dev/HOST-GPU.md)). `1`: also offer Metal on macOS (off by default until it has run on a Mac). Resolve's Fusion page keeps the choice it saw until the plug-in file changes. |
 | `NTSCRT_OFX_DEV_BUNDLE` | a folder | A plug-in bundle inside this folder reports itself as a development build that outranks any installed NTSCRT of the same version (Resolve keeps one plug-in per id and version). Set by `tests/resolve/run_resolve_tests.py --bundle` and `launch_resolve_dev.ps1`. |
 
 ## Core (both plug-ins and `ntscrt-cli`)
@@ -34,6 +35,7 @@ Setting one for Resolve:
 | `NTSCRT_LIBRASHADER` | a file path | librashader library to try before the one in the bundle. |
 | `NTSCRT_D3D11_WARP` | `1` | Windows: use Microsoft's software renderer (WARP) instead of the GPU. |
 | `NTSCRT_D3D11_NO_FENCE` | set (any value) | Windows: wait for the GPU with a query instead of a Direct3D 11.4 fence. |
+| `NTSCRT_PROFILE` | `1` | Waits for the GPU after each GPU stage so the per-render timings (`in= digital= ntsc= upload= downscale= glitch= crt= out=` on the log line) show each stage's GPU time instead of where the work is waited for. Slows rendering: profiling only. |
 | `NTSCRT_D3D11_NO_BGRA_UAV` | set (any value) | Windows, testing: act as if the GPU can't write BGRA textures from compute shaders. |
 
 ## Final Cut Pro plug-in (not released)
