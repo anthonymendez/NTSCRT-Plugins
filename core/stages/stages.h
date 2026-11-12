@@ -43,6 +43,9 @@ public:
     // In place. Uses ctx.source_at / ctx.look_at for previous frames.
     void process(ImageBGRA8 &inout, const FrameContext &ctx);
     void flush();
+    // Where the last process() call's time went (appended 2026-11-12, digital GPU
+    // work): " digital_ms=scale:..,camera:..,..." for the timings note.
+    std::string profile_note() const;
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };

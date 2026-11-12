@@ -20,7 +20,11 @@
 // "ntsc_gpu_passes" = the default look with the NTSC stages phase 1 of the GPU
 // port lacked turned off (docs/dev/NTSC-GPU.md); "preset:<name>" = the bundled
 // preset presets/<name>.json (e.g. "preset:Mild VHS"); "screenloop:<name>" = the default look with the
-// Screen Loop preset presets/Screen Loop/<name>.json (e.g. "screenloop:7 copies slow luma").
+// Screen Loop preset presets/Screen Loop/<name>.json (e.g. "screenloop:7 copies slow luma");
+// "digital:<id>" = the default look with the Digital video format <id> applied (webcam,
+// video_call, minidv, early_web, cd_rom, datamosh: the Preset menu's "Digital video/..."), its
+// step times (digital_ms in the timings note) in "digital_step_median_ms" / "_mean_ms".
+// NTSCRT_DIGITAL_GPU=0 compares the CPU Digital video with its GPU route (docs/dev/DIGITAL-GPU.md).
 // Run with NTSCRT_NTSC_GPU=0 and without it to compare ntsc-rs with the GPU port
 // (the "ntsc" column is the NTSC stage's share of cpu_stg; "gpu%" the frames
 // that took the GPU route).
@@ -234,6 +238,23 @@ int main(int argc, char **argv) {
                 "luma_noise": false, "chroma_noise": false, "chroma_delay_horizontal": 0,
                 "chroma_delay_vertical": 0, "vhs_edge_wave_enabled": false})");
             for (auto it = off.begin(); it != off.end(); ++it) b.look["ntsc"]["settings"][it.key()] = it.value();
+        } else if (n.rfind("digital:", 0) == 0) {
+            // The default look with a Digital video format applied (the Preset menu's
+            // "Digital video/<name>"; schema digital_formats, by id: webcam, minidv, ...).
+            b = look_from(nullptr);
+            const std::string id = n.substr(8);
+            const json *applies = nullptr;
+            for (const json &f : schema.digital_formats)
+                if (f.value("id", std::string()) == id && f.contains("applies")) applies = &f["applies"];
+            if (!applies) {
+                std::fprintf(stderr, "unknown Digital video format %s\n", id.c_str());
+                return 2;
+            }
+            for (auto it = applies->begin(); it != applies->end(); ++it) {
+                if (it.value().is_object())
+                    for (auto v = it.value().begin(); v != it.value().end(); ++v) set_at(b.look, it.key() + "/" + v.key(), v.value());
+                else set_at(b.look, it.key(), it.value());
+            }
         } else if (n.rfind("screenloop:", 0) == 0) {
             // The default look with the bundled Screen Loop preset presets/Screen Loop/<name>.json
             b = look_from(nullptr);
@@ -294,9 +315,9 @@ int main(int argc, char **argv) {
                 ntscrt_flush_caches(inst);
                 std::vector<double> total;
                 std::vector<ntscrt::testing::PhaseTimes> ph;
-                int failures = 0, gpu_route = 0;
+                int failures = 0, gpu_route = 0, digital_gpu = 0;
                 std::vector<double> tables_ms;
-                std::map<std::string, std::vector<double>> stage_ms;
+                std::map<std::string, std::vector<double>> stage_ms, digital_ms;
                 std::string err;
                 const int64_t first = next_frame;
                 for (int f = 0; f < warmup + frames; ++f) {
@@ -336,6 +357,16 @@ int main(int argc, char **argv) {
                             }
                             for (const auto &kv : frame) stage_ms[kv.first].push_back(kv.second);
                         }
+                        // Digital video: the CPU time of its steps (and with NTSCRT_PROFILE=1 the GPU's).
+                        if (const char *q = std::strstr(tm, " digital_ms=")) {
+                            std::string list(q + 12);
+                            list = list.substr(0, list.find(' '));
+                            for (const std::string &item : split(list)) {
+                                const size_t c = item.rfind(':');
+                                if (c != std::string::npos) digital_ms[item.substr(0, c)].push_back(std::atof(item.c_str() + c + 1));
+                            }
+                        }
+                        if (const char *q = std::strstr(tm, " digital_route=gpu")) (void)q, ++digital_gpu;
                     }
                 }
                 next_frame += warmup + frames + 1000;
@@ -396,6 +427,22 @@ int main(int argc, char **argv) {
                     json sj = json::object();
                     for (auto &kv : stage_ms) sj[kv.first] = std::round(pct(kv.second, 0.5) * 1000) / 1000;
                     j["ntsc_gpu_stage_median_ms"] = sj;
+                }
+                if (!digital_ms.empty()) {
+                    json dj = json::object();
+                    for (auto &kv : digital_ms) dj[kv.first] = std::round(pct(kv.second, 0.5) * 1000) / 1000;
+                    j["digital_step_median_ms"] = dj;
+                    // Means too: at a capture rate below the frame rate most frames code nothing.
+                    json dm = json::object();
+                    for (auto &kv : digital_ms) {
+                        double s = 0;
+                        for (double v : kv.second) s += v;
+                        dm[kv.first] = std::round(s / double(kv.second.size()) * 1000) / 1000;
+                    }
+                    j["digital_step_mean_ms"] = dm;
+                    j["digital_gpu_frames"] = digital_gpu;
+                    pj["digital"] = std::round((r.ph[1] - r.ntsc) * 1000) / 1000;
+                    j["phases_median_ms"] = pj;
                 }
                 if (failures) j["error"] = err;
                 std::printf("JSON %s\n", j.dump().c_str());

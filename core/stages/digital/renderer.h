@@ -125,6 +125,19 @@ public:
 
     int lastRunLength() const { return lastRunLength_; }
 
+    // Where the last process() call's time went (ms of wall time, CPU side;
+    // the façade adds them to the timings note: digital_ms=...). scale: the
+    // current picture to the capture size; earlier: earlier frames fetched and
+    // scaled for a re-run; camera: capture() (optics, sensor, electronics ->
+    // Y'CbCr planes); codec: encode + decode; deblock; upsample: the chroma
+    // upsample and Y'CbCr -> BGRA at the capture size (render() less deblock);
+    // upscale: the capture picture back to the frame's size.
+    struct Profile {
+        double scale = 0, earlier = 0, camera = 0, codec = 0, deblock = 0, upsample = 0, upscale = 0;
+        int captures = 0;  // captures coded (lastRunLength)
+    };
+    const Profile &lastProfile() const { return profile_; }
+
     // Exposed for tests (upstream statics).
     static std::vector<uint8_t> scale(const uint8_t *base, int width, int height, int rowBytes, Size size,
                                       const Settings &optics);
@@ -140,8 +153,9 @@ public:
     static float sensorGain(float medianLuma);
     // The median of the picture's brightness (Y', every other pixel each way), as linear light.
     static float medianLuma(const std::vector<uint8_t> &bgra, int w, int h);
+    // deblock_ms: when given, the deblocking's share of the time is added to it.
     static std::vector<uint8_t> render(const Picture &decoded, const Geometry &g, const Settings &settings,
-                                       float step);
+                                       float step, double *deblock_ms = nullptr);
     static void upscale(const std::vector<uint8_t> &picture, Size size, uint8_t *base, int width, int height,
                         int rowBytes);
 
@@ -184,6 +198,7 @@ private:
     std::vector<std::pair<StreamKey, int>> checkpointOrder_;
     size_t checkpointBytes_ = 0;
     int lastRunLength_ = 0;
+    Profile profile_;
 };
 
 uint64_t seed_mix(uint64_t seed);  // 0 -> 0

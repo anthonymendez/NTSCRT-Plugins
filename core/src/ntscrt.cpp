@@ -658,6 +658,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         if (inst->digital.active(look)) {
             PhaseScope ps(pt, PhaseTimes::Digital);
             inst->digital.process(img, ctx);
+            pt.note += inst->digital.profile_note();
         }
         if (inst->ntsc.active(look)) {
             PhaseScope ps(pt, PhaseTimes::Ntsc);
@@ -878,6 +879,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         if (inst->digital.active(look)) {
             PhaseScope ps(pt, PhaseTimes::Digital);
             inst->digital.process(img, ctx);
+            pt.note += inst->digital.profile_note();
         }
         ctx.line_height = inst->digital.active(look) ? digital::chain_line_height(look) : 1;  // One field
         // The pipeline's 8-bit picture on the GPU: made there from the source

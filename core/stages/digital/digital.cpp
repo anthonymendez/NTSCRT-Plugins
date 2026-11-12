@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include "frames_needed.h"
 #include "migrate.h"
@@ -89,6 +90,16 @@ void DigitalStage::process(ImageBGRA8 &inout, const FrameContext &ctx) {
 }
 
 void DigitalStage::flush() { impl_->renderer.flush(); }
+
+std::string DigitalStage::profile_note() const {
+    const digital::Renderer::Profile &p = impl_->renderer.lastProfile();
+    char b[256];
+    std::snprintf(b, sizeof b,
+                  " digital_ms=scale:%.3f,earlier:%.3f,camera:%.3f,codec:%.3f,deblock:%.3f,upsample:%.3f,upscale:%.3f"
+                  " digital_captures=%d",
+                  p.scale, p.earlier, p.camera, p.codec, p.deblock, p.upsample, p.upscale, p.captures);
+    return b;
+}
 
 namespace digital {
 int64_t first_source_frame(const json &look, double fps, int64_t n, uint64_t seed) {

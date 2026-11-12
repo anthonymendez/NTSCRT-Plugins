@@ -17,6 +17,7 @@
 #include "renderer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -27,6 +28,16 @@
 namespace ntscrt::digital {
 
 static inline float clampf(float v, float lo, float hi) { return std::min(hi, std::max(lo, v)); }
+
+namespace {
+using ProfileClock = std::chrono::steady_clock;
+// Adds the time since `t` to `acc` (ms) and restarts `t`.
+inline void lap(double &acc, ProfileClock::time_point &t) {
+    const auto now = ProfileClock::now();
+    acc += std::chrono::duration<double, std::milli>(now - t).count();
+    t = now;
+}
+}  // namespace
 
 // ---- params ------------------------------------------------------------------------
 
@@ -250,9 +261,12 @@ void Renderer::process(int n, uint8_t *pixels, int width, int height, int rowByt
     Call call{n, structure, timing, geometry, key, settingsAt, earlier, capture, {}, {}};
     const int c = timing.captureOfFrame(n);
     lastRunLength_ = 0;
+    profile_ = {};
+    auto t = ProfileClock::now();
 
     // The current picture at the capture size, scaled once.
     call.current = scale(pixels, width, height, rowBytes, capture, structure);
+    lap(profile_.scale, t);
 
     // The frame rendered again (an edit elsewhere on the timeline re-renders
     // the frame on screen): check every capture of the run. A repeat during
@@ -281,7 +295,10 @@ void Renderer::process(int n, uint8_t *pixels, int width, int height, int rowByt
         rerun(call, c);
     }
 
+    t = ProfileClock::now();
     upscale(shown_, capture, pixels, width, height, rowBytes);
+    lap(profile_.upscale, t);
+    profile_.captures = lastRunLength_;
 }
 
 bool Renderer::runHolds(Call &call, const Run &run, int from, int upTo) {
@@ -327,7 +344,12 @@ void Renderer::rerun(Call &call, int c) {
     if (first > c) {
         // The checkpoint is the frame itself.
         const Settings &s = call.settingsFor(c);
-        shown_ = render(*state_->decoder, call.geometry, s, codec::Steps(s[kQuality], 1).inter);
+        auto t = ProfileClock::now();
+        double deblock = 0;
+        shown_ = render(*state_->decoder, call.geometry, s, codec::Steps(s[kQuality], 1).inter, &deblock);
+        lap(profile_.upsample, t);
+        profile_.upsample -= deblock;
+        profile_.deblock += deblock;
         lastCapture_ = c;
         return;
     }
@@ -345,16 +367,24 @@ void Renderer::rerun(Call &call, int c) {
 
 std::optional<std::vector<uint8_t>> Renderer::earlierCapture(Call &call, int k) {
     if (!call.earlier) return call.current;
+    auto t = ProfileClock::now();
     auto f = call.earlier(call.timing.frameOfCapture(k));
-    if (!f || !f->data || f->width <= 0 || f->height <= 0) return std::nullopt;
-    return scale(f->data, f->width, f->height, f->rowBytes, call.size, call.structure);
+    if (!f || !f->data || f->width <= 0 || f->height <= 0) {
+        lap(profile_.earlier, t);
+        return std::nullopt;
+    }
+    auto out = scale(f->data, f->width, f->height, f->rowBytes, call.size, call.structure);
+    lap(profile_.earlier, t);
+    return out;
 }
 
 void Renderer::advance(Call &call, int k, const std::vector<uint8_t> &source) {
     if (!state_) state_ = std::make_shared<CodecState>(call.geometry);
     if (run_.fps.size() != size_t(k - run_.origin)) run_ = Run{k, {}};  // never: runs are contiguous
     const Settings &settings = call.settingsFor(k);
+    auto t = ProfileClock::now();
     PicturePtr picture = capture(source, call.geometry, settings, k, call.key.seedMix);
+    lap(profile_.camera, t);
     FrameKind kind = call.timing.kind(k, settings.effective(kDatamosh), call.key.seedMix);
     if (kind != FrameKind::IntraOnly && !state_->encoder) kind = FrameKind::Key;
     const codec::FrameSettings frame{settings[kQuality], settings[kFixedBitrate], settings[kDataLoss]};
@@ -363,9 +393,14 @@ void Renderer::advance(Call &call, int k, const std::vector<uint8_t> &source) {
     case CodecKind::DCT: result = codec::step(*state_, picture, kind, k, frame, call.key.seedMix); break;
     case CodecKind::BlockColors: result = {video1::step(*state_, picture, kind, k, frame, call.key.seedMix), 0}; break;
     }
+    lap(profile_.codec, t);
     lastRunLength_ += 1;
     lastCapture_ = k;
-    shown_ = render(*result.picture, call.geometry, settings, result.step);
+    double deblock = 0;
+    shown_ = render(*result.picture, call.geometry, settings, result.step, &deblock);
+    lap(profile_.upsample, t);
+    profile_.upsample -= deblock;
+    profile_.deblock += deblock;
     run_.fps.push_back(settings.fingerprint());
 
     // Checkpoint at keyframes the decoder lost (the only places its history
@@ -801,14 +836,16 @@ PicturePtr Renderer::capture(const std::vector<uint8_t> &bgra, const Geometry &g
 // ---- pixels out ---------------------------------------------------------------------------------
 
 std::vector<uint8_t> Renderer::render(const Picture &decoded, const Geometry &g, const Settings &settings,
-                                      float step) {
+                                      float step, double *deblock_ms) {
     const Picture *picture = &decoded;
     std::optional<Picture> deblocked;
     const double deblocking = settings.effective(kDeblocking);
     if (deblocking > 0) {
+        auto t = ProfileClock::now();
         deblocked.emplace(decoded);
         codec::deblock(*deblocked, deblocking, step);
         picture = &*deblocked;
+        if (deblock_ms) lap(*deblock_ms, t);
     }
     const int w = g.width, h = g.height;
     std::vector<uint8_t> out(size_t(w) * h * 4, 255);
