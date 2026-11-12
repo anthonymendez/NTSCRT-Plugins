@@ -383,6 +383,8 @@ def render_resolve(a, seq, todo, renders):
                         raise RuntimeError("the Screen Loop preset didn't turn Screen Loop on")
                     if e["group"] == "animated":
                         e["keyed_check"] = check_keyed(fx, e)
+                        # keys still arriving during the first render: see make_previews_resolve
+                        mpr.warm_up_keyframes(fu, fx, (0, e["frames"] - 1), renders, e["slug"])
                     fu.capture(fx, (0, e["frames"] - 1), e["slug"])
                     done[e["slug"]] = "resolve"
                     log(f"  {e['name']}: {e['frames']} frames in {time.time() - t0:.1f}s")

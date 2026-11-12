@@ -26,6 +26,9 @@ Tests (see README.md next to this file):
             is pressed if Fusion scripting can press it (only logged, no window, under --headless)
   debugall  "Debug logging for all effects" (button): with the effect's checkbox off, every frame is
             logged in detail while it is on and not after it is off; the switch is left as found
+  bench     (only with --only bench, headless) Edit-page benchmark: render-queue jobs of 300 frames at UHD and
+            1080p, 60 fps, default look / Clean CRT / NTSC off; JSON lines with wall time, the plug-in's
+            ms per render (median, p95), render paths (CPU / GPU) and phase means
   position  Edit-page items an hour into the timeline: the frame ranges Resolve reports, an animated
             look applied there (time, keyframes, first render) plays over the clip like
             ntscrt-cli --timeline (headless with --bundle only)
@@ -139,6 +142,11 @@ def read_png(path):
 
 def read_png_channel16(path, c):
     """Channel `c` of a 16-bit RGB / RGBA PNG at full precision (0..65535)."""
+    return read_png16(path, (c,))[0]
+
+
+def read_png16(path, channels=(0, 1, 2)):
+    """Channels of a 16-bit RGB / RGBA PNG at full precision (0..65535), one list each."""
     data = Path(path).read_bytes()
     pos, idat, ihdr = 8, [], None
     while pos < len(data):
@@ -155,7 +163,7 @@ def read_png_channel16(path, c):
     bpp = (3 if ct == 2 else 4) * 2
     stride = w * bpp
     raw = zlib.decompress(b"".join(idat))
-    prev, out, i = bytearray(stride), [], 0
+    prev, outs, i = bytearray(stride), [[] for _ in channels], 0
     for _ in range(h):
         f, line = raw[i], bytearray(raw[i + 1:i + 1 + stride])
         i += 1 + stride
@@ -173,9 +181,10 @@ def read_png_channel16(path, c):
                 p = a + b - cc
                 pa, pb, pc = abs(p - a), abs(p - b), abs(p - cc)
                 line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else cc)) & 255
-        out.extend((line[k] << 8) | line[k + 1] for k in range(c * 2, stride, bpp))
+        for out, c in zip(outs, channels):
+            out.extend((line[k] << 8) | line[k + 1] for k in range(c * 2, stride, bpp))
         prev = line
-    return out
+    return outs
 
 
 def write_png(path, img):
@@ -280,7 +289,7 @@ def resolve_running():
         return False
 
 
-def start_headless(bundle, log_dir):
+def start_headless(bundle, log_dir, only=None):
     """Start Resolve with -nogui (no windows, so no dialog can block the tests). With `bundle`,
     a copy of that NTSCRT.ofx.bundle is loaded through OFX_PLUGIN_PATH instead of / next to the
     installed one. Returns the Popen."""
@@ -295,7 +304,10 @@ def start_headless(bundle, log_dir):
             raise RuntimeError(f"--bundle: {b} is not an NTSCRT.ofx.bundle")
         dev = Path(tempfile.gettempdir()) / "ntscrt-ofx-dev"
         shutil.rmtree(dev, ignore_errors=True)
-        shutil.copytree(b, dev / "NTSCRT.ofx.bundle")
+        # copy, not copy2: a fresh modification time, so Resolve describes the plug-in again instead
+        # of reusing what it cached for the last copy (path, mtime and size). Fusion keeps the GPU
+        # render flags it saw then: an NTSCRT_OFX_GPU=0 session would leave the next one on CPU images.
+        shutil.copytree(b, dev / "NTSCRT.ofx.bundle", copy_function=shutil.copy)
         env["OFX_PLUGIN_PATH"] = str(dev)
         # An installed NTSCRT of the same version would otherwise win over the copy (Resolve keeps
         # one plug-in per id + version): this marks the copy as a dev build that outranks it.
@@ -305,6 +317,8 @@ def start_headless(bundle, log_dir):
     # shell's NTSCRT_DEBUG_LOG doesn't turn detailed logging on behind the debug tests' back.
     env.setdefault("NTSCRT_SETTINGS_DIR", str(log_dir))
     env.pop("NTSCRT_DEBUG_LOG", None)
+    if "bench" in (only or ()):
+        env["NTSCRT_OFX_LOG_VERBOSE"] = "1"  # every render's ms and path, for the bench
     # The "position" test's switch: while this file exists the dev copy applies the look it names to
     # new effects (scripts can't set OpenFX params on the Edit page).
     env["NTSCRT_OFX_TEST_PRESET_FILE"] = str(Path(log_dir) / "test-preset.txt")
@@ -1168,6 +1182,176 @@ class Suite:
         self.record("speed", "pass", m, "ms per 1920x1080 frame added by NTSCRT; seek/edit/screenloop: the "
                     "plug-in's own time for one frame (informational)")
 
+    def t_gpupath(self):
+        """Frames for the GPU-path A/B (--gpu-ab runs this test once with NTSCRT_OFX_GPU=0 and once
+        with the GPU path, then compares): Fusion comps at 1920x1080 (the default look: ntsc-rs, so the
+        picture comes down once; NTSC off: all on the GPU; Clean CRT; 8-bit and half-float sources;
+        a title over transparency in Clip and Spill mode) and the effect on an Edit-page clip, each
+        delivered as 16-bit PNGs, and the sources without the effect (gpupath-src-*: the A/B checks
+        Resolve gave both sessions the same pictures). Every Fusion tool works in float: with CPU images
+        Fusion hands a plug-in its tools' own depth, with GPU images always float (the int8 / float16
+        cases show that difference). Passes when it rendered; the comparison is --gpu-ab's."""
+        codecs = self.p.GetRenderCodecs("png") or {}
+        codec = next((c for c in codecs.values() if "16" in str(c)), None) or "RGB8"
+        frames = (0, 3) if self.a.quick else (0, 5)
+        made = []
+        fu, _ = self.new_comp("gpupath")
+        src = self.scene(fu, 1920, 1080)
+        tools = [t for t in fu.comp.GetToolList(False).values()
+                 if t.GetAttrs("TOOLS_RegID") in ("Background", "FastNoise", "TextPlus", "Merge")]
+        for t in tools:
+            t.SetInput("Depth", 4)
+        fu.media_out.Input = src.Output
+        made += self.render_timeline(fu.tl, frames, "gpupath-src", codec=codec).values()
+        cases = [("default", {}), ("ntsc-off", {"ntsc_enabled": 0}),
+                 ("clean-crt", {"host_preset": self.look_preset_index("Clean CRT")})]
+        for label, params in cases:
+            fx = self.ntscrt(fu, src, **params)
+            fu.media_out.Input = fx.Output
+            made += self.render_timeline(fu.tl, frames, f"gpupath-{label}", codec=codec).values()
+        for depth, label in ((1, "int8"), (3, "float16")):
+            for t in tools:
+                t.SetInput("Depth", depth)
+            fx = self.ntscrt(fu, src, ntsc_enabled=0)
+            fu.media_out.Input = fx.Output
+            made += self.render_timeline(fu.tl, (2, 3), f"gpupath-{label}", codec=codec).values()
+        for t in tools:
+            t.SetInput("Depth", 4)
+        afu, _ = self.new_comp("gpupath-alpha")
+        bg = afu.add("Background", TopLeftRed=0.2, TopLeftGreen=0.2, TopLeftBlue=0.25, TopLeftAlpha=1, Depth=4)
+        title = self.title(afu, 0.2)
+        title.SetInput("Depth", 4)
+        m = afu.add("Merge", Background=bg, Foreground=title, Depth=4)
+        afu.media_out.Input = m.Output
+        made += self.render_timeline(afu.tl, (1, 2), "gpupath-src-alpha", codec=codec).values()
+        for mode in (0, 1):  # Clip, Spill: the title over a background after the effect
+            fx = self.ntscrt(afu, title, alpha_mode=mode)
+            m = afu.add("Merge", Background=bg, Foreground=fx, Depth=4)
+            afu.media_out.Input = m.Output
+            made += self.render_timeline(afu.tl, (1, 2), f"gpupath-alpha{mode}", codec=codec).values()
+        fx_ids = [e["id"] for e in self.r.GetEffectsList() if "ntscrt" in (e.get("name", "") + e.get("id", "")).lower()]
+        tl = self.new_timeline("gpupath-edit")
+        clip = retry(lambda: tl.InsertFusionCompositionIntoTimeline(), "insert a Fusion composition")
+        cfu = Fu(self, clip.GetFusionCompByIndex(1), tl)
+        cfu.media_out.Input = self.scene(cfu).Output
+        made += self.render_timeline(tl, (0, 3), "gpupath-src-edit", codec=codec).values()
+        if fx_ids and clip.AddEffect("ofx", fx_ids[0]):
+            made += self.render_timeline(tl, (0, 3), "gpupath-edit", codec=codec).values()
+        log = self.plugin_log().read_text(encoding="utf-8", errors="replace") if self.plugin_log().exists() else ""
+        paths = {}
+        for pth in re.findall(r" ms=[\d.]+ (\S+)", log):
+            paths[pth] = paths.get(pth, 0) + 1
+        self.record("gpupath", "pass", {"images": len(made), "codec": codec, "paths": paths},
+                    "frames for --gpu-ab")
+
+    BENCH_LOOKS = (("default", None, ""), ("clean-crt", "Clean CRT", ""), ("ntsc-off", "(defaults)", "ntsc_enabled=0"))
+    BENCH_SIZES = {"uhd": (3840, 2160), "1080p": (1920, 1080)}
+
+    def t_bench(self):
+        """Edit-page benchmark (only with --only bench, headless): for each size in --bench-sizes a
+        project of its own made at that size and --bench-fps (a project's settings are set before it
+        has timelines; timelines' resolutions are never changed), one timeline per look with a Fusion
+        composition clip (animated gradient + noise + title at the timeline's size) and NTSCRT added
+        to it (the look through the dev copy's test preset file), rendered by one render-queue job of
+        --bench-frames frames. Also the clip without the effect (base). Prints one JSON line per run
+        ("BENCH {...}"): wall time, the plug-in's own ms per render (median / p95, from the verbose
+        log: NTSCRT_OFX_LOG_VERBOSE=1 is set by --headless with --only bench), the paths renders took
+        and the mean of each phase (ntscrt_last_timings; NTSCRT_PROFILE=1 in the environment separates
+        GPU phases). Informational: never fails on speed."""
+        if not self.a.headless:
+            return self.record("bench", "skip", notes="needs --headless (its own projects, verbose plug-in log)")
+        fx_ids = [e["id"] for e in self.r.GetEffectsList() if "ntscrt" in (e.get("name", "") + e.get("id", "")).lower()]
+        if not fx_ids:
+            return self.record("bench", "fail", notes="NTSCRT isn't in Resolve's effect list")
+        log = self.plugin_log()
+        preset_file = os.environ["NTSCRT_OFX_TEST_PRESET_FILE"]
+        pm = self.r.GetProjectManager()
+        n = self.a.bench_frames
+        results = []
+        for size in [s for s in self.a.bench_sizes.split(",") if s]:
+            w, h = self.BENCH_SIZES[size]
+            name = f"NTSCRT Resolve Bench {size}"
+            pm.SaveProject()
+            if name in (pm.GetProjectListInCurrentFolder() or []):
+                pm.DeleteProject(name)
+            p = retry(lambda: pm.CreateProject(name), f"create project {name}")
+            for k, v in (("timelineResolutionWidth", str(w)), ("timelineResolutionHeight", str(h)),
+                         ("timelineFrameRate", str(self.a.bench_fps)), ("timelinePlaybackFrameRate", str(self.a.bench_fps))):
+                p.SetSetting(k, v)
+            mp = p.GetMediaPool()
+            codecs = p.GetRenderCodecs("mp4") or {}
+            codec = next((c for d, c in codecs.items() if "NVIDIA" in d and "264" in d), None) or \
+                next((c for d, c in codecs.items() if "264" in d), None)
+            fmt = ("mp4", codec) if codec else ("png", "RGB8")
+            variants = [("base", None, "")] + list(self.BENCH_LOOKS)
+            for label, look, opts in variants:
+                for rep in range(self.a.bench_repeat):
+                    retry(lambda: self.r.OpenPage("edit"), "open the Edit page")
+                    tl = retry(lambda: mp.CreateEmptyTimeline(f"bench {label} {rep} {self.run_id}"), "create a timeline")
+                    retry(lambda: p.SetCurrentTimeline(tl), "switch timeline")
+                    clips = []
+                    while sum(c.GetDuration() for c in clips) < n:  # comp clips are a few seconds long
+                        c = retry(lambda: tl.InsertFusionCompositionIntoTimeline(), "insert a Fusion composition")
+                        cfu = Fu(self, c.GetFusionCompByIndex(1), tl)
+                        cfu.media_out.Input = self.scene(cfu, w, h).Output
+                        clips.append(c)
+                    mark = self.log_size(log)
+                    if label != "base":
+                        for c in clips:
+                            if look:
+                                Path(preset_file).write_text(f"{look}\n0\n{opts}\n", encoding="utf-8")
+                            try:
+                                if not c.AddEffect("ofx", fx_ids[0]):
+                                    raise RuntimeError("AddEffect refused")
+                            finally:
+                                if look:
+                                    os.remove(preset_file)
+                    start = tl.GetStartFrame()
+                    retry(lambda: p.SetCurrentRenderFormatAndCodec(*fmt), "set the render format")
+                    retry(lambda: p.SetRenderSettings({
+                        "SelectAllFrames": False, "MarkIn": start, "MarkOut": start + n - 1, "TargetDir": str(self.out),
+                        "CustomName": f"bench-{size}-{label}-{rep}", "FormatWidth": w, "FormatHeight": h}),
+                        "set render settings")
+                    job = retry(lambda: p.AddRenderJob(), "add a render job")
+                    t0 = time.time()
+                    retry(lambda: p.StartRendering([job], False), "start rendering")
+                    while p.IsRenderingInProgress():
+                        if time.time() - t0 > 1800:
+                            raise RuntimeError("bench render took over 30 minutes")
+                        time.sleep(0.05)
+                    wall = time.time() - t0
+                    st = p.GetRenderJobStatus(job) or {}
+                    p.DeleteRenderJob(job)
+                    time.sleep(0.5)
+                    text = self.log_since_rotated(log, mark)
+                    ms, paths, phases = [], {}, {}
+                    for m in re.finditer(r" render #\d+ t=\S+ .*? ms=([\d.]+)(?: (\S+))?([^\r\n]*)", text):
+                        ms.append(float(m.group(1)))
+                        path = m.group(2) if m.group(2) and not m.group(2).startswith("look=") else "path=?"
+                        paths[path] = paths.get(path, 0) + 1
+                        for k, v in re.findall(r" (in|digital|ntsc|upload|downscale|glitch|crt|loop|readback|out)=([\d.]+)", m.group(3)):
+                            phases.setdefault(k, []).append(float(v))
+                    ms.sort()
+                    q = lambda f: round(ms[min(len(ms) - 1, int(f * len(ms)))], 2) if ms else None  # noqa: E731
+                    row = {"bench": self.a.bench_label, "size": f"{w}x{h}", "fps": self.a.bench_fps, "look": label,
+                           "repeat": rep, "frames": n, "job": st.get("JobStatus"), "codec": "/".join(fmt),
+                           "wall_s": round(wall, 2), "renders": len(ms), "ms_median": q(0.5), "ms_p95": q(0.95),
+                           "paths": {k.replace("path=", ""): v for k, v in paths.items()},
+                           "phase_mean_ms": {k: round(sum(v) / len(v), 2) for k, v in phases.items()},
+                           "profile": bool(os.environ.get("NTSCRT_PROFILE")),
+                           "gpu_env": os.environ.get("NTSCRT_OFX_GPU", "")}
+                    print("BENCH " + json.dumps(row), flush=True)
+                    results.append(row)
+        (self.out / "bench.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
+        self.record("bench", "pass", {"runs": len(results)}, "see BENCH lines / bench.jsonl")
+
+    def log_since_rotated(self, p, offset):
+        """log_since, following one rotation (the plug-in's log moves to *.old.log at 1 MB)."""
+        if self.log_size(p) >= offset:
+            return self.log_since(p, offset)
+        old = p.with_name(p.stem + ".old" + p.suffix)
+        return self.log_since(old, offset) + self.log_since(p, 0)
+
     def screenloop_seek_cost(self, fu, src):
         """Screen Loop on (default look; the Bottom to top loop: zoomed in, auto exposure): a new
         instance renders frame 140, 141, then back to 125 and 100, then 141 again. Resolve renders
@@ -1427,6 +1611,10 @@ class Suite:
                              ("sizes", self.t_sizes), ("speed", self.t_speed), ("debug", self.t_debug),
                              ("debugall", self.t_debugall), ("position", self.t_position)):
                 self.run(name, fn)
+            if "bench" in self.a.only:  # long: only when asked for
+                self.run("bench", self.t_bench)
+            if "gpupath" in self.a.only:  # --gpu-ab
+                self.run("gpupath", self.t_gpupath)
         finally:
             self.close()
         return self.report()
@@ -1457,8 +1645,25 @@ def main():
     ap.add_argument("--headless", action="store_true",
                     help="start Resolve with -nogui for the run and quit it afterwards (Resolve must be closed)")
     ap.add_argument("--bundle", help="with --headless: test this NTSCRT.ofx.bundle without installing it")
+    ap.add_argument("--bench-frames", type=int, default=300, help="bench: frames per render job")
+    ap.add_argument("--bench-sizes", default="uhd,1080p", help="bench: comma-separated uhd, 1080p")
+    ap.add_argument("--bench-fps", type=int, default=60, help="bench: project frame rate")
+    ap.add_argument("--bench-repeat", type=int, default=1, help="bench: render jobs per look and size")
+    ap.add_argument("--bench-label", default="", help="bench: label copied into each JSON line (e.g. the build)")
+    ap.add_argument("--gpu-ab", action="store_true",
+                    help="with --headless: render the gpupath frames with NTSCRT_OFX_GPU=0 (CPU path) and with the GPU "
+                         "path in two Resolve sessions and compare them (docs/dev/HOST-GPU.md tolerance)")
+    ap.add_argument("--ab-modes", default="cpu,gpu",
+                    help="--gpu-ab: the two sessions (cpu or gpu each); cpu,cpu / gpu,gpu measure Resolve's own "
+                         "session-to-session noise")
     a = ap.parse_args()
     a.only = {s.strip() for s in a.only.split(",") if s.strip()}
+    if a.gpu_ab:
+        return gpu_ab(a)
+    return run_session(a)
+
+
+def run_session(a):
     if not a.out:
         import tempfile
         a.out = os.path.join(tempfile.gettempdir(), "ntscrt-resolve-tests",
@@ -1469,7 +1674,7 @@ def main():
             Path(a.out).mkdir(parents=True, exist_ok=True)
             r = None
             for attempt in (1, 2):  # Resolve's script server occasionally fails to start: retry once
-                proc = start_headless(a.bundle, a.out)
+                proc = start_headless(a.bundle, a.out, a.only)
                 end = time.time() + 180
                 while not r and time.time() < end and proc.poll() is None:  # Resolve takes a while to start
                     time.sleep(3)
@@ -1503,6 +1708,94 @@ def main():
                 proc.wait(60)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+def gpu_ab(a):
+    """--gpu-ab: the gpupath frames from a CPU-path session and a GPU-path session, compared."""
+    import copy
+    import tempfile
+    if not a.headless:
+        print("--gpu-ab needs --headless (one Resolve session per path)", file=sys.stderr)
+        return 2
+    base = Path(a.out or os.path.join(tempfile.gettempdir(), "ntscrt-resolve-tests",
+                                      datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "-gpu-ab"))
+    keep = os.environ.get("NTSCRT_OFX_GPU")
+    dirs = {}
+    try:
+        modes = [m.strip() for m in a.ab_modes.split(",")][:2]
+        sessions = [(("cpu" if m == "cpu" else "gpu") + ("2" if i and m == modes[0] else ""), "0" if m == "cpu" else None)
+                    for i, m in enumerate(modes)]
+        for label, env in sessions:
+            if env is None:
+                os.environ.pop("NTSCRT_OFX_GPU", None)
+            else:
+                os.environ["NTSCRT_OFX_GPU"] = env
+            sub = copy.copy(a)
+            sub.gpu_ab, sub.only, sub.out = False, {"gpupath"}, str(base / label)
+            dirs[label] = Path(sub.out)
+            os.environ.pop("NTSCRT_OFX_LOG", None)
+            rc = run_session(sub)
+            if rc != 0:
+                print(f"--gpu-ab: the {label} session failed ({rc})", file=sys.stderr)
+                return rc
+    finally:
+        if keep is None:
+            os.environ.pop("NTSCRT_OFX_GPU", None)
+        else:
+            os.environ["NTSCRT_OFX_GPU"] = keep
+    first, second = sessions[0][0], sessions[1][0]
+    results, worst = [], 0
+    for ref in sorted(dirs[first].glob("gpupath-*.png")):
+        got = dirs[second] / ref.name
+        if not got.exists():
+            results.append({"image": ref.name, "missing": True})
+            continue
+        try:
+            ra, ga = read_png16(ref), read_png16(got)
+            scale = 1
+        except ValueError:  # an 8-bit PNG codec
+            ra = [read_png(ref).channel(c) for c in range(3)]
+            ga = [read_png(got).channel(c) for c in range(3)]
+            scale = 257
+        diffs = [abs(x - y) * scale for ca, cb in zip(ra, ga) for x, y in zip(ca, cb)]
+        mx = max(diffs)
+        off = sum(1 for d in diffs if d > 0)
+        worst = max(worst, mx)
+        results.append({"image": ref.name, "max_diff_of_255": round(mx / 257, 3), "values_differing": off,
+                        "values": len(diffs), "mean_diff_of_255": round(sum(diffs) / len(diffs) / 257, 5)})
+    gpu_log = (dirs[second] / "ntscrt-ofx.log").read_text(encoding="utf-8", errors="replace")
+    cpu_log = (dirs[first] / "ntscrt-ofx.log").read_text(encoding="utf-8", errors="replace")
+    count = lambda t, k: len(re.findall(k, t))  # noqa: E731
+    summary = {"images": len(results), "worst_max_diff_of_255": round(worst / 257, 3),
+               "gpu_session_renders": {"gpu-direct": count(gpu_log, r" path=gpu-direct"),
+                                       "gpu-download": count(gpu_log, r" path=gpu-download"),
+                                       "gpu-cpuconvert": count(gpu_log, r" path=gpu-cpuconvert"),
+                                       "cpu": count(gpu_log, r" path=cpu"), "fallback": count(gpu_log, r"cpu-fallback")},
+               "cpu_session_renders": {"cpu": count(cpu_log, r" path=cpu"), "gpu": count(cpu_log, r" path=gpu-")}}
+    # Informational: the sources themselves (they should match: Resolve rendered the same pictures), and
+    # the int8 / float16 Fusion cases, where the GPU session's plug-in gets float images (Fusion converts
+    # for GPU plug-ins) and so writes a half-float result where the CPU session's writes 8 / 16 bits.
+    for r in results:
+        r["checked"] = not any(r["image"].startswith(p) for p in ("gpupath-src", "gpupath-int8", "gpupath-float16"))
+    problems = [r["image"] for r in results if r["checked"] and (r.get("missing") or r["max_diff_of_255"] > 1.0 + 1e-6 or
+                r["values_differing"] > 0.002 * r["values"])]
+    problems += [f"source {r['image']} differs between the sessions" for r in results
+                 if r["image"].startswith("gpupath-src") and not r.get("missing") and r["max_diff_of_255"] > 0]
+    summary["sessions"] = [first, second]
+    if second.startswith("gpu") and summary["gpu_session_renders"]["gpu-direct"] + summary["gpu_session_renders"]["gpu-download"] == 0:
+        problems.append("the GPU session never took the GPU path")
+    if second.startswith("gpu") and (summary["gpu_session_renders"]["cpu"] or summary["gpu_session_renders"]["fallback"]):
+        problems.append("renders of the GPU session got CPU images or fell back to the CPU path")
+    if first.startswith("cpu") and summary["cpu_session_renders"]["gpu"]:
+        problems.append("the CPU session took the GPU path")
+    doc = {"summary": summary, "problems": problems, "results": results}
+    (base / "gpu-ab.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    print("GPU_AB " + json.dumps(summary))
+    for r in results:
+        print("GPU_AB_IMAGE " + json.dumps(r))
+    print(f"{'FAIL' if problems else 'PASS'} gpu-ab: {', '.join(problems) if problems else 'GPU path matches the CPU path'}"
+          f" -> {base}")
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

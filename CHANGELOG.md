@@ -21,6 +21,14 @@ Installs are now checked against the release's checksums. Still Resolve-only: th
 written but not yet built.
 
 ### Added
+- **Frames stay on the GPU in Resolve on NVIDIA GPUs (Windows):** the effect now takes Resolve's frames in GPU
+  memory (CUDA) instead of having Resolve copy each one to the CPU and back. With ntsc-rs off (e.g. *Clean CRT*)
+  nothing goes through the CPU any more; with it on (the default look) only the 8-bit picture ntsc-rs works on
+  comes down. A UHD render of *Clean CRT* went from 12 s to under 3 s for 300 frames (as fast as without the
+  effect), the default look from 28 s to 22 s (ntsc-rs's CPU time is the rest). Same pictures as before, bit
+  for bit; on the Fusion page, 8-bit and half-float comps now get the CRT shader's
+  half-float result. AMD / Intel GPUs and macOS keep using CPU frames; `NTSCRT_OFX_GPU=0` turns it off
+  (docs/ENVIRONMENT.md). The plug-in's log says which path each frame took.
 - **Animated presets:** choosing *Glitch pop*, *15 second glitches* or another bundled look with upstream
   timeline keys now plays its animation. The keys become keyframes, evaluated as the NTSCRT app does (easing,
   step snapping, held toggles): on each moving control a key where its curve bends (Resolve draws straight lines
@@ -117,6 +125,23 @@ written but not yet built.
   JSON is parsed once (the host sends the same text for every frame of an unanimated look), the history of
   other frames' looks is bounded, and upload / output / Glitch textures are reused across frames. Output is
   unchanged.
+- Faster frames on large pictures, picture unchanged (byte for byte): the result is converted straight from the
+  GPU's read-back memory, in bands that overlap the transfer, instead of being copied into a buffer first;
+  frames that no CPU stage touches (NTSC signal, Digital video, crop and Screen Loop off, as in *Clean CRT*) go
+  from the host picture straight into the GPU's upload memory; the pixel conversions use SIMD on Windows (same
+  rounding as before) and write the host picture with streaming stores; the frame's picture buffers are kept
+  between frames. In the transfer benchmark a UHD float frame of *Clean CRT* takes ~8 ms instead of ~21 ms,
+  the default look ~55 ms instead of ~69 ms (most of it is the NTSC signal), 1080p *Clean CRT* ~2.1 ms instead
+  of ~4.8 ms (median of 300 frames; Ryzen 9 9950X3D, RTX 5090). `NTSCRT_FAST_TRANSFER=0` brings back the old
+  path for comparison.
+- **Rendering speed in Resolve, both of the above together** (300-frame render-queue jobs, Windows, RTX 5090,
+  Ryzen 9 9950X3D, Resolve Studio 21.1.2 in CUDA mode; time the effect adds over the same job without it,
+  median of 3-5 runs): UHD default look 83 -> 55 ms per frame (the faster transfers alone 70, GPU frames
+  alone 60); UHD *Clean CRT* and NTSC off 32 -> nothing measurable (transfers alone 15; the job takes as long as
+  without the effect, to Resolve's half-second job timing); 1080p default look 23 -> 18 ms, *Clean CRT* 12 -> 3 ms. On the GPU path the faster
+  transfers still help where the frame comes down to the CPU (the 8-bit picture for ntsc-rs, titles in
+  *Clip* mode); AMD / Intel GPUs and macOS, which get CPU frames, get the faster transfers. Pictures are
+  the same as 0.5.0-rc.3's, byte for byte on the CPU path.
 - **Screen Loop seeks:** the loop keeps checkpoints of what it has rendered (every 30 frames and at each window
   start, within 256 MB of GPU memory per effect, `NTSCRT_SCREENLOOP_CHECKPOINT_MB`), so a jump back, or to a
   frame near one rendered before, resumes from the closest one instead of re-running the loop from its window
@@ -207,6 +232,23 @@ written but not yet built.
   settings.
 
 ### Developer
+- `make_previews_resolve.py` / `make_presets_gallery.py` render an animated preset's frames once and throw them
+  away before the real capture: Resolve takes the keyframes the plug-in writes in pieces during the first
+  render, so frames rendered before the last piece kept a half-keyed look (V Hold glitch differed from
+  `ntscrt-cli` in about two runs of three, on v0.5.0-rc.3 too, CPU and GPU path alike).
+- `test_ofx` keeps its log, "debug logging for all effects" switch and preset files in names of its own per
+  process: copies running at once (two build dirs' ctest, parallel agents) failed each other's log and switch
+  checks (in 4 parallel copies, every run failed; now none of 20).
+- Host GPU frames (docs/dev/HOST-GPU.md): `ntscrt_render_host_gpu`, `ntscrt_host_gpu_read` / `_write`,
+  `ntscrt_host_gpu_supported` and `ntscrt_last_timings` in the C ABI (additions only). CUDA images are copied
+  GPU to GPU into the core's D3D11 device (textures registered with the host's CUDA context; the driver API is
+  loaded from `nvcuda.dll`, no CUDA toolkit); Metal written, compiled in CI, offered only with
+  `NTSCRT_OFX_GPU=1` until it has run on a Mac. Every log line has the render's path and phases
+  (`NTSCRT_PROFILE=1` separates GPU phases). Tests: `test_host_gpu` and `test_ofx` act as CUDA hosts and
+  compare against the CPU path (skipped without an NVIDIA driver); `run_resolve_tests.py --gpu-ab` compares a
+  CPU-path and a GPU-path Resolve session; `--only bench` is an Edit-page benchmark (300-frame render jobs, UHD
+  and 1080p, JSON lines). The Resolve runner copies the bundle with a fresh modification time so Resolve
+  describes it again.
 - Tests for long timelines: `test_ofx` applies *5 second blips* an hour into a 60 fps timeline on a mock
   Adjustment Clip (Resolve's made-up 0..1999 range) and on a clip starting at frame 216000 (keyframes, apply
   time, first render, Glitch edit, playback and seeks against renders after a purge), compares the edits an hour
@@ -258,6 +300,12 @@ written but not yet built.
   has system requirements, known issues, a Licence section and macOS build steps; docs/ENVIRONMENT.md lists
   every environment variable; docs/dev/UPSTREAM-SYNC.md says how to sync with a later upstream release; the
   agent working notes moved to `docs/dev/` (`AGENTS.md`, `CONTRACT-CHANGES.md`).
+- `bench_transfer` (tests/core, run by hand): 300 frames after 30 warm-up as an OpenFX host renders them
+  (bottom-up premultiplied buffers, frames in order), UHD and 1080p, 32-bit float / 16-bit / 8-bit, for the
+  default look, *Clean CRT* and the default look with NTSC off; median / p95 and where the time goes (convert
+  in, CPU stages, upload, GPU stages, readback, convert out) as a table and one JSON line per case; `--dump`
+  writes the frames to compare builds byte for byte. The GPU HAL gains `write` / `read` (zero-copy upload,
+  banded readback; docs/dev/CONTRACT-CHANGES.md).
 - Tests for debug logging for all effects: `test_hostparams` (the shared switch: location, polling, one report
   per change across threads), `test_ofx` (button, status line, detailed renders, a change made outside the
   host) and the Resolve test `debugall`; the mock-host and headless Resolve tests keep the switch in their own

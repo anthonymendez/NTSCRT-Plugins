@@ -18,6 +18,11 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 using nlohmann::json;
 namespace fs = std::filesystem;
@@ -26,9 +31,19 @@ namespace {
 // Before the plug-in loads (it reads these once): keep the test runs out of the user's
 // log and their "Debug logging for all effects" switch (NTSCRT_SETTINGS_DIR: a fresh, empty
 // folder), never open a file-manager window from "Open logs folder".
-const fs::path kSettingsDir = fs::temp_directory_path() / "ntscrt_ofx_test_settings";
+// Per process (the process id in the names): copies of test_ofx running at once (ctest
+// runs of several build dirs, parallel agents) would otherwise share one log and one switch
+// file, and fail each other's log and switch checks.
+std::string pid_suffix() {
+#ifdef _WIN32
+    return std::to_string(_getpid());
+#else
+    return std::to_string(getpid());
+#endif
+}
+const fs::path kSettingsDir = fs::temp_directory_path() / ("ntscrt_ofx_test_settings-" + pid_suffix());
 const fs::path kLogFile = [] {
-    fs::path p = fs::temp_directory_path() / "ntscrt_ofx_test.log";
+    fs::path p = fs::temp_directory_path() / ("ntscrt_ofx_test-" + pid_suffix() + ".log");
     std::error_code ec;
     fs::remove(p, ec);
     fs::remove_all(kSettingsDir, ec);
@@ -50,6 +65,14 @@ const fs::path kLogFile = [] {
     return p;
 }();
 const fs::path kSwitchFile = kSettingsDir / "debug-logging-all-effects.txt";
+// This process's files go when it ends (best effort: the plug-in may still hold the log).
+struct RemoveTestFiles {
+    ~RemoveTestFiles() {
+        std::error_code ec;
+        fs::remove_all(kSettingsDir, ec);
+        fs::remove(kLogFile, ec);
+    }
+} remove_test_files;
 std::string read_log() {
     std::ifstream f(kLogFile);
     std::stringstream ss;
@@ -285,7 +308,7 @@ TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
     }
 
     SUBCASE("save and load preset files") {
-        fs::path tmp = fs::temp_directory_path() / "ntscrt_ofx_test_preset.json";
+        fs::path tmp = fs::temp_directory_path() / ("ntscrt_ofx_test_preset-" + pid_suffix() + ".json");
         f.param("downscale_width")->v[0] = 256;
         auto u8 = tmp.u8string();
         f.param("host_preset_file")->str = std::string(u8.begin(), u8.end());
@@ -313,7 +336,7 @@ TEST_CASE("instance: presets, preset files, dependents, pass-through render") {
         REQUIRE(f.changed("host_preset") == kOfxStatOK);
         CHECK(dbg->v[0] == 1);
         CHECK(dbg->sets == 0);
-        fs::path tmp = fs::temp_directory_path() / "ntscrt_ofx_test_preset2.json";
+        fs::path tmp = fs::temp_directory_path() / ("ntscrt_ofx_test_preset2-" + pid_suffix() + ".json");
         auto u8 = tmp.u8string();
         f.param("host_preset_file")->str = std::string(u8.begin(), u8.end());
         REQUIRE(f.changed("host_save_preset") == kOfxStatOK);
@@ -994,8 +1017,8 @@ TEST_CASE("presets: timeline keyframes, menus with applies, save/load round trip
     }
 
     SUBCASE("Save writes upstream JSON with the Screen Loop settings; Load restores the same look") {
-        fs::path tmp = fs::temp_directory_path() / "ntscrt_ofx_roundtrip.json";
-        fs::path side = fs::temp_directory_path() / "ntscrt_ofx_roundtrip (Screen Loop).json";
+        fs::path tmp = fs::temp_directory_path() / ("ntscrt_ofx_roundtrip-" + pid_suffix() + ".json");
+        fs::path side = fs::temp_directory_path() / ("ntscrt_ofx_roundtrip-" + pid_suffix() + " (Screen Loop).json");
         fs::remove(side);
         auto u8 = tmp.u8string();
         f.param("host_preset_file")->str = std::string(u8.begin(), u8.end());
@@ -1454,4 +1477,135 @@ TEST_CASE("debug logging for all effects: button, status, renders, outside chang
     CHECK(count(added, " debug render #") == 0);
     REQUIRE(f.host.action(f.plug, kOfxActionBeginInstanceEdit, f.inst.get()) != kOfxStatFailed);
     CHECK(status->str == "off");
+}
+
+// ---- GPU render: the host hands over CUDA device memory ------------------------------------
+// The mock host as a CUDA host (fake_cuda_host.h: device memory of the primary context, a
+// non-blocking stream): the same frames rendered with CPU images and with GPU images match
+// (tolerance of docs/dev/HOST-GPU.md: every value within 1/255, at most 0.2% different at all).
+// Float images only (the mock host's format); tests/hostgpu covers 8-bit and half float.
+// Skipped without an NVIDIA driver / CUDA device (CI).
+#include <ofxGPURender.h>
+
+#include "../hostgpu/fake_cuda_host.h"
+
+namespace {
+struct GpuCase {
+    const char *name;
+    std::vector<std::pair<const char *, double>> params;  // schema id -> value
+    int alpha = 0;            // 0 opaque, 1 straight blob, 2 premultiplied blob (transparent corners)
+    double scale = 1.0;       // render scale (the host's images shrink with it)
+    bool small_window = false;  // render window inside the frame
+};
+
+// Renders frames 0..2 of `c` with CPU images (gpu null) or GPU images; returns the outputs
+// and the log lines the renders added.
+std::vector<std::vector<float>> render_case(const GpuCase &c, std::shared_ptr<mock::GpuMemory> gpu, void *stream,
+                                            std::string &log) {
+    ProtoFixture f;
+    f.host.gpu = gpu;
+    mock::Clip &s = f.src(), &d = *f.inst->clips[kOfxImageEffectOutputClipName];
+    const int w = int(f.w * c.scale), h = int(f.h * c.scale);
+    s.width = d.width = w;
+    s.height = d.height = h;
+    s.any_frame.resize(size_t(w) * h * 4);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float *p = &s.any_frame[(size_t(y) * w + x) * 4];
+            const float dx = (x - w * 0.5f) / (w * 0.5f), dy = (y - h * 0.5f) / (h * 0.5f);
+            const float a = c.alpha ? std::clamp(1.6f - 1.4f * std::sqrt(dx * dx + dy * dy), 0.f, 1.f) : 1.f;
+            p[0] = x / float(w - 1);
+            p[1] = y / float(h - 1);
+            p[2] = float((x / 8 + y / 8) % 2) * 0.8f + 0.1f;
+            p[3] = a;
+            if (c.alpha == 2)
+                for (int k = 0; k < 3; ++k) p[k] *= a;
+        }
+    d.any_frame.assign(s.any_frame.size(), 0.f);
+    s.props.set(kOfxImageEffectPropPreMultiplication,
+                {std::string(c.alpha == 2 ? kOfxImagePreMultiplied : kOfxImageUnPreMultiplied)});
+    for (auto &[id, v] : c.params) f.set(id, v);
+    const size_t mark = read_log().size();
+    std::vector<std::vector<float>> outs;
+    for (int t = 0; t < 3; ++t) {
+        mock::PropSet in;
+        in.set(kOfxPropTime, {double(t)});
+        in.set(kOfxImageEffectPropFieldToRender, {std::string(kOfxImageFieldNone)});
+        if (c.small_window) in.set(kOfxImageEffectPropRenderWindow, {5, 4, w - 7, h - 3});
+        else in.set(kOfxImageEffectPropRenderWindow, {0, 0, w, h});
+        in.set(kOfxImageEffectPropRenderScale, {c.scale, c.scale});
+        in.set(kOfxImageEffectPropSequentialRenderStatus, {1});
+        in.set(kOfxImageEffectPropInteractiveRenderStatus, {0});
+        in.set(kOfxImageEffectPropRenderQualityDraft, {0});
+        if (gpu) {
+            in.set(kOfxImageEffectPropCudaEnabled, {1});
+            in.set(kOfxImageEffectPropCudaStream, {stream});
+        }
+        REQUIRE(f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in) == kOfxStatOK);
+        outs.push_back(f.out);
+    }
+    log = read_log().substr(mark);
+    return outs;
+}
+}  // namespace
+
+TEST_CASE("GPU render (fake CUDA host) matches the CPU render") {
+    {
+        Fixture f;  // the plug-in offers CUDA to a host that supports it (unless NTSCRT_OFX_GPU=0)
+        const char *e = std::getenv("NTSCRT_OFX_GPU");
+        if (ntscrt_host_gpu_supported(NTSCRT_HOST_GPU_CUDA) && !(e && std::string(e) == "0"))
+            CHECK(f.desc.props.s("OfxImageEffectPropCudaRenderSupported") == "true");
+    }
+#ifndef _WIN32
+    MESSAGE("CUDA host frames are Windows-only: skipped");
+#else
+    fakecuda::FakeCudaHost cuda;
+    if (!cuda.start()) {
+        MESSAGE("no CUDA (" << cuda.why << "): skipped");
+        return;
+    }
+    auto gpu = std::make_shared<mock::GpuMemory>();
+    gpu->up = [&](const std::vector<float> &px) {
+        return reinterpret_cast<void *>(cuda.upload(px.data(), px.size() * sizeof(float)));
+    };
+    gpu->down = [&](void *p, std::vector<float> &px) {
+        REQUIRE(cuda.download(reinterpret_cast<fakecuda::FakeCudaHost::CUdeviceptr>(p), px.data(),
+                              px.size() * sizeof(float)));
+    };
+    gpu->free = [&](void *p) { cuda.MemFree(reinterpret_cast<fakecuda::FakeCudaHost::CUdeviceptr>(p)); };
+    const GpuCase cases[] = {
+        {"default look (NTSC on)", {}},
+        {"NTSC off", {{"ntsc.enabled", 0}}},
+        {"NTSC off, premultiplied blob, Clip", {{"ntsc.enabled", 0}}, 2},
+        {"NTSC off, straight blob, Spill", {{"ntsc.enabled", 0}, {"alpha.mode", 1}}, 1},
+        {"default look, premultiplied blob, Spill", {{"alpha.mode", 1}}, 2},
+        {"NTSC off, render scale 0.5", {{"ntsc.enabled", 0}}, 0, 0.5},
+        {"default look, render window smaller than the frame", {}, 0, 1.0, true},
+        {"Digital video on (temporal fetches from GPU images)", {{"ntsc.enabled", 0}, {"digital.enabled", 1}}},
+    };
+    for (const GpuCase &c : cases) {
+        const std::string name = c.name;
+        CAPTURE(name);
+        std::string cpu_log, gpu_log;
+        auto ref = render_case(c, nullptr, nullptr, cpu_log);
+        auto got = render_case(c, gpu, cuda.stream, gpu_log);
+        CHECK(cpu_log.find("path=cpu") != std::string::npos);
+        CHECK(gpu_log.find("path=gpu-") != std::string::npos);
+        CHECK(gpu_log.find("cpu-fallback") == std::string::npos);
+        for (size_t k = 0; k < ref.size(); ++k) {
+            REQUIRE(ref[k].size() == got[k].size());
+            double worst = 0;
+            size_t off = 0;
+            for (size_t i = 0; i < ref[k].size(); ++i) {
+                const double e = std::fabs(double(ref[k][i]) - got[k][i]);
+                worst = std::max(worst, e);
+                off += e > 1e-5;
+            }
+            MESSAGE(name << " frame " << k << ": max diff " << worst * 255 << "/255, " << off << " of "
+                         << ref[k].size() << " values differ");
+            CHECK(worst <= 1.0 / 255 + 1e-5);
+            CHECK(double(off) <= 0.002 * double(ref[k].size()));
+        }
+    }
+#endif
 }

@@ -142,11 +142,24 @@ def render_in_resolve(r, a, seq, renders, looks):
                 if refused:
                     log(f"  {name}: Fusion refused {len(refused)} inputs: {', '.join(refused[:8])}...")
             t0 = time.time()
+            if menu_index is not None and animated(look):
+                warm_up_keyframes(fu, fx, (start, start + GIF_FRAMES - 1), renders, name)
             fu.capture(fx, (start, start + GIF_FRAMES - 1), name)
             log(f"  {name}: frames {start}-{start + GIF_FRAMES - 1} rendered in {time.time() - t0:.1f}s")
         return s.r.GetVersionString(), s.version
     finally:
         s.close()
+
+
+def warm_up_keyframes(fu, fx, frames, renders, name):
+    """Render a just-chosen animated preset's frames once and throw them away. Resolve takes the keyframes
+    the plug-in writes in pieces while the first render runs (the plug-in logs "keyframes changed without a
+    param change notification"), and frames rendered before the last piece keep a half-keyed look: in
+    v0.5.0-rc.3 as since, on the CPU and the GPU path alike, V Hold glitch differed from ntscrt-cli in
+    about two runs out of three. The second render has all the keys."""
+    fu.capture(fx, frames, f"{name}-warmup")
+    for p in Path(renders).glob(f"{name}-warmup-*.png"):
+        p.unlink()
 
 
 def animated(look):

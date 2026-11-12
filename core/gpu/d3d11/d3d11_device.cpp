@@ -196,7 +196,7 @@ public:
         auto &dt = as(t);
         const int w = dt.d.width, h = dt.d.height, bpp = bytes_per_pixel(dt.d.format);
         const size_t tight = size_t(w) * bpp;
-        Staging st = take_staging(dt);
+        Staging st = take_staging(dt, h, false);
         ID3D11Texture2D *staging = st.tex.Get();
         {
             Lock lock(context_mutex());
@@ -225,6 +225,133 @@ public:
         }
         ctx_->Unmap(staging, 0);
         give_staging(std::move(st));
+    }
+
+    // Through a staging texture of its own (CPU write): mapped without waiting
+    // when one isn't still being copied from, filled by `fn` without the
+    // context lock, then copied into `t` on the GPU.
+    void write(Texture &t, const WriteFn &fn) override {
+        auto &dt = as(t);
+        if (dt.swap_rb()) {
+            Device::write(t, fn);
+            return;
+        }
+        const int h = dt.d.height;
+        std::vector<Staging> busy;  // still being copied from: tried, given back after
+        Staging st;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        auto give_busy = [&] {
+            for (auto &b : busy) give_staging(std::move(b));
+            busy.clear();
+        };
+        try {
+            for (;;) {
+                // At most three tries; then a new one, or (three busy) wait for the first.
+                st = take_staging(dt, h, true, busy.size() < 3);
+                if (!st.tex) {
+                    st = std::move(busy.front());
+                    busy.erase(busy.begin());
+                    Lock lock(context_mutex());
+                    check(ctx_->Map(st.tex.Get(), 0, D3D11_MAP_WRITE, 0, &m), "Map(upload staging)");
+                    break;
+                }
+                Lock lock(context_mutex());
+                HRESULT hr = ctx_->Map(st.tex.Get(), 0, D3D11_MAP_WRITE, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+                if (SUCCEEDED(hr)) break;
+                if (hr != DXGI_ERROR_WAS_STILL_DRAWING) check(hr, "Map(upload staging)");
+                busy.push_back(std::move(st));
+            }
+        } catch (...) {
+            if (st.tex) give_staging(std::move(st));
+            give_busy();
+            throw;
+        }
+        give_busy();
+        try {
+            fn(static_cast<uint8_t *>(m.pData), ptrdiff_t(m.RowPitch));
+        } catch (...) {
+            {
+                Lock lock(context_mutex());
+                ctx_->Unmap(st.tex.Get(), 0);
+            }
+            give_staging(std::move(st));
+            throw;
+        }
+        {
+            Lock lock(context_mutex());
+            ctx_->Unmap(st.tex.Get(), 0);
+            ctx_->CopyResource(dt.tex.Get(), st.tex.Get());
+        }
+        give_staging(std::move(st));
+    }
+
+    // Bands of rows, each copied into a staging texture of its own with a
+    // fence value signalled after it: band k is mapped and handed to `fn` as
+    // soon as its copy is done, while the GPU copies the next ones. Without
+    // fences: one band, after finish().
+    void read(const Texture &t, const ReadFn &fn, int bands) override {
+        auto &dt = as(t);
+        if (dt.swap_rb()) {
+            Device::read(t, fn, bands);
+            return;
+        }
+        const int w = dt.d.width, h = dt.d.height;
+        if (!fence_) bands = 1;
+        bands = std::clamp(bands, 1, std::max(1, h));
+        const int band_h = (h + bands - 1) / bands;
+        bands = (h + band_h - 1) / band_h;
+        struct Band {
+            Staging st;
+            int y0 = 0, y1 = 0;
+            uint64_t fence = 0;
+        };
+        std::vector<Band> b(static_cast<size_t>(bands));
+        auto give_all = [&] {
+            for (auto &x : b)
+                if (x.st.tex) give_staging(std::move(x.st));
+        };
+        try {
+            for (int k = 0; k < bands; ++k) {
+                Band &x = b[size_t(k)];
+                x.y0 = k * band_h;
+                x.y1 = std::min(h, (k + 1) * band_h);
+                x.st = take_staging(dt, x.y1 - x.y0, false);
+            }
+            {
+                Lock lock(context_mutex());
+                for (auto &x : b) {
+                    D3D11_BOX box{0, UINT(x.y0), 0, UINT(w), UINT(x.y1), 1};
+                    ctx_->CopySubresourceRegion(x.st.tex.Get(), 0, 0, 0, 0, dt.tex.Get(), 0, &box);
+                    if (fence_) {
+                        x.fence = ++fence_value_;
+                        ctx4_->Signal(fence_.Get(), x.fence);
+                    }
+                }
+                ctx_->Flush();
+            }
+            if (!fence_) finish();
+            for (auto &x : b) {
+                if (fence_) wait_fence(x.fence);
+                D3D11_MAPPED_SUBRESOURCE m{};
+                {
+                    Lock lock(context_mutex());
+                    check(ctx_->Map(x.st.tex.Get(), 0, D3D11_MAP_READ, 0, &m), "Map(staging)");
+                }
+                struct Unmapper {
+                    D3D11Device *d;
+                    ID3D11Texture2D *t;
+                    ~Unmapper() {
+                        Lock lock(d->context_mutex());
+                        d->ctx_->Unmap(t, 0);
+                    }
+                } unmap{this, x.st.tex.Get()};
+                fn(static_cast<const uint8_t *>(m.pData), ptrdiff_t(m.RowPitch), x.y0, x.y1);
+            }
+        } catch (...) {
+            give_all();
+            throw;
+        }
+        give_all();
     }
 
     void upload(Buffer &b, const void *data, size_t bytes, size_t offset) override {
@@ -373,16 +500,7 @@ public:
                 ctx4_->Signal(fence_.Get(), v);
                 ctx_->Flush();
             }
-            if (fence_->GetCompletedValue() < v) {
-                HANDLE ev = wait_event();
-                check(fence_->SetEventOnCompletion(v, ev), "ID3D11Fence::SetEventOnCompletion");
-                // (re-checked: a registration left from an earlier, abandoned
-                // wait may set the event early)
-                while (fence_->GetCompletedValue() < v && dev_->GetDeviceRemovedReason() == S_OK)
-                    WaitForSingleObject(ev, 200);
-            }
-            if (dev_->GetDeviceRemovedReason() != S_OK)
-                throw std::runtime_error(hr_msg("D3D11 device removed", dev_->GetDeviceRemovedReason()));
+            wait_fence(v);
             return;
         }
         ComPtr<ID3D11Query> q = take_query();
@@ -410,6 +528,20 @@ public:
             else Sleep(1);
         }
         give_query(std::move(q));
+    }
+
+    // Blocks until the GPU has passed fence value v (signalled and flushed).
+    void wait_fence(uint64_t v) {
+        if (fence_->GetCompletedValue() < v) {
+            HANDLE ev = wait_event();
+            check(fence_->SetEventOnCompletion(v, ev), "ID3D11Fence::SetEventOnCompletion");
+            // (re-checked: a registration left from an earlier, abandoned
+            // wait may set the event early)
+            while (fence_->GetCompletedValue() < v && dev_->GetDeviceRemovedReason() == S_OK)
+                WaitForSingleObject(ev, 200);
+        }
+        if (dev_->GetDeviceRemovedReason() != S_OK)
+            throw std::runtime_error(hr_msg("D3D11 device removed", dev_->GetDeviceRemovedReason()));
     }
 
     bool lost() const override { return dev_->GetDeviceRemovedReason() != S_OK; }
@@ -536,14 +668,16 @@ private:
         if (queries_.size() < 16) queries_.push_back(std::move(q));
     }
 
-    // Staging textures are checked out for one download (another thread's
-    // download may not reuse one between its copy and its map).
+    // Staging textures are checked out for one download / upload (another
+    // thread's may not reuse one between its copy and its map). `rows`: the
+    // height (a band of the texture); `cpu_write`: an upload one. With
+    // create false and none idle: an empty Staging instead of a new one.
     struct Staging {
-        std::tuple<int, int, int> key;
+        std::tuple<int, int, int, int> key;
         ComPtr<ID3D11Texture2D> tex;
     };
-    Staging take_staging(const D3DTexture &t) {
-        auto key = std::make_tuple(t.d.width, t.d.height, int(t.phys));
+    Staging take_staging(const D3DTexture &t, int rows, bool cpu_write, bool create = true) {
+        auto key = std::make_tuple(t.d.width, rows, int(t.phys), int(cpu_write));
         {
             std::lock_guard<std::mutex> lock(staging_mu_);
             auto it = staging_.find(key);
@@ -553,22 +687,23 @@ private:
                 return s;
             }
         }
+        if (!create) return Staging{key, nullptr};
         D3D11_TEXTURE2D_DESC td{};
         td.Width = UINT(t.d.width);
-        td.Height = UINT(t.d.height);
+        td.Height = UINT(rows);
         td.MipLevels = 1;
         td.ArraySize = 1;
         td.Format = t.phys;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_STAGING;
-        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        td.CPUAccessFlags = cpu_write ? D3D11_CPU_ACCESS_WRITE : D3D11_CPU_ACCESS_READ;
         Staging s{key, nullptr};
         check(dev_->CreateTexture2D(&td, nullptr, &s.tex), "CreateTexture2D(staging)");
         return s;
     }
     void give_staging(Staging s) {
         std::lock_guard<std::mutex> lock(staging_mu_);
-        if (staging_.size() >= 16) staging_.clear();  // sizes keep changing: start over
+        if (staging_.size() >= 48) staging_.clear();  // sizes keep changing: start over
         staging_.emplace(s.key, std::move(s.tex));
     }
 
@@ -606,7 +741,7 @@ private:
     bool warp_ = false;
     std::unordered_map<std::string, std::unique_ptr<D3DKernel>> kernels_;
     std::mutex staging_mu_;
-    std::multimap<std::tuple<int, int, int>, ComPtr<ID3D11Texture2D>> staging_;  // idle ones
+    std::multimap<std::tuple<int, int, int, int>, ComPtr<ID3D11Texture2D>> staging_;  // idle ones
     ID3D11ShaderResourceView *null_srvs_[16] = {};
     ID3D11UnorderedAccessView *null_uavs_[16] = {};
 };

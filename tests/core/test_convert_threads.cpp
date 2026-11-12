@@ -90,6 +90,64 @@ TEST_CASE("pixel conversions give the same bytes on 1 thread and on many") {
     digital::set_thread_count(0);
 }
 
+TEST_CASE("SIMD conversion kernels give the same bytes as the scalar code") {
+    if (!detail::simd()) {
+        MESSAGE("no SIMD kernels on this CPU / build: nothing to compare");
+        return;
+    }
+    // Sources with every half bit pattern / special floats mixed in.
+    auto specials = [](ntscrt_pixel_format f, std::vector<uint8_t> px) {
+        std::mt19937 rng(7);
+        const float sp[] = {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity(), -0.f, 1e-40f, 0.99999994f, 1.0000001f,
+                            0.5f / 255.f, 1e30f, -1e30f};
+        for (size_t i = 0; i < px.size() / 64; ++i) {
+            const size_t at = (rng() % (px.size() / 4)) * 4;
+            if (f == NTSCRT_RGBA32F) std::memcpy(&px[at], &sp[rng() % 10], 4);
+            else if (f == NTSCRT_RGBA16F) {
+                const uint16_t h = uint16_t(i * 40503u);  // walks all bit patterns
+                std::memcpy(&px[at - at % 2], &h, 2);
+            }
+        }
+        return px;
+    };
+    for (ntscrt_pixel_format f : {NTSCRT_RGBA8, NTSCRT_BGRA8, NTSCRT_RGBA16, NTSCRT_RGBA16F, NTSCRT_RGBA32F})
+        for (bool with_alpha : {false, true})
+            for (AlphaMode mode : {AlphaMode::Clip, AlphaMode::Spill})
+                for (bool premult : {false, true}) {
+                    CAPTURE(int(f));
+                    CAPTURE(with_alpha);
+                    CAPTURE(int(mode));
+                    CAPTURE(premult);
+                    const auto src_px = specials(f, source(f == NTSCRT_BGRA8 ? NTSCRT_RGBA8 : f, with_alpha));
+                    const size_t bpp = src_px.size() / (size_t(W) * H);
+                    ntscrt_image src{W, H, ptrdiff_t(W * bpp), f, const_cast<uint8_t *>(src_px.data())};
+                    std::vector<uint16_t> half(size_t(W) * H * 4);
+                    for (size_t i = 0; i < half.size(); ++i) half[i] = uint16_t(i * 40503u);  // every pattern, NaN too
+                    struct R {
+                        std::vector<uint8_t> bgra, host8, hosth;
+                        std::vector<float> alpha;
+                    } r[2];
+                    for (int k = 0; k < 2; ++k) {
+                        detail::set_simd(k == 1);
+                        ImageBGRA8 img;
+                        to_bgra8(src, img, &r[k].alpha, mode, premult);
+                        r[k].bgra = img.px;
+                        std::vector<uint8_t> dst(src_px.size());
+                        ntscrt_image d{W, H, ptrdiff_t(W * bpp), f, dst.data()};
+                        from_bgra8(img, &r[k].alpha, d, mode, premult);
+                        r[k].host8 = dst;
+                        from_rgba16f(half.data(), W, H, &r[k].alpha, d, mode, premult);
+                        r[k].hosth = dst;
+                    }
+                    detail::set_simd(true);
+                    CHECK(r[0].bgra == r[1].bgra);
+                    CHECK(std::memcmp(r[0].alpha.data(), r[1].alpha.data(), r[0].alpha.size() * 4) == 0);
+                    CHECK(r[0].host8 == r[1].host8);
+                    CHECK(r[0].hosth == r[1].hosth);
+                }
+}
+
 namespace {
 uint8_t ref_q8(float v) { return uint8_t(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); }
 uint16_t ref_q16(float v) { return uint16_t(std::lround(std::clamp(v, 0.f, 1.f) * 65535.f)); }

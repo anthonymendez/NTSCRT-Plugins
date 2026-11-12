@@ -56,6 +56,17 @@ struct ParamSet {
 struct Image {
     PropSet props;
     std::vector<float> px;  // RGBA32F, bottom-up rows
+    void *dev = nullptr;    // GPU copy handed to the plug-in (Host::gpu set), else null
+    bool output = false;
+};
+
+// A host handing images over in GPU memory (OpenFX CUDA render): each fetched image
+// is copied to the GPU (`up`, returns its device address, the image's kOfxImagePropData),
+// output images are copied back (`down`) before Host::on_release sees them, then freed.
+struct GpuMemory {
+    std::function<void *(const std::vector<float> &)> up;
+    std::function<void(void *, std::vector<float> &)> down;
+    std::function<void(void *)> free;
 };
 
 struct Clip {
@@ -99,6 +110,8 @@ public:
     // Answer of the image-effect suite's abort() (default: never abort); `aborts` counts calls.
     std::function<int()> on_abort;
     long abort_calls = 0;
+    // Set: images are in GPU memory (tests set kOfxImageEffectPropCudaEnabled on renders).
+    std::shared_ptr<GpuMemory> gpu;
 
 private:
     void *lib_ = nullptr;

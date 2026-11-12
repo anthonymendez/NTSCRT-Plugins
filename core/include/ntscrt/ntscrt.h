@@ -205,6 +205,87 @@ NTSCRT_API ntscrt_status ntscrt_source_frames_needed(const ntscrt_render_args *a
 /* Human-readable message for the last non-OK status on this instance. */
 NTSCRT_API const char *ntscrt_last_error(ntscrt_instance *inst);
 
+/* ---- host GPU frames (OpenFX CUDA / Metal render) ------------------------
+ * Hosts that hand the effect images in their own GPU memory (OpenFX
+ * kOfxImageEffectPropCudaEnabled / ...MetalEnabled) render them without a
+ * trip through CPU memory: the core copies the host's buffer into its own
+ * GPU device (D3D11 / Metal, which must be on the same GPU), converts, runs
+ * the GPU stages there and writes the result back into the host's buffer.
+ * Stages that run on the CPU (ntsc-rs, Digital video, Screen Loop's NTSC
+ * passes) still need the picture in CPU memory: it comes down once, as the
+ * 8-bit picture those stages work on. Output matches ntscrt_render_cpu on the
+ * same pixels (docs/dev/HOST-GPU.md states the tolerance). */
+
+typedef enum ntscrt_host_gpu_api {
+    NTSCRT_HOST_GPU_NONE = 0,
+    NTSCRT_HOST_GPU_CUDA = 1,   /* Windows: CUDA device pointers, D3D11 core device on the same GPU */
+    NTSCRT_HOST_GPU_METAL = 2,  /* macOS: id<MTLBuffer>, Metal core device = the queue's device */
+    NTSCRT_HOST_GPU_OPENCL = 3  /* not supported (see docs/dev/HOST-GPU.md): always NTSCRT_ERR_HOST_GPU */
+} ntscrt_host_gpu_api;
+
+/* The host's GPU queue for this render call. CUDA: queue = CUstream /
+ * cudaStream_t (NULL = the default stream of the context current on the
+ * calling thread). Metal: queue = id<MTLCommandQueue>. Work is enqueued on
+ * it; ntscrt_render_host_gpu doesn't wait for the final copy (CUDA) unless
+ * the stream is NULL. */
+typedef struct ntscrt_host_gpu {
+    ntscrt_host_gpu_api api;
+    void *queue;
+} ntscrt_host_gpu;
+
+/* An image in the host's GPU memory, rows `row_bytes` (> 0) apart.
+ * data: CUDA device pointer of the first byte of the first row in memory, or
+ * id<MTLBuffer> (Metal), the image starting `offset` bytes into it (CUDA:
+ * added to data). bottom_up = 1: the first row in memory is the picture's
+ * BOTTOM row (OpenFX). Formats: RGBA32F, RGBA16F, RGBA8. */
+typedef struct ntscrt_gpu_image {
+    int32_t width;
+    int32_t height;
+    ptrdiff_t row_bytes;
+    ntscrt_pixel_format format;
+    int32_t bottom_up;
+    void *data;
+    size_t offset;
+} ntscrt_gpu_image;
+
+/* Returned by the host GPU functions when that path can't be used here
+ * (API not compiled in or not supported, no core GPU device, core device on
+ * another GPU than the host's, unsupported format, driver error). dst is NOT
+ * written: render through ntscrt_host_gpu_read / ntscrt_render_cpu /
+ * ntscrt_host_gpu_write instead. ntscrt_last_error says why. */
+#define NTSCRT_ERR_HOST_GPU ((ntscrt_status)6)
+
+/* 1 if this build can take host GPU frames of `api` (CUDA on Windows, Metal on
+ * macOS); whether a given host/device pair works shows at render time. */
+NTSCRT_API int32_t ntscrt_host_gpu_supported(ntscrt_host_gpu_api api);
+
+/* Renders like ntscrt_render_cpu with both images on the host's GPU. The
+ * output frame is dst (width x height); src sits in it with its first column
+ * at x = src_x and its first row in memory at row src_y of dst's memory
+ * order; frame pixels src doesn't cover count as transparent black (as an
+ * OpenFX source smaller than the output, e.g. a Fusion title's bounding box).
+ * fetch_source still returns CPU images: hosts read other frames with
+ * ntscrt_host_gpu_read. Statuses as ntscrt_render_cpu (degraded frames are
+ * complete), plus NTSCRT_ERR_HOST_GPU (nothing written). */
+NTSCRT_API ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_args *args,
+                                                const ntscrt_host_gpu *host, const ntscrt_gpu_image *src,
+                                                int32_t src_x, int32_t src_y, const ntscrt_gpu_image *dst);
+
+/* Copies a host GPU image to / from CPU memory (same format and size; dst /
+ * src rows as ntscrt_image, top row first, row_bytes may be negative) and
+ * waits for the copy. For temporal fetches and the CPU fallback. */
+NTSCRT_API ntscrt_status ntscrt_host_gpu_read(ntscrt_instance *inst, const ntscrt_host_gpu *host,
+                                              const ntscrt_gpu_image *src, ntscrt_image *dst);
+NTSCRT_API ntscrt_status ntscrt_host_gpu_write(ntscrt_instance *inst, const ntscrt_host_gpu *host,
+                                               const ntscrt_image *src, const ntscrt_gpu_image *dst);
+
+/* Where the last render on this instance spent its time, for debug logs:
+ * "path=<cpu|gpu-direct|gpu-download|gpu-cpuconvert> in=.. digital=.. ntsc=.. upload=.. downscale=.. glitch=..
+ * crt=.. out=.." (ms, only the phases that ran). GPU phases are only separated
+ * when NTSCRT_PROFILE=1 (it waits for the GPU after each, which slows
+ * rendering); otherwise GPU work shows up in the phase that waits for it. */
+NTSCRT_API const char *ntscrt_last_timings(ntscrt_instance *inst);
+
 #ifdef __cplusplus
 }
 #endif

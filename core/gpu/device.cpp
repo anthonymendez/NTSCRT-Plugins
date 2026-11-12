@@ -55,6 +55,21 @@ const ShaderEntry *find_shader(std::string_view name, const ShaderFile **file_ou
 
 const char *Device::last_create_error() { return create_error().c_str(); }
 
+// Fallbacks over upload / download, through a buffer of the caller's.
+void Device::write(Texture &t, const WriteFn &fn) {
+    const ptrdiff_t tight = ptrdiff_t(t.desc().width) * bytes_per_pixel(t.desc().format);
+    std::vector<uint8_t> tmp(size_t(tight) * size_t(t.desc().height));
+    fn(tmp.data(), tight);
+    upload(t, tmp.data(), tight);
+}
+
+void Device::read(const Texture &t, const ReadFn &fn, int) {
+    const ptrdiff_t tight = ptrdiff_t(t.desc().width) * bytes_per_pixel(t.desc().format);
+    std::vector<uint8_t> tmp(size_t(tight) * size_t(t.desc().height));
+    download(t, tmp.data(), tight);
+    fn(tmp.data(), tight, 0, t.desc().height);
+}
+
 std::unique_ptr<Device> Device::create(Backend backend, void *native_device, void *native_queue) {
     ntscrt_shaders_anchor_ntscrt_core();
     std::string err;

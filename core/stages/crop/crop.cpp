@@ -153,6 +153,8 @@ void Crop::apply(const json &look, const ImageBGRA8 &in, ImageBGRA8 &out) {
     else if (&out != &in) out = in;
 }
 
+bool Crop::cuts(const json &look, int width, int height) { return cut_rect(look, width, height).has_value(); }
+
 void Crop::apply(const json &look, ImageBGRA8 &&in, ImageBGRA8 &out) {
     if (auto r = cut_rect(look, in.width, in.height)) cut(in, *r, out);
     else if (&out != &in) out = std::move(in);
