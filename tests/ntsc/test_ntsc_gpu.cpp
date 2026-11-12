@@ -993,5 +993,12 @@ TEST_CASE("ntsc gpu pipeline: the same frame again reuses its plan and tables") 
     CHECK(e.px == a.px);
     gputest::set_env("NTSCRT_NTSC_GPU", "0");
     CHECK(render(inst, house, src, 8).px == d.px);  // exact against ntsc-rs (force: WARP too)
+    gputest::set_env("NTSCRT_NTSC_GPU", "force");
+    if (verbose()) {
+        // The tables' CPU time at UHD, built and kept (ntsc_tables_ms in the timings).
+        const ImageBGRA8 uhd = picture("bars", 3840, 2160);
+        const Rendered m = render(inst, house, uhd, 9), h = render(inst, house, uhd, 9);
+        std::printf("CACHE UHD miss: %s\nCACHE UHD hit:  %s\n", m.timings.c_str(), h.timings.c_str());
+    }
     ntscrt_destroy(inst);
 }
