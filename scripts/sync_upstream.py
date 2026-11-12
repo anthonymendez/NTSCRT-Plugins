@@ -162,6 +162,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     U.utf8_stdio()
     dry = a.dry_run
+    would = "would: " if dry else ""   # message prefix (a real run says what it did)
     try:
         U.need_upstream()
         if a.fetch:
@@ -193,7 +194,7 @@ def main(argv=None):
         else:
             if cur != new:
                 todo += 1
-                say("  %s checkout %s -> %s" % ("would" if dry else "", cur[:7], new[:7]))
+                say("  %scheckout %s -> %s" % (would, cur[:7], new[:7]))
                 if not dry:
                     U.upstream_git("checkout", "--quiet", new)
             if recorded != new:
@@ -203,7 +204,7 @@ def main(argv=None):
         say("\n== 2. presets/ (byte for byte)")
         changes, extra, up_deleted = sync_presets(old, new, dry)
         for kind, p in changes:
-            say("  %s %s %s" % ("would" if dry else "", kind, p))
+            say("  %s%s %s" % (would, kind, p))
         todo += len(changes)
         pm = U.PortMap()
         for p in extra:
@@ -246,7 +247,7 @@ def main(argv=None):
             else:
                 todo += 1
                 for line in schema_summary(old_schema.decode("utf-8"), new_schema.decode("utf-8")):
-                    say("  %s %s" % ("would:" if dry else "", line))
+                    say("  %s%s" % (would, line))
 
             say("\n== 4. FxPlug parameter ids (fxplug/tools/update_param_ids.py)")
             cmd = [sys.executable, UPDATE_IDS, "--schema", schema_path] + (["--check"] if dry else [])
@@ -263,7 +264,7 @@ def main(argv=None):
         say("\n== 5. version strings")
         vchanges = update_versions(version, new, dry)
         for c in vchanges:
-            say("  %s %s" % ("would:" if dry else "", c))
+            say("  %s%s" % (would, c))
         if not vchanges:
             say("  already %s" % version)
         todo += len(vchanges)
@@ -290,6 +291,13 @@ def main(argv=None):
   - new bundled looks / Digital video formats: append to released_preset_order() in
     hostparams/src/params.cpp when releasing (never reorder)
   - looks using a stage the Resolve cli test doesn't cover: DIGITAL_LOOKS in tests/resolve/run_resolve_tests.py
+  - host tests: tests/hostparams/ofx_reference.json is a frozen snapshot (new params: add them to its default
+    look at their defaults; new looks: their menu entry and case), and the released_preset_order() size check
+    in tests/hostparams/test_params_timeline.cpp
+  - rebuild an existing build tree so it copies new presets (CMake re-globs presets/ on build)
+  - self-goldens: add new looks to tests/golden/self/manifest.json; regenerate only entries whose look
+    legitimately changed (NTSCRT_GOLDEN_UPDATE=1 NTSCRT_GOLDEN_ONLY=<id>); the rest must stay byte-identical
+  - presets gallery: scripts/make_presets_gallery.py --only <new slugs> (docs/PRESETS-GALLERY.md)
   - CHANGELOG.md line under [Unreleased] (changed defaults, what happens to existing projects) and the
     sync log at the end of docs/dev/UPSTREAM-SYNC.md
   - build + ctest; then refresh the golden references: gh workflow run golden --ref <branch>,

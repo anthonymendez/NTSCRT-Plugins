@@ -113,6 +113,12 @@ Hosts store params by **id** and every value, defaults included (checked in Reso
    when they use a stage the test doesn't cover yet.
 3. A CHANGELOG entry listing changed defaults and what happens to existing projects, and a line in the sync log
    below.
+   Host tests: `tests/hostparams/ofx_reference.json` is a frozen snapshot of the looks the OpenFX host built
+   before the param models merged: add new Digital / Glitch params to its `default` look at their defaults
+   (render-identical), and a new look's menu entry and case; `test_params_timeline.cpp` checks the size of
+   `released_preset_order()`. Self-goldens: add new looks to `tests/golden/self/manifest.json` and regenerate
+   only the entries whose look legitimately changed (`NTSCRT_GOLDEN_UPDATE=1 NTSCRT_GOLDEN_ONLY=<id>`); every
+   other entry must stay byte-identical. Presets gallery: `scripts/make_presets_gallery.py --only <slug>`.
 4. Refresh the golden references (they record the upstream commit they were rendered from, and `check_sync.py`
    compares it with the pin): `gh workflow run golden --ref <branch>`, then
    `gh run download <run-id> -n golden-refs -D tests/golden/ref` (see tests/golden/README.md).
