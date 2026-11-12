@@ -59,14 +59,17 @@ public:
     // frame for a width x height picture with the look's settings, as
     // process() would render it. `stage_mask` keeps only some stages (bit per
     // NTSC_ST_*; debugging). Throws like process() on bad settings.
+    // `tables` false: without the passes' row tables and speckle lists, which
+    // gpu_tables() then adds (another thread may, e.g. during the upload; it
+    // only reads this stage's loaded settings). NtscGpu::run needs them.
     void gpu_plan(const FrameContext &ctx, int width, int height, NtscGpuPlan &out,
-                  uint32_t stage_mask = 0xffffffffu);
+                  uint32_t stage_mask = 0xffffffffu, bool tables = true);
+    void gpu_tables(NtscGpuPlan &plan) const;
     // Debug / parity: ntsc-rs's own Y, I, Q planes for `in` (before the
     // deinterlace) with only `stage_mask`'s stages; plane_rows rows each.
     std::vector<float> debug_planes(const ImageBGRA8 &in, const FrameContext &ctx, uint32_t stage_mask,
                                     int *plane_rows = nullptr);
 private:
-    void gpu_tables(const FrameContext &ctx, float scale, NtscGpuPlan &out);
     struct Impl; std::unique_ptr<Impl> impl_;
 };
 

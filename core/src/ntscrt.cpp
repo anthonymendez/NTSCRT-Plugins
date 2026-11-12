@@ -721,7 +721,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             bool ok = ntsc_gpu_route(dev, &why);
             if (ok) {
                 try {
-                    inst->ntsc.gpu_plan(ctx, img.width, img.height, inst->ntsc_plan);
+                    inst->ntsc.gpu_plan(ctx, img.width, img.height, inst->ntsc_plan, 0xffffffffu, false);
                     ok = inst->ntsc_plan.supported();
                     if (!ok) why = "not on the GPU yet: " + inst->ntsc_plan.unsupported_names();
                 } catch (const std::exception &e) {
@@ -730,8 +730,14 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
                 }
             }
             if (ok) {
+                // The plan's tables (CPU: seeds, shifts, speckles) are built while
+                // the picture uploads; the plan itself said the frame can go.
+                std::future<void> tables = std::async(std::launch::async, [&] {
+                    inst->ntsc.gpu_tables(inst->ntsc_plan);
+                });
                 try {
                     auto up = upload(img);
+                    tables.get();
                     pic = inst->ntsc_gpu->run(*up, inst->ntsc_plan);
                 } catch (const std::exception &e) {
                     if (device_lost(inst)) throw;  // render_impl replaces the device

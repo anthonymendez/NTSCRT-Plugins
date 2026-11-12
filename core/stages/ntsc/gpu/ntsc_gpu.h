@@ -38,7 +38,11 @@ struct NtscGpuPlan {
     std::vector<NtscGpuRowShift> shifts[NTSC_ST_COUNT];     // by stage (K_SHIFT_ROWS, tracking K_NOISE)
     NtscGpuSpeckleList speckles[NTSC_ST_COUNT];             // by stage (K_SPECKLES)
     uint32_t simd_lanes = 8;                                // ntsc_gpu_simd_lanes()
-    double table_ms = 0;                                    // CPU time of the tables above (and the plan)
+    bool tables_ready = false;                              // the tables are this plan's (gpu_tables)
+    double table_ms = 0;                                    // CPU time of the plan and the tables
+    float scale = 1;                                        // the frame's arguments for the tables
+    int64_t frame = 0;
+    int32_t seed_offset = 0;
     int width = 0, height = 0;
     bool supported() const { return info.unsupported == 0; }
     // "composite_noise,head_switching" etc.: the stages that keep this frame on the CPU.

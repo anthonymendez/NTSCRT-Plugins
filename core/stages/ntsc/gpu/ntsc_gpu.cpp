@@ -241,6 +241,10 @@ struct NtscGpu::Impl {
         const int W = plan.width, R = int(plan.info.plane_rows);
         if (W <= 0 || R <= 0 || in.desc().width != W || in.desc().height != plan.height)
             throw std::runtime_error("ntsc gpu: plan / picture size mismatch");
+        for (const NtscGpuPass &ps : plan.passes)
+            if ((ps.kind == NTSC_GPU_K_NOISE || ps.kind == NTSC_GPU_K_SPECKLES || ps.kind == NTSC_GPU_K_SHIFT_ROWS) &&
+                !plan.tables_ready)
+                throw std::runtime_error("ntsc gpu: the plan has no tables (NtscStage::gpu_tables)");
         Planes p;
         const gpu::TextureDesc pd{W, R, gpu::Format::R32F, true, false};
         p.y = acquire(pd);

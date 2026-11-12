@@ -243,10 +243,15 @@ uint32_t forced_cpu_stages() {
 
 }  // namespace
 
-void NtscStage::gpu_plan(const FrameContext &ctx, int width, int height, NtscGpuPlan &out, uint32_t stage_mask) {
+void NtscStage::gpu_plan(const FrameContext &ctx, int width, int height, NtscGpuPlan &out, uint32_t stage_mask,
+                         bool tables) {
     if (width <= 0 || height <= 0) throw std::runtime_error("ntsc gpu: empty picture");
     const auto t0 = std::chrono::steady_clock::now();
     const float scale = impl_->apply(ctx);
+    out.tables_ready = false;
+    out.scale = scale;
+    out.frame = ntsc_frame(ctx);
+    out.seed_offset = Impl::seed_offset(ctx);
     out.width = width;
     out.height = height;
     out.rows.resize(size_t(height));
@@ -264,18 +269,20 @@ void NtscStage::gpu_plan(const FrameContext &ctx, int width, int height, NtscGpu
         out.passes.resize(out.info.num_passes);
         out.rows.resize(out.info.plane_rows);
         out.info.unsupported |= out.info.enabled & forced_cpu_stages();
-        if (out.supported()) gpu_tables(ctx, scale, out);
         out.table_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (tables && out.supported()) gpu_tables(out);
         return;
     }
     throw std::runtime_error("ntsc gpu: plan failed");
 }
 
 // The per-row tables and speckle lists of the plan's passes (gpu_plan.rs).
-void NtscStage::gpu_tables(const FrameContext &ctx, float scale, NtscGpuPlan &out) {
+void NtscStage::gpu_tables(NtscGpuPlan &out) const {
+    const auto t0 = std::chrono::steady_clock::now();
     const uint32_t w = uint32_t(out.width), h = uint32_t(out.height);
-    const int64_t frame = ntsc_frame(ctx);
-    const int32_t so = Impl::seed_offset(ctx);
+    const int64_t frame = out.frame;
+    const int32_t so = out.seed_offset;
+    const float scale = out.scale;
     NtscInstance *inst = impl_->inst;
     out.simd_lanes = ntsc_gpu_simd_lanes();
     uint32_t have_seeds = 0, have_shifts = 0, have_speckles = 0;
@@ -339,6 +346,8 @@ void NtscStage::gpu_tables(const FrameContext &ctx, float scale, NtscGpuPlan &ou
             break;
         }
     }
+    out.tables_ready = true;
+    out.table_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
 std::vector<float> NtscStage::debug_planes(const ImageBGRA8 &in, const FrameContext &ctx, uint32_t stage_mask,
