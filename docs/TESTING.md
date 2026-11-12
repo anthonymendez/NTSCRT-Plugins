@@ -38,8 +38,11 @@ install line again without `-Version` / `--version` goes back to the latest rele
    On a Mac, please include the **sim** shader: it's the heaviest and hasn't run on real
    Mac hardware yet (CI's virtual GPU times out on it).
 3. **Animated preset:** choose *Glitch pop* in *Presets → Preset* and play: the glitch should repeat
-   every 2 seconds until the clip ends, and the NTSC and CRT controls it moves show keyframes. Then choose
-   *Clean VHS*: the keyframes go away and the glitch stops repeating.
+   every 2 seconds (for up to a minute or two around the playhead on a long clip), and the NTSC and CRT
+   controls it moves show keyframes. Then choose *Clean VHS*: the keyframes go away and the glitch stops
+   repeating. Also on an **Adjustment Clip** over the clip, with the playhead on it (timelines start at
+   01:00:00:00, so it is an hour in): choosing *5 second blips* should take well under a second, without
+   freezing Resolve, and play right away where the playhead is.
 4. **Digital video formats:** choose *Digital video/MiniDV* in the same menu: *Digital video* switches on and
    *Downscale → Width* becomes 720, the rest of the look stays. Then *Digital video/CD-ROM (Video 1)*: the
    Microsoft Video 1 codec (*Digital video → Compression → Codec: Block colors*): a 12 fps picture made of
