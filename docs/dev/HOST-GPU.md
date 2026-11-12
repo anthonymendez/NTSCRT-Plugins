@@ -124,3 +124,43 @@ half-float), so on 8-bit and half-float comps the effect now gets and writes flo
   them; it fails if the GPU session took the CPU path anywhere. The whole suite passes with the GPU path live.
 - Speed: `run_resolve_tests.py --headless --bundle <bundle> --only bench` (render-queue jobs of 300 frames at
   UHD and 1080p, 60 fps, three looks; one `BENCH {...}` JSON line per job).
+
+## Speed (Windows, RTX 5090, Resolve Studio 21.1.2, 2026-11-11)
+
+`run_resolve_tests.py --only bench`: the effect on an Edit-page Fusion composition clip (animated gradient,
+noise and title at the timeline's size), one render-queue job of 300 frames to H.264 (NVENC), 60 fps
+projects. *Wall* is the job's time, two runs each (the same clip without the effect takes 2.85 s at UHD,
+1.35 s at 1080p). *ms* is the plug-in's own time per render (median / p95 of ~307 renders): on the GPU path
+it doesn't include the GPU work Resolve's stream runs after the render call returns, so compare wall times
+across paths. Baseline: v0.5.0-rc.3 (plus only the test-preset hook the bench uses), CPU path: this build
+with `NTSCRT_OFX_GPU=0`.
+
+| UHD (3840×2160) | baseline | CPU path | GPU path |
+|---|---|---|---|
+| default look (ntsc-rs on): wall s | 27.9 / 27.4 | 28.4 / 27.4 | 21.9 / 21.4 |
+| ms median / p95 | 73 / 77 | 72-76 / 78 | 62 / 65-68 |
+| Clean CRT: wall s | 11.9 / 11.9 | 11.9 / 11.9 | 2.9 / 2.3 (= no effect) |
+| ms median / p95 | 22 / 25 | 22 / 25 | 1.8 / 2.5-2.9 |
+| default, NTSC off: wall s | 12.4 / 11.9 | 12.4 / 12.4 | 2.9 / 2.4 (= no effect) |
+
+| 1080p | baseline | CPU path | GPU path |
+|---|---|---|---|
+| default look: wall s | 8.85 / 8.88 | 8.86 / 8.85 | 7.35 / 7.36 |
+| Clean CRT: wall s | 4.85 / 4.86 | 4.86 / 4.87 | 2.36 / 2.34 |
+| default, NTSC off: wall s | 4.85 / 4.85 | 4.84 / 4.85 | 2.36 / 2.35 |
+
+Phases at UHD, ms per render (`NTSCRT_PROFILE=1`, which waits for the GPU after each phase):
+
+| phase | CPU path, default | GPU path, default | CPU path, NTSC off | GPU path, NTSC off |
+|---|---|---|---|---|
+| in (CPU: float → 8 bit on the CPU; GPU: copy + convert, + the 8-bit download when ntsc-rs is on) | 8.4 | 8.8 | 9.0 | 1.2 |
+| ntsc-rs (CPU) | 49.1 | 47.6 | — | — |
+| upload (8-bit picture) | 2.9 | 2.8 | 2.6 | — |
+| Downscale / Glitch / CRT | 0.2 / 0.7 / 1.6 | 0.2 / 0.7 / 1.5 | 0.2 / 0.3 / 0.4 | 0.1 / 0.2 / 0.4 |
+| out (CPU: half-float readback + conversion; GPU: merge + copy) | 10.7 | 0.3 | 10.5 | 0.2 |
+
+With ntsc-rs off nothing is left but the GPU stages: the effect costs nothing measurable in the job's wall
+time. With ntsc-rs on (the default look) ntsc-rs's ~48 ms on the CPU at UHD dominates; the GPU path saves the
+output readback and conversion (~11 ms of the plug-in's time) and Resolve's own float transfers to and from
+CPU memory (the rest of the ~20 ms per frame the wall time drops by), while the input side is a wash (the
+8-bit download costs about what the CPU conversion did).
