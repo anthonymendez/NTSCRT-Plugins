@@ -20,6 +20,7 @@
 #include <unordered_map>
 
 #include "../stages/digital/fields.h"
+#include "../stages/digital/gpu/digital_gpu.h"
 #include "../stages/digital/parallel.h"
 #include "../stages/crop/crop_internal.h"
 #include "../stages/ntsc/gpu/ntsc_gpu.h"
@@ -132,6 +133,16 @@ struct SourceCache {
     }
 };
 
+// A CPU stage's GPU route on an instance (NTSC: ntsc_gpu_route, Digital video:
+// digital_gpu_route): decided on the stage's first frame, again when its switch
+// changes or the device is replaced; GPU errors in a row turn it off for good.
+struct GpuRoute {
+    bool decided = false, on = false;
+    std::string env, why;  // the switch's value it was decided for; the reason either way
+    int failures = 0;      // GPU errors in a row (not a lost device)
+    bool disabled = false; // too many: the CPU code for this instance from then on
+};
+
 size_t crop_hash(const json &look) {
     auto c = look.find("crop");
     return c == look.end() ? 0 : std::hash<std::string>{}(c->dump());
@@ -153,14 +164,10 @@ struct ntscrt_instance {
     std::unique_ptr<NtscGpu> ntsc_gpu;  // GPU port of the NTSC stage (NTSC-GPU.md; NTSCRT_NTSC_GPU)
     NtscGpuPlan ntsc_plan;              // its plan of the frame (one-entry cache: the same frame again reuses it)
     NtscGpuPlan howl_plan;              // ... of Screen Loop's history passes
-    // Whether this instance's NTSC frames take the GPU route (ntsc_gpu_on): decided on
-    // the first NTSC frame, again when NTSCRT_NTSC_GPU changes or the device is replaced.
-    struct NtscRoute {
-        bool decided = false, on = false;
-        std::string env, why;  // the variable's value it was decided for; the reason either way
-        int failures = 0;      // GPU errors in a row (not a lost device)
-        bool disabled = false; // too many: ntsc-rs for this instance from then on
-    } ntsc_route;
+    GpuRoute ntsc_route;  // whether its frames take the GPU route (ntsc_gpu_on)
+    // Digital video's full-size pictures on the GPU (DIGITAL-GPU.md; NTSCRT_DIGITAL_GPU)
+    std::unique_ptr<DigitalGpu> digital_gpu;
+    GpuRoute digital_route;  // (digital_gpu_on)
     std::unique_ptr<Downscaler> downscale;
     std::unique_ptr<GlitchStage> glitch;
     std::unique_ptr<CrtStage> crt;
@@ -176,6 +183,7 @@ struct ntscrt_instance {
     int device_resets = 0;  // devices recreated since the last good GPU frame
     bool test_lose_device = false, test_recreate_fails = false;
     int test_ntsc_gpu_errors = 0;  // testing::simulate_ntsc_gpu_errors
+    int test_digital_gpu_errors = 0;  // testing::simulate_digital_gpu_errors
     std::string presets_cache;
     SourceCache sources;
     LookStore looks;
@@ -213,6 +221,8 @@ void drop_gpu(ntscrt_instance *inst) {
     inst->downscale.reset();
     inst->ntsc_gpu.reset();
     inst->ntsc_route = {};
+    inst->digital_gpu.reset();
+    inst->digital_route = {};
     inst->dev.reset();
 }
 
@@ -235,6 +245,7 @@ bool init_gpu(ntscrt_instance *inst, std::string &err) {
     inst->howl_crt = std::make_unique<CrtStage>(*inst->dev, inst->resource_dir);
     inst->howl = std::make_unique<Howlaround>(*inst->dev);
     inst->ntsc_gpu = std::make_unique<NtscGpu>(*inst->dev);
+    inst->digital_gpu = std::make_unique<DigitalGpu>(*inst->dev);
     return true;
 }
 
@@ -287,6 +298,7 @@ void set_source_budget(ntscrt_instance *inst, size_t bytes) {
     inst->sources.evict();
 }
 void simulate_ntsc_gpu_errors(ntscrt_instance *inst, int n) { inst->test_ntsc_gpu_errors = n; }
+void simulate_digital_gpu_errors(ntscrt_instance *inst, int n) { inst->test_digital_gpu_errors = n; }
 void simulate_device_lost(ntscrt_instance *inst, bool recreate_fails) {
     inst->test_lose_device = true;
     inst->test_recreate_fails = recreate_fails;
@@ -449,36 +461,47 @@ using facade::output_format;
 using facade::readback_bands;
 
 
-// ---- NTSC on the GPU (docs/dev/NTSC-GPU.md) ----
-// GPU errors (not a lost device) in a row after which an instance stays on ntsc-rs.
-constexpr int kNtscGpuMaxFailures = 3;
+// ---- the CPU stages' GPU routes (NTSC: docs/dev/NTSC-GPU.md, Digital video: DIGITAL-GPU.md) ----
+// GPU errors (not a lost device) in a row after which an instance stays on the CPU code.
+constexpr int kGpuRouteMaxFailures = 3;
 
-// Whether this instance's NTSC frames may take the GPU route now; `why` gets the
-// reason either way (ntsc_gpu_route's, or the failures that turned it off).
-bool ntsc_gpu_on(ntscrt_instance *inst, gpu::Device &dev, std::string &why) {
-    auto &r = inst->ntsc_route;
-    const std::string env = ntsc_gpu_env_text();
+// Whether route `r` is on now; decided by `decide` (the stage's rule, which
+// gives the reason) on first use and when its switch's value `env` changes.
+// `why` gets the reason either way (the rule's, or the failures that turned it off).
+bool gpu_route_on(GpuRoute &r, const std::string &env, const std::function<bool(std::string *)> &decide,
+                  std::string &why) {
     if (!r.decided || r.env != env) {
         r = {};
         r.decided = true;
         r.env = env;
-        r.on = ntsc_gpu_route(dev, &r.why, inst->ntsc_gpu.get());
+        r.on = decide(&r.why);
     }
     why = r.why;
     return r.on && !r.disabled;
 }
 
-// A GPU error on the NTSC route: this frame takes ntsc-rs; after
-// kNtscGpuMaxFailures in a row, every frame of the instance does.
-void ntsc_gpu_failed(ntscrt_instance *inst, const std::string &what, std::string &why) {
-    auto &r = inst->ntsc_route;
+// A GPU error on route `r`: this frame takes the CPU code (`cpu`, e.g. "ntsc-rs");
+// after kGpuRouteMaxFailures in a row, every frame of the instance does.
+void gpu_route_failed(GpuRoute &r, const char *cpu, const std::string &what, std::string &why) {
     why = "GPU error: " + what;
-    if (++r.failures >= kNtscGpuMaxFailures && !r.disabled) {
+    if (++r.failures >= kGpuRouteMaxFailures && !r.disabled) {
         r.disabled = true;
-        r.why = "GPU error " + std::to_string(r.failures) + " frames in a row (last: " + what +
-                "): ntsc-rs for this instance from now on";
+        r.why = "GPU error " + std::to_string(r.failures) + " frames in a row (last: " + what + "): " + cpu +
+                " for this instance from now on";
         why = r.why;
     }
+}
+
+bool ntsc_gpu_on(ntscrt_instance *inst, gpu::Device &dev, std::string &why) {
+    return gpu_route_on(inst->ntsc_route, ntsc_gpu_env_text(),
+                        [&](std::string *w) { return ntsc_gpu_route(dev, w, inst->ntsc_gpu.get()); }, why);
+}
+void ntsc_gpu_failed(ntscrt_instance *inst, const std::string &what, std::string &why) {
+    gpu_route_failed(inst->ntsc_route, "ntsc-rs", what, why);
+}
+bool digital_gpu_on(ntscrt_instance *inst, gpu::Device &dev, std::string &why) {
+    return gpu_route_on(inst->digital_route, digital_gpu_env_text(),
+                        [&](std::string *w) { return digital_gpu_route(dev, w, inst->digital_gpu.get()); }, why);
 }
 
 // The NTSC stage on the GPU for a w x h picture: the plan, its tables (on another
@@ -621,11 +644,24 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
     const bool ntsc_on = inst->ntsc.active(look);
     std::string ntsc_why;
     const bool ntsc_gpu = ntsc_on && inst->dev && !inst->test_lose_device && ntsc_gpu_on(inst, *inst->dev, ntsc_why);
+    const bool howl_active = inst->dev && inst->howl && inst->howl->active(args->feedback_json ? &feedback : nullptr);
+    // Digital video on the GPU (docs/dev/DIGITAL-GPU.md: by default on D3D11 hardware
+    // devices) when its route is on and the picture can stay there: NTSC off or on
+    // the GPU (ntsc-rs needs the picture on the CPU). Screen Loop: Digital is off.
+    const bool digital_on = !howl_active && inst->digital.active(look);
+    std::string digital_why = "no GPU device";
+    bool digital_gpu = false;
+    if (digital_on && inst->dev && !inst->test_lose_device) {
+        digital_gpu = digital_gpu_on(inst, *inst->dev, digital_why);
+        if (digital_gpu && ntsc_on && !ntsc_gpu) {
+            digital_gpu = false;
+            digital_why = "ntsc-rs needs the picture on the CPU";
+        }
+    }
     // The source goes straight onto the GPU (direct_src->make, below) when no
-    // CPU stage needs the picture (NTSC on the GPU needs none).
-    const bool direct = direct_src && inst->dev && !inst->test_lose_device &&
-                        !inst->howl->active(args->feedback_json ? &feedback : nullptr) &&
-                        !inst->digital.active(look) && (!ntsc_on || ntsc_gpu) &&
+    // CPU stage needs the picture (NTSC and Digital video on the GPU need none).
+    const bool direct = direct_src && inst->dev && !inst->test_lose_device && !howl_active &&
+                        (!digital_on || digital_gpu) && (!ntsc_on || ntsc_gpu) &&
                         (direct_src->crops || !Crop::cuts(look, direct_src->w, direct_src->h));
     auto convert_source = [&] {
         ImageBGRA8 raw;
@@ -655,10 +691,10 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
 
     if (!inst->dev) {
         // No GPU: CPU stages only (degraded, but never a black frame).
-        if (inst->digital.active(look)) {
+        if (digital_on) {
             PhaseScope ps(pt, PhaseTimes::Digital);
             inst->digital.process(img, ctx);
-            pt.note += inst->digital.profile_note();
+            pt.note += " digital_route=cpu (" + digital_why + ")" + inst->digital.profile_note();
         }
         if (inst->ntsc.active(look)) {
             PhaseScope ps(pt, PhaseTimes::Ntsc);
@@ -876,16 +912,15 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         PhaseScope ps(pt, PhaseTimes::Loop, &dev);
         inst->howl->after_frame(*chain, feedback, ctx);  // feeds the loop the chain input
     } else {
-        if (inst->digital.active(look)) {
+        if (digital_on && !digital_gpu) {
             PhaseScope ps(pt, PhaseTimes::Digital);
             inst->digital.process(img, ctx);
-            pt.note += inst->digital.profile_note();
         }
-        ctx.line_height = inst->digital.active(look) ? digital::chain_line_height(look) : 1;  // One field
+        ctx.line_height = digital_on ? digital::chain_line_height(look) : 1;  // One field
         // The pipeline's 8-bit picture on the GPU: made there from the source
         // (direct), or the CPU picture uploaded.
         bool use_direct = direct;
-        auto picture = [&]() -> std::shared_ptr<gpu::Texture> {
+        auto base_picture = [&]() -> std::shared_ptr<gpu::Texture> {
             std::shared_ptr<gpu::Texture> t;
             if (use_direct) {
                 PhaseScope ps(pt, PhaseTimes::In, &dev);
@@ -903,6 +938,40 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
                 t = upload(img);
             }
             return t;
+        };
+        // With Digital video on the GPU: that picture through the stage (DigitalStage::
+        // process_gpu: the full-size steps as kernels, the codec here on capture-size
+        // pictures), once. A GPU error (not a lost device): this frame takes the CPU code.
+        std::shared_ptr<gpu::Texture> digital_tex;
+        auto picture = [&]() -> std::shared_ptr<gpu::Texture> {
+            if (!digital_gpu) return base_picture();
+            if (digital_tex) return digital_tex;
+            std::shared_ptr<gpu::Texture> base = base_picture();
+            try {
+                PhaseScope ps(pt, PhaseTimes::Digital, &dev);
+                if (inst->test_digital_gpu_errors > 0) {
+                    --inst->test_digital_gpu_errors;
+                    throw std::runtime_error("simulated Digital video GPU error");
+                }
+                digital_tex = inst->digital.process_gpu(*inst->digital_gpu, base, ctx);
+                inst->digital_route.failures = 0;
+                return digital_tex;
+            } catch (const std::exception &e) {
+                if (device_lost(inst)) throw;
+                gpu_route_failed(inst->digital_route, "the CPU code", e.what(), digital_why);
+            }
+            digital_gpu = false;
+            base.reset();
+            if (!have_cpu_pic) {
+                convert_source();
+                have_cpu_pic = true;
+            }
+            use_direct = false;
+            {
+                PhaseScope ps(pt, PhaseTimes::Digital);
+                inst->digital.process(img, ctx);
+            }
+            return base_picture();
         };
         std::shared_ptr<gpu::Texture> pic;
         if (ntsc_gpu) {
@@ -922,16 +991,31 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             note_ntsc_route(inst, pt, pic != nullptr, ntsc_why);
             if (!pic) {
                 // ntsc-rs, on the CPU picture, which then goes up (not the direct one).
-                if (!have_cpu_pic) {
+                if (digital_gpu && digital_tex) {
+                    // Digital video's GPU result comes down for it (the full picture: rare)
+                    img = download(*digital_tex);
+                    have_cpu_pic = true;
+                } else if (!have_cpu_pic) {
                     convert_source();
                     have_cpu_pic = true;
                 }
+                if (digital_gpu && !digital_tex) {
+                    PhaseScope ps(pt, PhaseTimes::Digital);
+                    inst->digital.process(img, ctx);
+                }
+                digital_gpu = false;
+                digital_tex.reset();
                 use_direct = false;
                 PhaseScope ps(pt, PhaseTimes::Ntsc);
                 inst->ntsc.process(img, ctx);
             }
         }
         if (!pic) pic = picture();
+        if (digital_on) {
+            // " digital_route=gpu (why)" / " digital_route=cpu (why)", the steps' times
+            pt.note += std::string(" digital_route=") + (digital_gpu ? "gpu" : "cpu") + " (" + digital_why + ")";
+            pt.note += inst->digital.profile_note();
+        }
         {
             PhaseScope ps(pt, PhaseTimes::Downscale, &dev);
             chain = inst->downscale->run(pic, ctx);

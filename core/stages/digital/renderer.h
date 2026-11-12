@@ -97,6 +97,27 @@ struct Size {
     int width = 0, height = 0;
 };
 
+// Everything Renderer::scale does to a width x height picture, as tables, for its
+// GPU port (gpu/digital_gpu.cpp, docs/dev/DIGITAL-GPU.md). Every value whose
+// computation involves sin(), a division or doubles is made here, by the same code
+// scale() runs, so the kernels only multiply, add, compare and index.
+struct ScalePlan {
+    int width = 0, height = 0;  // the picture
+    int cw = 0, ch = 0;         // the capture size
+    bool copy = false;          // same size: the picture itself, no resampling
+    // Lanczos taps (scaleLanczos): per output column / row its first source
+    // index and tap count, and taps* weights (a row of the table each).
+    int tapsX = 0, tapsY = 0;
+    std::vector<int32_t> spanX, spanY;  // (start, count) pairs
+    std::vector<float> weightX, weightY;
+    // Aliasing (0 mix: off): per capture row the source row it point-samples,
+    // per capture column the source columns of blue, green, red (and a pad).
+    float mix = 0, boost = 0;
+    std::vector<int32_t> aliasRow, aliasCol;
+    bool fields = false;  // One field: odd rows repeat the row above
+    bool operator==(const ScalePlan &) const = default;
+};
+
 // Earlier source frames (BGRA8, any size, top row first) for re-running the
 // stream; return nullptr when the frame can't be had.
 struct SourceFrame {
@@ -123,6 +144,13 @@ public:
                  const EarlierFrames &earlier = nullptr, uint64_t seed = 0);
     void flush();
 
+    // process() without the pictures at the frame's size: `current` is frame n
+    // at the capture size (what scale() makes of it); returns the picture to
+    // show, at the capture size (what upscale() takes). The GPU route's CPU part.
+    const std::vector<uint8_t> &code(int n, std::vector<uint8_t> current, Size capture, double sourceFPS,
+                                     const Settings &settings, const SettingsAt &settingsAt = nullptr,
+                                     const EarlierFrames &earlier = nullptr, uint64_t seed = 0);
+
     int lastRunLength() const { return lastRunLength_; }
 
     // Where the last process() call's time went (ms of wall time, CPU side;
@@ -131,17 +159,25 @@ public:
     // scaled for a re-run; camera: capture() (optics, sensor, electronics ->
     // Y'CbCr planes); codec: encode + decode; deblock; upsample: the chroma
     // upsample and Y'CbCr -> BGRA at the capture size (render() less deblock);
-    // upscale: the capture picture back to the frame's size.
+    // upscale: the capture picture back to the frame's size. The GPU route
+    // (DIGITAL-GPU.md) fills scale and upscale with its kernels' time (with
+    // NTSCRT_PROFILE=1; else their submission), download / upload with the
+    // capture-size pictures' transfers.
     struct Profile {
-        double scale = 0, earlier = 0, camera = 0, codec = 0, deblock = 0, upsample = 0, upscale = 0;
+        double scale = 0, download = 0, earlier = 0, camera = 0, codec = 0, deblock = 0, upsample = 0,
+               upload = 0, upscale = 0;
         int captures = 0;  // captures coded (lastRunLength)
     };
     const Profile &lastProfile() const { return profile_; }
+    Profile &profile() { return profile_; }  // the GPU route's steps
 
     // Exposed for tests (upstream statics).
     static std::vector<uint8_t> scale(const uint8_t *base, int width, int height, int rowBytes, Size size,
                                       const Settings &optics);
     static void scaleLanczos(const uint8_t *src, int width, int height, int rowBytes, uint8_t *dst, int cw, int ch);
+    static ScalePlan scalePlan(int width, int height, Size size, const Settings &optics);
+    // float(s) / 9 for s = 0 .. 9 * 255: the aliasing boost's 3x3 mean, as scale() divides.
+    static const std::vector<float> &ninths();
     static PicturePtr capture(const std::vector<uint8_t> &bgra, const Geometry &g, const Settings &settings,
                               int index, uint64_t seedMix = 0);
     // Center-weighted mean of linear luminance (camcorder auto exposure).
@@ -158,6 +194,8 @@ public:
                                        float step, double *deblock_ms = nullptr);
     static void upscale(const std::vector<uint8_t> &picture, Size size, uint8_t *base, int width, int height,
                         int rowBytes);
+    // upscale()'s source column of every output column and source row of every output row.
+    static void upscaleMaps(Size size, int width, int height, std::vector<int32_t> &xs, std::vector<int32_t> &ys);
 
 private:
     struct StreamKey {

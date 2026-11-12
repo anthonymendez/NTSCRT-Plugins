@@ -30,6 +30,10 @@ void simulate_device_lost(ntscrt_instance *inst, bool recreate_fails = false);
 // those frames take ntsc-rs, and after 3 in a row the instance stays on it.
 void simulate_ntsc_gpu_errors(ntscrt_instance *inst, int n);
 
+// The next `n` frames' Digital video GPU steps fail (not a lost device): those
+// frames take the CPU code, and after 3 in a row the instance stays on it.
+void simulate_digital_gpu_errors(ntscrt_instance *inst, int n);
+
 // Where the last render call's time went, in ms of the calling thread's wall
 // time (benchmark: tests/core/bench_transfer.cpp). GPU work runs
 // asynchronously: gpu_stages is the time to submit it, the wait for it shows

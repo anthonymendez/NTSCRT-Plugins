@@ -20,6 +20,7 @@
 namespace ntscrt {
 
 struct NtscGpuPlan;  // stages/ntsc/gpu/ntsc_gpu.h
+class DigitalGpu;    // stages/digital/gpu/digital_gpu.h
 
 // ---- Crop (agent A) ---------------------------------------------------------
 // Look key "crop" (NTSCRT extension; upstream keeps crop in app state):
@@ -46,6 +47,14 @@ public:
     // Where the last process() call's time went (appended 2026-11-12, digital GPU
     // work): " digital_ms=scale:..,camera:..,..." for the timings note.
     std::string profile_note() const;
+    // GPU route (appended 2026-11-12, docs/dev/DIGITAL-GPU.md): process() for a
+    // picture on the GPU (`in`, BGRA8): the capture scale-down and the upscale run
+    // on `gpu`, the codec here, on capture-size pictures. Returns the frame's
+    // picture (BGRA8, in's size; `in` itself where process() would leave the
+    // picture as it is). Throws on a GPU error; process() on the CPU picture then
+    // gives the same frame (the codec's state is the same whether it ran or not).
+    std::shared_ptr<gpu::Texture> process_gpu(DigitalGpu &gpu, const std::shared_ptr<gpu::Texture> &in,
+                                              const FrameContext &ctx);
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };

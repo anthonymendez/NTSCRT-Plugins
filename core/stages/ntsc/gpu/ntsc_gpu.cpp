@@ -13,17 +13,6 @@
 #include <map>
 #include <stdexcept>
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <d3d11.h>
-#include <dxgi.h>
-#include <wrl/client.h>
-#endif
-
 namespace ntscrt {
 
 const char *ntsc_stage_name(int stage) {
@@ -46,18 +35,9 @@ std::string NtscGpuPlan::unsupported_names() const {
     return s;
 }
 
-std::string ntsc_gpu_env_text() {
-    const char *e = std::getenv("NTSCRT_NTSC_GPU");
-    return e ? e : "";
-}
+std::string ntsc_gpu_env_text() { return gpu_route_env_text("NTSCRT_NTSC_GPU"); }
 
-NtscGpuEnv ntsc_gpu_env() {
-    const std::string e = ntsc_gpu_env_text();
-    if (e == "0") return NtscGpuEnv::Off;
-    if (e == "force") return NtscGpuEnv::Force;
-    if (e.empty() || e == "auto") return NtscGpuEnv::Auto;
-    return NtscGpuEnv::On;
-}
+NtscGpuEnv ntsc_gpu_env() { return gpu_route_env("NTSCRT_NTSC_GPU"); }
 
 bool ntsc_gpu_requested() { return ntsc_gpu_env() != NtscGpuEnv::Off; }
 
@@ -69,45 +49,6 @@ bool cpu_ntsc_fuses() {
     return fuses;
 #else
     return true;  // NEON: mul_add is a fused multiply-add
-#endif
-}
-
-namespace {
-std::string adapter_description(gpu::Device &dev) {
-#ifdef _WIN32
-    if (dev.backend() != gpu::Backend::D3D11) return "";
-    auto *d = static_cast<ID3D11Device *>(dev.native_device());
-    if (!d) return "";
-    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
-    Microsoft::WRL::ComPtr<IDXGIAdapter> ad;
-    DXGI_ADAPTER_DESC desc{};
-    if (FAILED(d->QueryInterface(IID_PPV_ARGS(&dxgi))) || FAILED(dxgi->GetAdapter(&ad)) || FAILED(ad->GetDesc(&desc)))
-        return "";
-    char buf[256] = {};
-    WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, buf, int(sizeof buf), nullptr, nullptr);
-    return buf;
-#else
-    (void)dev;
-    return "";
-#endif
-}
-}  // namespace
-
-bool gpu_is_software(gpu::Device &dev) {
-#ifdef _WIN32
-    if (dev.backend() != gpu::Backend::D3D11) return false;
-    auto *d = static_cast<ID3D11Device *>(dev.native_device());
-    if (!d) return false;
-    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
-    Microsoft::WRL::ComPtr<IDXGIAdapter> ad;
-    DXGI_ADAPTER_DESC desc{};
-    if (FAILED(d->QueryInterface(IID_PPV_ARGS(&dxgi))) || FAILED(dxgi->GetAdapter(&ad)) || FAILED(ad->GetDesc(&desc)))
-        return false;
-    // Microsoft Basic Render Driver (WARP): vendor 0x1414, device 0x8c.
-    return desc.VendorId == 0x1414 && desc.DeviceId == 0x8c;
-#else
-    (void)dev;
-    return false;
 #endif
 }
 
@@ -130,9 +71,8 @@ bool ntsc_gpu_route(gpu::Device &dev, std::string *why, NtscGpu *g) {
     if (!force && std::strcmp(fma, "mad-unfused") == 0)
         return no("this GPU's mad() isn't fused and it has no doubles: not exact");
     if (why) {
-        std::string w = env == NtscGpuEnv::Auto ? "auto" : env == NtscGpuEnv::Force ? "NTSCRT_NTSC_GPU=force"
-                                                                                    : "NTSCRT_NTSC_GPU=1";
-        const std::string ad = adapter_description(dev);
+        std::string w = gpu_route_env_label("NTSCRT_NTSC_GPU", env);
+        const std::string ad = gpu_adapter_description(dev);
         if (!ad.empty()) w += ": " + ad;
         w += std::string(", fma ") + fma;
         w += cpu_ntsc_fuses() ? ", CPU AVX2+FMA" : ", CPU without AVX2+FMA (its ntsc-rs doesn't fuse: may differ by a level)";
