@@ -20,6 +20,7 @@
 
 #include "../stages/digital/fields.h"
 #include "../stages/digital/parallel.h"
+#include "../stages/ntsc/gpu/ntsc_gpu.h"
 #include "../stages/stages.h"
 #include "embedded_schema.h"
 #include "facade.h"
@@ -147,6 +148,8 @@ struct ntscrt_instance {
     DigitalStage digital;
     NtscStage ntsc;
     NtscStage howl_ntsc[2];  // Screen Loop history passes, two at a time on worker threads (render_once)
+    std::unique_ptr<NtscGpu> ntsc_gpu;  // GPU port of the NTSC stage (opt-in: NTSCRT_NTSC_GPU, NTSC-GPU.md)
+    NtscGpuPlan ntsc_plan;              // its per-frame plan, buffers kept between frames
     std::unique_ptr<Downscaler> downscale;
     std::unique_ptr<GlitchStage> glitch;
     std::unique_ptr<CrtStage> crt;
@@ -196,6 +199,7 @@ void drop_gpu(ntscrt_instance *inst) {
     inst->crt.reset();
     inst->glitch.reset();
     inst->downscale.reset();
+    inst->ntsc_gpu.reset();
     inst->dev.reset();
 }
 
@@ -217,6 +221,7 @@ bool init_gpu(ntscrt_instance *inst, std::string &err) {
     inst->crt = std::make_unique<CrtStage>(*inst->dev, inst->resource_dir);
     inst->howl_crt = std::make_unique<CrtStage>(*inst->dev, inst->resource_dir);
     inst->howl = std::make_unique<Howlaround>(*inst->dev);
+    inst->ntsc_gpu = std::make_unique<NtscGpu>(*inst->dev);
     return true;
 }
 
@@ -703,11 +708,37 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             inst->digital.process(img, ctx);
         }
         ctx.line_height = inst->digital.active(look) ? digital::chain_line_height(look) : 1;  // One field
-        if (inst->ntsc.active(look)) {
+        std::shared_ptr<gpu::Texture> pic;
+        if (inst->ntsc.active(look) && ntsc_gpu_requested()) {
+            // GPU NTSC (opt-in, docs/dev/NTSC-GPU.md): the 8-bit picture goes up
+            // first and the effect runs on it there, when the route is on and
+            // every pass this frame's settings use is implemented; otherwise the
+            // frame takes the Rust path below, exactly as without the variable.
+            PhaseScope ps(pt, PhaseTimes::Ntsc, &dev);
+            std::string why;
+            bool ok = ntsc_gpu_route(dev, &why);
+            if (ok) {
+                try {
+                    inst->ntsc.gpu_plan(ctx, img.width, img.height, inst->ntsc_plan);
+                    ok = inst->ntsc_plan.supported();
+                    if (!ok) why = "not on the GPU yet: " + inst->ntsc_plan.unsupported_names();
+                } catch (const std::exception &e) {
+                    ok = false;
+                    why = e.what();
+                }
+            }
+            if (ok) {
+                auto up = upload(img);
+                pic = inst->ntsc_gpu->run(*up, inst->ntsc_plan);
+                pt.note += " ntsc_route=gpu";
+            } else {
+                pt.note += " ntsc_route=cpu (" + why + ")";
+            }
+        }
+        if (inst->ntsc.active(look) && !pic) {
             PhaseScope ps(pt, PhaseTimes::Ntsc);
             inst->ntsc.process(img, ctx);
         }
-        std::shared_ptr<gpu::Texture> pic;
         if (direct) {
             PhaseScope ps(pt, PhaseTimes::In, &dev);
             pic = direct_src->make(dev, mode, look, alpha, facade::PoolFn(acquire));
