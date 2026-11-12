@@ -348,6 +348,15 @@
    "note": "Video 1 after a nearest-neighbour GPU downscale: a sub-pixel GPU difference flips block colours at edges (WARP vs NVIDIA: mean 2.8, 8% of pixels)"
   },
   {
+   "id": "preset-cheap-camcorder",
+   "input": "game-frame.png",
+   "preset": "Cheap camcorder",
+   "frames": [
+    12
+   ],
+   "input_downscale": 2
+  },
+  {
    "id": "preset-chunky-webcam",
    "input": "game-frame.png",
    "preset": "Chunky webcam",
