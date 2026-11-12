@@ -2,7 +2,7 @@
 
 ## Look JSON (per-frame input to the core)
 The host passes the upstream NTSCRT **look preset format** (see `presets/*.json`; synced with upstream
-NTSCRT v0.20.0, look `"version"` 2) to `ntscrt_render_*`, evaluated at the frame being rendered:
+NTSCRT v0.21.0, look `"version"` 2) to `ntscrt_render_*`, evaluated at the frame being rendered:
 
 ```jsonc
 {

@@ -1,7 +1,7 @@
 # Syncing with upstream NTSCRT
 
 The core is a port of [NTSCRT](https://github.com/finnmckenty/NTSCRT) (Swift, macOS), pinned as the
-read-only submodule `upstream/NTSCRT`. Current pin: **v0.20.0** (`c6ab639`). This page is the routine for
+read-only submodule `upstream/NTSCRT`. Current pin: **v0.21.0** (`8b26092`). This page is the routine for
 bringing a later upstream release in: run one script, hand-port the files it lists, and CI checks the rest.
 
 | Tool | What it does |

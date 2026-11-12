@@ -349,7 +349,9 @@
     "alpha.mode": 445,
     "digital.codec": 446,
     "digital.quality2": 447,
-    "digital.ccd_response": 448
+    "digital.ccd_response": 448,
+    "digital.low_light_noise": 449,
+    "digital.sharpening_width": 450
   },
   "retired": [],
   "note": "APPEND-ONLY. FxPlug parameter IDs saved in FCP/Motion projects. Never edit or reuse an id; regenerate with fxplug/tools/update_param_ids.py."
