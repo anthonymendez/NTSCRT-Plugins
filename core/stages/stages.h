@@ -8,14 +8,18 @@
 //   -> Downscale -> Glitch -> Crt (librashader or bypass) -> output (= src size)
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "../gpu/gpu.h"
 #include "../src/internal.h"
 #include "howlaround/howl_hooks.h"
 
 namespace ntscrt {
+
+struct NtscGpuPlan;  // stages/ntsc/gpu/ntsc_gpu.h
 
 // ---- Crop (agent A) ---------------------------------------------------------
 // Look key "crop" (NTSCRT extension; upstream keeps crop in app state):
@@ -51,6 +55,16 @@ public:
     bool active(const json &look) const;  // look["ntsc"]["enabled"]
     void process(ImageBGRA8 &inout, const FrameContext &ctx);  // uses ntsc_frame(ctx)
     static std::string descriptors_json();  // ntsc-rs settings schema
+    // GPU port (appended 2026-11-12, docs/dev/NTSC-GPU.md): the plan of this
+    // frame for a width x height picture with the look's settings, as
+    // process() would render it. `stage_mask` keeps only some stages (bit per
+    // NTSC_ST_*; debugging). Throws like process() on bad settings.
+    void gpu_plan(const FrameContext &ctx, int width, int height, NtscGpuPlan &out,
+                  uint32_t stage_mask = 0xffffffffu);
+    // Debug / parity: ntsc-rs's own Y, I, Q planes for `in` (before the
+    // deinterlace) with only `stage_mask`'s stages; plane_rows rows each.
+    std::vector<float> debug_planes(const ImageBGRA8 &in, const FrameContext &ctx, uint32_t stage_mask,
+                                    int *plane_rows = nullptr);
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };
