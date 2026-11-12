@@ -200,7 +200,7 @@ frames 0/1/7 x 2 seeds per single stage, frames 0/1/30 for the presets):
 
 Metal (`macos` CI job, report-only, the route is off there): phase 1 measured max 1 level, 0.19% of values
 different, plane differences <= 6e-8 for its passes, i.e. not bit-exact (Slang drops `precise` for Metal and
-Metal compiles with fast math). @@METAL@@
+Metal compiles with fast math). The phase 2-3 kernels compile and run on Metal in CI (`test_ntsc_gpu` passes there, report-only), but its numbers for the new stages were not captured: ctest prints the report-only messages only when a test fails, so phase 4 should run `test_ntsc_gpu -s` (or with `NTSCRT_NTSC_GPU_VERBOSE=1`) on a Mac to get them.
 
 Through the whole pipeline (`bench_transfer --dump`, 3840x2160 and 1920x1080, `rgba32f` and `rgba8` frames) the
 output with `NTSCRT_NTSC_GPU=1` is byte-identical to the output without it for the house (`default`) look,
