@@ -129,6 +129,7 @@ struct Case {
     Alpha alpha;
     double scale = 1.0;
     int pad = 0;  // source smaller than the frame by this much on each side
+    const char *digital_env = nullptr;  // NTSCRT_DIGITAL_GPU for the host GPU path
 };
 
 }  // namespace
@@ -162,6 +163,32 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
         REQUIRE(!clean_crt.empty());
     }
     const char *off = R"({"ntsc":{"enabled":false}})";
+    // A Digital video format applied as the Preset menu does (schema digital_formats).
+    const nlohmann::json schema_j = nlohmann::json::parse(ntscrt_param_schema_json());
+    auto format = [&](const char *id, const char *patch) {
+        nlohmann::json l = plugin_default;
+        for (const auto &f : schema_j["digital_formats"])
+            if (f.value("id", std::string()) == id)
+                for (auto it = f["applies"].begin(); it != f["applies"].end(); ++it) {
+                    if (it.value().is_object())
+                        for (auto v = it.value().begin(); v != it.value().end(); ++v)
+                            ntscrt::host::set_at(l, it.key() + "/" + v.key(), v.value());
+                    else ntscrt::host::set_at(l, it.key(), it.value());
+                }
+        l.merge_patch(nlohmann::json::parse(patch));
+        return l.dump();
+    };
+    std::string webcam_lq;
+    {
+        std::ifstream f(std::string(NTSCRT_SOURCE_DIR) + "/presets/Webcam (low quality).json");
+        std::stringstream ss;
+        ss << f.rdbuf();
+        const nlohmann::json p = nlohmann::json::parse(ss.str());
+        webcam_lq = ntscrt::host::build_look(schema, [&](size_t i) -> nlohmann::json {
+                        if (auto v = ntscrt::host::preset_value(schema.params[i], p, false)) return *v;
+                        return schema.params[i].def;
+                    }).look.dump();
+    }
     const Case cases[] = {
         {"default look (NTSC on: direct route with GPU NTSC), float", look("{}"), NTSCRT_RGBA32F, Alpha::Opaque},
         {"default look, crop 4:3", look(R"({"crop":{"enabled":true,"ratio":"4:3"}})"), NTSCRT_RGBA32F, Alpha::Opaque},
@@ -187,8 +214,24 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
         {"NTSC off, source smaller than the frame, Spill",
          look(R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})"), NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 9},
         {"NTSC off, source smaller than the frame, Clip", look(off), NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 9},
-        {"Digital video on (download route)", look(R"({"ntsc":{"enabled":false},"digital":{"enabled":true}})"),
+        // Digital video: on the GPU (DIGITAL-GPU.md) the picture stays there (gpu-direct);
+        // with NTSCRT_DIGITAL_GPU=0 it comes down for the CPU code (gpu-download).
+        {"Digital video on, NTSC off", look(R"({"ntsc":{"enabled":false},"digital":{"enabled":true}})"),
          NTSCRT_RGBA32F, Alpha::Opaque},
+        {"Digital video on, NTSC off, the CPU code (download route)",
+         look(R"({"ntsc":{"enabled":false},"digital":{"enabled":true}})"), NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 0, "0"},
+        {"Digital video on, NTSC on the GPU", look(R"({"digital":{"enabled":true}})"), NTSCRT_RGBA32F, Alpha::Opaque},
+        {"Digital video/MiniDV, half", format("minidv", "{}"), NTSCRT_RGBA16F, Alpha::Opaque},
+        {"Digital video/Datamosh, 8-bit", format("datamosh", "{}"), NTSCRT_RGBA8, Alpha::Opaque},
+        {"Digital video/Webcam, crop 4:3", format("webcam", R"({"crop":{"enabled":true,"ratio":"4:3"}})"),
+         NTSCRT_RGBA32F, Alpha::Opaque},
+        {"Digital video/Video call, render scale 0.5", format("video_call", "{}"), NTSCRT_RGBA32F, Alpha::Opaque, 0.5},
+        {"Digital video/CD-ROM, source smaller than the frame, Spill",
+         format("cd_rom", R"({"alpha":{"mode":"spill"}})"), NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 9},
+        {"Digital video/Early web, premultiplied, Clip (holes: CPU conversion)", format("early_web", "{}"),
+         NTSCRT_RGBA32F, Alpha::Premult},
+        {"Digital look Webcam (low quality), float", webcam_lq, NTSCRT_RGBA32F, Alpha::Opaque},
+        {"Digital look Webcam (low quality), 8-bit", webcam_lq, NTSCRT_RGBA8, Alpha::Opaque},
         {"core defaults, NTSC off (no Glitch)", off, NTSCRT_RGBA32F, Alpha::Opaque},
     };
     for (const Case &k : cases) {
@@ -220,10 +263,13 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
             ra.render_scale = k.scale;
             ra.source_premultiplied = premult;
             ntscrt_image s = frame_src.cpu(), d = out_cpu.cpu();
-            // The reference: the CPU path with ntsc-rs (the host GPU path: the default NTSC route).
+            // The reference: the CPU path with ntsc-rs and the CPU Digital video (the host GPU
+            // path: the default routes).
             set_env("NTSCRT_NTSC_GPU", "0");
+            set_env("NTSCRT_DIGITAL_GPU", "0");
             const ntscrt_status cs = ntscrt_render_cpu(cpu, &ra, &s, &d);
             set_env("NTSCRT_NTSC_GPU", nullptr);
+            set_env("NTSCRT_DIGITAL_GPU", nullptr);
             REQUIRE_MESSAGE(cs == NTSCRT_OK, ntscrt_last_error(cpu));
 
             auto dsrc = cuda.upload(src.mem.data(), src.mem.size());
@@ -233,7 +279,9 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
             ntscrt_host_gpu host{NTSCRT_HOST_GPU_CUDA, cuda.stream};
             ntscrt_gpu_image gs{src.w, src.h, ptrdiff_t(src.pitch), k.f, 1, reinterpret_cast<void *>(dsrc), 0};
             ntscrt_gpu_image gd{W, H, ptrdiff_t(out_gpu.pitch), k.f, 1, reinterpret_cast<void *>(ddst), 0};
+            set_env("NTSCRT_DIGITAL_GPU", k.digital_env);
             const ntscrt_status gs_st = ntscrt_render_host_gpu(gpu, &ra, &host, &gs, k.pad, k.pad, &gd);
+            set_env("NTSCRT_DIGITAL_GPU", nullptr);
             if (gs_st == NTSCRT_ERR_HOST_GPU && frame == 0 &&
                 std::string(ntscrt_last_error(gpu)).find("another GPU") != std::string::npos) {
                 MESSAGE("core device on another GPU than CUDA device 0: skipped (" << ntscrt_last_error(gpu) << ")");
@@ -249,14 +297,20 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
                 // Exact but for half-float output (the GPU rounds to nearest even), NTSC
                 // on the GPU included (bit-identical to ntsc-rs).
                 if (k.f != NTSCRT_RGBA16F) CHECK(df.off == 0);
-                // The route: no CPU picture unless a CPU stage (Digital video) or the hole
-                // filling needs it; NTSC on the GPU needs none.
+                // The route: no CPU picture unless a CPU stage (ntsc-rs, Digital video on the CPU)
+                // or the hole filling needs it; NTSC and Digital video on the GPU need none.
                 const std::string tm = ntscrt_last_timings(gpu);
                 const std::string name = k.name;
                 const bool ntsc_gpu = tm.find("ntsc_route=gpu") != std::string::npos;
+                const bool digital = name.find("Digital") != std::string::npos;
+                if (digital) {
+                    // Digital video's route: the GPU (the hardware device CUDA shares) unless switched off.
+                    if (k.digital_env) CHECK(tm.find("digital_route=cpu (NTSCRT_DIGITAL_GPU=0)") != std::string::npos);
+                    else CHECK(tm.find("digital_route=gpu") != std::string::npos);
+                }
                 if (name.find("holes") != std::string::npos || (k.pad > 0 && name.find("Clip") != std::string::npos))
                     CHECK(tm.find("path=gpu-cpuconvert") == 0);
-                else if (name.find("Digital") != std::string::npos) CHECK(tm.find("path=gpu-download") == 0);
+                else if (digital && tm.find("digital_route=cpu") != std::string::npos) CHECK(tm.find("path=gpu-download") == 0);
                 else if (tm.find("ntsc_route=") == std::string::npos || ntsc_gpu) CHECK(tm.find("path=gpu-direct") == 0);
                 else CHECK(tm.find("path=gpu-download") == 0);  // NTSC on ntsc-rs (WARP, NTSCRT_NTSC_GPU=0)
             }

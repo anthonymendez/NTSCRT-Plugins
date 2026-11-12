@@ -108,6 +108,10 @@ Mismatch diff(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
     return m;
 }
 
+// D3D11: the kernels must give the CPU's bytes. Metal: the route is off (compiled with
+// fast math, unverified), so the differences are only reported.
+bool exact_required() { return gputest::native_backend() == gpu::Backend::D3D11; }
+
 digital::Settings optics(double aliasing, double fields) {
     digital::Settings s;
     s[digital::kAliasing] = aliasing;
@@ -125,7 +129,7 @@ TEST_CASE("digital gpu: the arithmetic probe") {
         // The double-precision kernels, as the probe would pick them, give the same probe results.
         gputest::set_env("NTSCRT_DIGITAL_GPU_ARITH", "double");
         DigitalGpu x(*d.dev);
-        CHECK(std::string(x.arith_mode()) == "double");
+        if (exact_required()) CHECK(std::string(x.arith_mode()) == "double");
         gputest::set_env("NTSCRT_DIGITAL_GPU_ARITH", nullptr);
         // Hardware D3D11 GPUs and WARP round float arithmetic like the CPU, or do it in double.
         if (gputest::native_backend() == gpu::Backend::D3D11) CHECK(mode != "inexact");
@@ -178,7 +182,7 @@ TEST_CASE("digital gpu: the capture scale-down is Renderer::scale's, byte for by
                                            << " fields " << f << " alpha " << alpha << ": " << m.n << " bytes differ (max "
                                            << m.max << ", first at byte " << m.first << ")");
                         }
-                        CHECK(m.n == 0);
+                        if (exact_required()) CHECK(m.n == 0);
                     }
             }
         }
@@ -201,7 +205,7 @@ TEST_CASE("digital gpu: the upscale is Renderer::upscale's, byte for byte") {
             auto tex = g.upscale(pic, {c.cw, c.ch}, c.w, c.h);
             const Mismatch m = diff(cpu, gputest::read(*d.dev, *tex));
             if (m.n) MESSAGE(d.name << " " << c.cw << "x" << c.ch << " -> " << c.w << "x" << c.h << ": " << m.n << " differ");
-            CHECK(m.n == 0);
+            CHECK(m.n == 0);  // (a copy: exact on any backend)
         }
     }
 }

@@ -245,3 +245,39 @@ TEST_CASE("Screen Loop: NTSC on the GPU renders what ntsc-rs renders, every bund
         }
     }
 }
+
+TEST_CASE("Screen Loop with a Digital video look: Digital is off there, on either route, seeks included") {
+    // Upstream runs no Digital video stage while Screen Loop is on (stages.h): a Digital
+    // look under Screen Loop renders what the same look without Digital renders, whatever
+    // NTSCRT_DIGITAL_GPU says, played and after cold seeks (docs/dev/DIGITAL-GPU.md).
+    const std::string fb = feedback("7 copies slow luma", 8);
+    const std::string digital = R"({"digital": {"enabled": true, "values": {"aliasing": 0.7, "datamosh": 1,
+        "keyframe_interval": 1, "frame_rate": 30}}, "downscale": {"enabled": true, "width": 320}})";
+    const std::string plain = R"({"digital": {"enabled": false}, "downscale": {"enabled": true, "width": 320}})";
+    const int64_t frames = 20;
+    std::vector<std::vector<uint8_t>> ref;
+    {
+        Inst a(plain, fb);
+        if (!a.ok) return;
+        for (int64_t f = 0; f < frames; ++f) ref.push_back(a.render(f));
+    }
+    for (const char *env : {"0", static_cast<const char *>(nullptr)}) {
+        CAPTURE((env ? env : "unset"));
+        set_env("NTSCRT_DIGITAL_GPU", env);
+        {
+            Inst b(digital, fb);
+            for (int64_t f = 0; f < frames; ++f) {
+                CAPTURE(f);
+                CHECK(b.render(f) == ref[size_t(f)]);
+                CHECK(b.timings.find("digital_route=") == std::string::npos);  // the stage didn't run
+            }
+        }
+        for (int64_t f : {int64_t(19), int64_t(11), int64_t(4)}) {
+            CAPTURE(f);
+            Inst c(digital, fb);
+            CHECK(c.render(f) == ref[size_t(f)]);
+            CHECK(c.render(f - 1) == ref[size_t(f - 1)]);
+        }
+        set_env("NTSCRT_DIGITAL_GPU", nullptr);
+    }
+}
