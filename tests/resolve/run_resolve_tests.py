@@ -26,6 +26,7 @@ Tests (see README.md next to this file):
             is pressed if Fusion scripting can press it (only logged, no window, under --headless)
   debugall  "Debug logging for all effects" (button): with the effect's checkbox off, every frame is
             logged in detail while it is on and not after it is off; the switch is left as found
+  parity    (--parity / --parity-quick, headless) GPU routes vs the CPU version, every preset and effect: see parity.py
   bench     (only with --only bench, headless) Edit-page benchmark: render-queue jobs of 300 frames at UHD and
             1080p, 60 fps, default look / Clean CRT / NTSC off; JSON lines with wall time, the plug-in's
             ms per render (median, p95), render paths (CPU / GPU) and phase means
@@ -317,8 +318,8 @@ def start_headless(bundle, log_dir, only=None):
     # shell's NTSCRT_DEBUG_LOG doesn't turn detailed logging on behind the debug tests' back.
     env.setdefault("NTSCRT_SETTINGS_DIR", str(log_dir))
     env.pop("NTSCRT_DEBUG_LOG", None)
-    if "bench" in (only or ()):
-        env["NTSCRT_OFX_LOG_VERBOSE"] = "1"  # every render's ms and path, for the bench
+    if "bench" in (only or ()) or "parity" in (only or ()):
+        env["NTSCRT_OFX_LOG_VERBOSE"] = "1"  # every render's ms and path (bench), every render's route (parity)
     # The "position" test's switch: while this file exists the dev copy applies the look it names to
     # new effects (scripts can't set OpenFX params on the Edit page).
     env["NTSCRT_OFX_TEST_PRESET_FILE"] = str(Path(log_dir) / "test-preset.txt")
@@ -1245,6 +1246,16 @@ class Suite:
         self.record("gpupath", "pass", {"images": len(made), "codec": codec, "paths": paths},
                     "frames for --gpu-ab")
 
+    def t_parity(self):
+        """One session of --parity (tests/resolve/parity.py): every case's frames, the sources, the plug-in's
+        route per case. Passes when every case rendered; the comparison between sessions is --parity's."""
+        import parity
+        info, errors = parity.Session(self).run()
+        self.record("parity", "fail" if errors else "pass",
+                    {"config": info["config"], "cases": info["cases"], "seconds": info["seconds"],
+                     "roundtrip": info["roundtrip"], "errors": errors[:20]},
+                    f"{len(errors)} cases didn't render" if errors else "frames for --parity")
+
     BENCH_LOOKS = (("default", None, ""), ("clean-crt", "Clean CRT", ""), ("ntsc-off", "(defaults)", "ntsc_enabled=0"))
     # More looks --bench-looks can name: bundled presets with NTSC on.
     BENCH_EXTRA_LOOKS = {"mild-vhs": ("Mild VHS", ""), "tracking-noise": ("Tracking Noise up", ""),
@@ -1631,6 +1642,8 @@ class Suite:
                 self.run("bench", self.t_bench)
             if "gpupath" in self.a.only:  # --gpu-ab
                 self.run("gpupath", self.t_gpupath)
+            if "parity" in self.a.only:  # --parity: one session's frames
+                self.run("parity", self.t_parity)
         finally:
             self.close()
         return self.report()
@@ -1674,8 +1687,22 @@ def main():
     ap.add_argument("--ab-modes", default="cpu,gpu",
                     help="--gpu-ab: the two sessions (cpu or gpu each); cpu,cpu / gpu,gpu measure Resolve's own "
                          "session-to-session noise")
+    ap.add_argument("--parity", action="store_true",
+                    help="with --headless --bundle: render every preset and effect in one Resolve session per "
+                         "configuration (CPU reference, GPU default, mixed) and compare them (tests/resolve/parity.py)")
+    ap.add_argument("--parity-quick", action="store_true", help="--parity with a small subset of the cases")
+    ap.add_argument("--parity-configs", default="cpu,gpu,mixa,mixb,cpu2",
+                    help="--parity: the sessions, in order (cpu, gpu, mixa, mixb, cpu2 = cpu again on a subset)")
+    ap.add_argument("--parity-sources", default=None, help="--parity: folder for the generated source clips (default <out>/_src)")
+    ap.add_argument("--parity-compare-only", action="store_true",
+                    help="--parity: don't render, compare the sessions already in --out again")
     a = ap.parse_args()
     a.only = {s.strip() for s in a.only.split(",") if s.strip()}
+    a.parity_cases = a.parity_config = a.parity_subset = None
+    if a.parity or a.parity_quick:
+        sys.modules.setdefault("run_resolve_tests", sys.modules[__name__])  # parity.py shares this module's globals
+        import parity
+        return parity.main(a)
     if a.gpu_ab:
         return gpu_ab(a)
     return run_session(a)

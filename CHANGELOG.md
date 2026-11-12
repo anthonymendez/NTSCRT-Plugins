@@ -255,6 +255,12 @@ written but not yet built.
   settings.
 
 ### Developer
+- `run_resolve_tests.py --parity` / `--parity-quick` (`tests/resolve/parity.py`, docs/TESTING.md): every bundled
+  preset, every stage on its own, every NTSC setting and the other stages' options rendered in headless Resolve in
+  one session per configuration (CPU reference, GPU default, `NTSCRT_OFX_GPU=0`, `NTSCRT_NTSC_GPU=0`, the
+  reference again for noise), on the Fusion and Edit pages, frames up to an hour into a clip, 1080p and UHD
+  projects; frames compared against the CPU version with the HOST-GPU.md rule (exact where only the NTSC route
+  differs) and each case's route checked in the plug-in's log; `parity.md` / `.json` / `.csv`.
 - GPU NTSC, phase 4 (docs/dev/NTSC-GPU.md): the default rule (`NTSCRT_NTSC_GPU` unset / `auto` / `1` / `0` /
   `force`), Screen Loop's frame and history passes on the camera texture, `gpu-direct` host GPU frames with NTSC
   on, a per-frame fallback to ntsc-rs on GPU errors (three in a row: ntsc-rs for the instance), a one-entry cache

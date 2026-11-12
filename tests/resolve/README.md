@@ -59,6 +59,9 @@ timeline's resolution from a script crashed Resolve 21.1.2, so other sizes are m
 | debugall | the effect's *Debug logging* off; *Turn on debug logging for all effects* pressed (`SetInput("host_debug_all", 1)`), a few frames rendered, pressed again, more frames | the switch file appears and goes, the status line follows; one detailed line marked `debug_by=all` per frame while on, none once off. Headless runs keep the switch in `--out` (`NTSCRT_SETTINGS_DIR`); otherwise the user's switch is put back as it was found |
 | position | Edit page, headless with `--bundle`: a Fusion composition clip at 01:00:10:00 (and a generator / Adjustment Clip when scripting can give them an OpenFX effect), *Glitch pop* applied there through the dev copy's `NTSCRT_OFX_TEST_PRESET_FILE` | the frame ranges Resolve reports, the apply time, keyframes and first render are logged in the report; the frames match `ntscrt-cli --timeline` at the plug-in's frame numbers (mean diff ≤ 2), differ from the frozen look, and the keyed stretch covers them. Also how the Fusion and Edit pages interpolate keyframes (informational: 0 = linear, which the sparse keys assume) |
 
+`--parity` / `--parity-quick` (headless, `--bundle`; `parity.py`): GPU routes against the CPU version, one Resolve
+session per configuration, every preset and effect; see docs/TESTING.md, *GPU vs CPU parity*.
+
 ## When something fails
 Open the diff image named in the report (differences ×8). For render errors, read the
 `NTSCRT_OFX_LOG` file and Resolve's log (`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\logs\davinci_resolve.log`,
