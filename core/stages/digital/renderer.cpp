@@ -1,7 +1,9 @@
 // renderer.cpp — port of upstream DigitalVideoParams.swift and
-// DigitalVideoRenderer.swift (upstream v0.20.0, c6ab639).
+// DigitalVideoRenderer.swift (upstream v0.21.0, 8b26092).
 //
 // Differences from upstream, all deliberate:
+// - DigitalParam.startingValues (a new window's settings) are not ported: see
+//   renderer.h.
 // - vImageScale_ARGB8888(kvImageHighQualityResampling) is replaced by a
 //   separable Lanczos-5 resampler (scaleLanczos), see the note there.
 // - Settings history: instead of an opaque history id, every run records the
@@ -34,12 +36,14 @@ const ParamInfo kParams[kParamCount] = {
     {"fields", 0, 1, 1, true, true},
     {"aliasing", 0, 1, 0, false, true},
     {"sensor_noise", 0, 1, 0.4, false, false},
+    {"low_light_noise", 0, 1, 0, false, false},
     {"noise_reduction", 0, 1, 0.5, false, false},
     {"ccd_response", 0, 1, 0, false, false},
     {"white_balance", -1, 1, 0, false, false},
     {"tint", -1, 1, 0, false, false},
     {"saturation", 0, 2, 1, false, false},
     {"sharpening", 0, 1, 0, false, false},
+    {"sharpening_width", 1, 4, 1, false, false},
     {"codec", 0, 1, 0, true, true},
     {"chroma", 0, 3, 2, true, true},
     {"quality", 0, 1, 0.749, false, false},
@@ -628,6 +632,33 @@ float Renderer::meteredMean(const std::vector<uint8_t> &bgra, int w, int h, floa
     return weight > 0 ? sum / weight : 0.18f;
 }
 
+// Upstream 0.21 (Low-light noise). The median, not the exposure meter's
+// center-weighted mean: sources are footage some camera already exposed, and a
+// night shot's lit subject in the middle meters as bright as daylight, while
+// half its frame stays black.
+float Renderer::gainKnee() { return srgb_to_linear()[100]; }
+
+float Renderer::sensorGain(float m) { return std::min(8.0f, std::max(1.0f, gainKnee() / std::max(m, 1e-4f))); }
+
+float Renderer::medianLuma(const std::vector<uint8_t> &bgra, int w, int h) {
+    int counts[256] = {};
+    int n = 0;
+    for (int y = 0; y < h; y += 2) {
+        for (int x = 0; x < w; x += 2) {
+            size_t i = (size_t(y) * w + x) * 4;
+            int l = (306 * int(bgra[i + 2]) + 601 * int(bgra[i + 1]) + 117 * int(bgra[i])) >> 10;
+            counts[std::min(255, l)] += 1;
+            n += 1;
+        }
+    }
+    int seen = 0;
+    for (int v = 0; v < 256; ++v) {
+        seen += counts[v];
+        if (seen * 2 >= n) return srgb_to_linear()[v];
+    }
+    return 1;
+}
+
 float CCDResponse::exposure(float m) const {
     float full = std::min(4.0f, std::max(0.5f, kTarget / std::max(m, 1e-4f)));
     return std::pow(full, strength);
@@ -636,7 +667,8 @@ float CCDResponse::exposure(float m) const {
 PicturePtr Renderer::capture(const std::vector<uint8_t> &bgra, const Geometry &g, const Settings &settings,
                              int index, uint64_t seedMix) {
     const int w = g.width, h = g.height;
-    const float noise = float(settings[kSensorNoise]);
+    float noise = float(settings[kSensorNoise]);
+    const float lowLight = float(settings[kLowLightNoise]);
     const float nr = float(settings[kNoiseReduction]);
     const float warm = float(settings[kWhiteBalance]), magenta = float(settings[kTint]);
     const float ccd = float(settings[kCCDResponse]);
@@ -644,6 +676,7 @@ PicturePtr Renderer::capture(const std::vector<uint8_t> &bgra, const Geometry &g
     float gainR = 1 + 0.25f * warm, gainB = 1 - 0.25f * warm;
     float gainG = 1 - 0.15f * magenta;
     float flare = 0;
+    if (lowLight > 0 && noise > 0) noise *= 1 + lowLight * (sensorGain(medianLuma(bgra, w, h)) - 1);
     if (ccd > 0) {
         const float exposure = curve.exposure(meteredMean(bgra, w, h, gainR, gainG, gainB));
         gainR *= exposure;
@@ -659,7 +692,12 @@ PicturePtr Renderer::capture(const std::vector<uint8_t> &bgra, const Geometry &g
         const uint8_t *s = bgra.data();
         float *Y = yf.data(), *CB = cbf.data(), *CR = crf.data();
         parallel_for(h, [&](int y) {
-            SplitMix rng(((uint64_t(index) * 0x2545F4914F6CDD1Dull) ^ (uint64_t(y) * 0x9E3779B97F4A7C15ull)) ^ seedMix);
+            // The row's seed hashed first (upstream 0.21): SplitMix steps its
+            // state by the same constant the row number is multiplied by, so
+            // unhashed, each row would replay the row above a few pixels along
+            // (streaks instead of grain). The ctx seed mixes into the unhashed seed.
+            SplitMix seeder(((uint64_t(index) * 0x2545F4914F6CDD1Dull) ^ (uint64_t(y) * 0x9E3779B97F4A7C15ull)) ^ seedMix);
+            SplitMix rng(seeder.next());
             auto gauss = [&]() -> float {
                 double a = rng.unit();
                 double b = rng.unit();
@@ -706,8 +744,17 @@ PicturePtr Renderer::capture(const std::vector<uint8_t> &bgra, const Geometry &g
     }
     const float sharpening = float(settings[kSharpening]);
     if (sharpening > 0) {
-        // Detail: add back the difference from a local blur (halos).
-        std::vector<float> soft = boxBlur(yf, w, h, 1, 1);
+        // Detail: add back the difference from a local blur, so edges
+        // overshoot both ways (halos), as wide as the blur. A fractional
+        // width blends the two nearest whole radii.
+        const float width = std::min(4.0f, std::max(1.0f, float(settings[kSharpeningWidth])));
+        const int r = int(width);
+        const float f = width - float(r);
+        std::vector<float> soft = boxBlur(yf, w, h, r, 1);
+        if (f > 0) {
+            const std::vector<float> wider = boxBlur(yf, w, h, r + 1, 1);
+            for (size_t i = 0; i < soft.size(); ++i) soft[i] += (wider[i] - soft[i]) * f;
+        }
         for (size_t i = 0; i < yf.size(); ++i) yf[i] = clampf(yf[i] + 2.2f * sharpening * (yf[i] - soft[i]), 0, 255);
     }
     const float black = curve.setup() * 255;

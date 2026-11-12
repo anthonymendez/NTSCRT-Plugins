@@ -1,6 +1,14 @@
 // renderer.h — port of upstream Sources/CrtCodec/DigitalVideoParams.swift and
-// DigitalVideoRenderer.swift: the stage's settings, the camera (capture
-// timing, optics, sensor, electronics) and the stream around the codec.
+// DigitalVideoRenderer.swift (upstream v0.21.0, 8b26092): the stage's
+// settings, the camera (capture timing, optics, sensor, electronics) and the
+// stream around the codec.
+//
+// Not ported: DigitalParam.startingValues (0.21: a new app window starts with
+// the stage off but set to the "Cheap camcorder" look). A new plug-in instance
+// starts from the controls' defaults (kParams / the schema's "default"), which
+// upstream keeps for formats, resets and older looks: a host fills a preset's
+// missing values from the schema default, so starting values there would change
+// how older looks apply. The look itself is bundled (presets/Cheap camcorder.json).
 #pragma once
 
 #include <algorithm>
@@ -22,9 +30,9 @@ namespace ntscrt::digital {
 
 // Upstream DigitalParam.all order.
 enum Param : int {
-    kFrameRate, kFields, kAliasing, kSensorNoise, kNoiseReduction, kCCDResponse, kWhiteBalance, kTint,
-    kSaturation, kSharpening, kCodec, kChroma, kQuality, kKeyframeInterval, kFixedBitrate, kDeblocking,
-    kDataLoss, kDatamosh, kParamCount
+    kFrameRate, kFields, kAliasing, kSensorNoise, kLowLightNoise, kNoiseReduction, kCCDResponse, kWhiteBalance,
+    kTint, kSaturation, kSharpening, kSharpeningWidth, kCodec, kChroma, kQuality, kKeyframeInterval,
+    kFixedBitrate, kDeblocking, kDataLoss, kDatamosh, kParamCount
 };
 
 // Upstream DigitalCodecKind.
@@ -125,6 +133,13 @@ public:
                               int index, uint64_t seedMix = 0);
     // Center-weighted mean of linear luminance (camcorder auto exposure).
     static float meteredMean(const std::vector<uint8_t> &bgra, int w, int h, float gr, float gg, float gb);
+    // Low-light noise (upstream 0.21): the sensor gain a camera would have
+    // needed for a scene this dark, judged by its median brightness (linear):
+    // 1 down to gainKnee() (sRGB 100), rising as the median falls, up to 8x.
+    static float gainKnee();
+    static float sensorGain(float medianLuma);
+    // The median of the picture's brightness (Y', every other pixel each way), as linear light.
+    static float medianLuma(const std::vector<uint8_t> &bgra, int w, int h);
     static std::vector<uint8_t> render(const Picture &decoded, const Geometry &g, const Settings &settings,
                                        float step);
     static void upscale(const std::vector<uint8_t> &picture, Size size, uint8_t *base, int width, int height,

@@ -479,6 +479,8 @@ TEST_CASE("formats are distinct and defaults are upstream's") {
     CHECK(d[kFields] == 1);  // One field by default (0.20)
     CHECK(d[kCodec] == 0);
     CHECK(d[kCCDResponse] == 0);
+    CHECK(d[kLowLightNoise] == 0);     // 0.21: neutral, so older looks are unchanged
+    CHECK(d[kSharpeningWidth] == 1);   // 0.21: 1 px = the sharpening as before
     CHECK(d.chroma() == Chroma::HalfBoth);
     CHECK_FALSE(d.set("exposure", 1));  // gone (migrated to CCD response)
     CHECK_FALSE(d.set("lens_blur", 1));
@@ -567,6 +569,124 @@ TEST_CASE("sharpening overshoots") {
     CHECK(row(15) < 35);
     CHECK(row(16) > 205);
     CHECK(std::fabs(row(2) - 40) < 0.6f);
+}
+
+// Upstream DigitalVideoTests.testHaloWidth (0.21).
+TEST_CASE("halo width") {
+    const int w = 32, h = 16;
+    Pixels px(size_t(w) * h * 4, 255);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            for (int c = 0; c < 3; ++c) px[(size_t(y) * w + x) * 4 + c] = x < 16 ? 40 : 200;
+    auto row = [&](const PicturePtr &p) {
+        std::vector<float> r(static_cast<size_t>(w));
+        for (int x = 0; x < w; ++x) r[size_t(x)] = p->y.data[size_t(8) * p->y.width + x];
+        return r;
+    };
+    const auto tight = row(camera(px, w, h, {{"sharpening", 1}}));
+    CHECK(row(camera(px, w, h, {{"sharpening", 1}, {"sharpening_width", 1}})) == tight);  // 1 px is the sharpening as it always was
+    CHECK(std::fabs(tight[13] - 40) < 0.6f);  // a 1 px halo doesn't reach 3 px out
+    const auto wide = row(camera(px, w, h, {{"sharpening", 1}, {"sharpening_width", 3}}));
+    CHECK(wide[13] < 30);  // a 3 px halo does
+    CHECK(wide[18] > 210);
+    CHECK(std::fabs(wide[2] - 40) < 0.6f);  // flat areas untouched
+    const auto between = row(camera(px, w, h, {{"sharpening", 1}, {"sharpening_width", 2.5}}));
+    CHECK(between[13] < 40 - 0.6f);
+    CHECK(between[13] > wide[13]);  // fractional widths fall between
+}
+
+// Upstream DigitalVideoTests.testLowLightNoiseGrowsInTheDark (0.21).
+TEST_CASE("low-light noise grows in the dark") {
+    const int w = 64, h = 32;
+    auto flat = [&](uint8_t v) {
+        Pixels px(size_t(w) * h * 4, 255);
+        for (int i = 0; i < w * h; ++i)
+            for (int c = 0; c < 3; ++c) px[size_t(i) * 4 + c] = v;
+        return px;
+    };
+    auto lumas = [&](const PicturePtr &p) {
+        std::vector<std::vector<float>> ys(static_cast<size_t>(h), std::vector<float>(static_cast<size_t>(w)));
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) ys[size_t(y)][size_t(x)] = p->y.data[size_t(y) * p->y.width + x];
+        return ys;
+    };
+    auto spread = [&](const PicturePtr &p) {
+        auto ys = lumas(p);
+        float sum = 0;
+        for (auto &r : ys)
+            for (float v : r) sum += v;
+        const float mean = sum / float(w * h);
+        float sq = 0;
+        for (auto &r : ys)
+            for (float v : r) sq += (v - mean) * (v - mean);
+        return std::sqrt(sq / float(w * h));
+    };
+    // The Y plane, coded size (padded), for exact comparisons.
+    auto yplane = [](const PicturePtr &p) { return p->y.data; };
+    const Pixels night = flat(25), day = flat(180);
+    const float plain = spread(camera(night, w, h, {{"sensor_noise", 0.1}}));
+    const float gained = spread(camera(night, w, h, {{"sensor_noise", 0.1}, {"low_light_noise", 1}}));
+    INFO("a dark scene gets the gain's noise: " << plain << " -> " << gained);
+    CHECK(gained > plain * 3);
+    {
+        // Grain, not streaks: nearby rows' noise is unrelated at any shift.
+        auto ys = lumas(camera(night, w, h, {{"sensor_noise", 0.1}, {"low_light_noise", 1}}));
+        float sum = 0;
+        for (auto &r : ys)
+            for (float v : r) sum += v;
+        const float mean = sum / float(w * h);
+        float worst = 0;
+        for (int k = 1; k <= 8; ++k)
+            for (int d = -3; d <= 3; ++d) {
+                float sab = 0, saa = 0, sbb = 0;
+                for (int y = 0; y < h - k; ++y)
+                    for (int x = 3; x < w - 3; ++x) {
+                        const float a = ys[size_t(y)][size_t(x)] - mean, b = ys[size_t(y + k)][size_t(x + d)] - mean;
+                        sab += a * b;
+                        saa += a * a;
+                        sbb += b * b;
+                    }
+                worst = std::max(worst, std::fabs(sab / std::sqrt(saa * sbb)));
+            }
+        INFO("rows repeat nearby rows, shifted: " << worst);
+        CHECK(worst < 0.2f);
+    }
+    // A flash-lit night shot: a bright subject filling the middle of a black
+    // frame still reads as night (the exposure meter wouldn't).
+    Pixels lit = flat(20);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            if (std::abs(x - w / 2) < 14)
+                for (int c = 0; c < 3; ++c) lit[(size_t(y) * w + x) * 4 + c] = 235;
+    CHECK(Renderer::meteredMean(lit, w, h, 1, 1, 1) > Renderer::gainKnee());  // the scenario: meters as bright
+    CHECK(Renderer::sensorGain(Renderer::medianLuma(lit, w, h)) > 4);
+    const float half = spread(camera(night, w, h, {{"sensor_noise", 0.1}, {"low_light_noise", 0.5}}));
+    CHECK((half > plain && half < gained));
+    CHECK(yplane(camera(day, w, h, {{"sensor_noise", 0.1}})) ==
+          yplane(camera(day, w, h, {{"sensor_noise", 0.1}, {"low_light_noise", 1}})));  // daylight needs no gain
+    CHECK(yplane(camera(night, w, h, {{"low_light_noise", 1}})) == yplane(camera(night, w, h, {})));  // nothing without sensor noise
+}
+
+// Plug-in check of the 0.21 noise-seed change: rows no longer replay the row
+// above (upstream's SplitMix row seeds, unhashed, were row 0's stream advanced).
+TEST_CASE("sensor noise rows are independent (hashed row seeds)") {
+    const int w = 64, h = 32;
+    Pixels px(size_t(w) * h * 4, 255);
+    for (size_t i = 0; i < px.size(); i += 4) px[i] = px[i + 1] = px[i + 2] = 128;
+    auto p = camera(px, w, h, {{"sensor_noise", 1}});
+    // Unhashed (capture 0, seed 0), row y's seed was y steps of SplitMix from 0 and
+    // a pixel takes six draws, so row 6 was row 0 one pixel along (exactly, on a
+    // flat picture). No row now repeats a nearby row at a small shift.
+    int repeats = 0;
+    for (int k = 1; k <= 8; ++k)
+        for (int y = k; y < h; ++y)
+            for (int d = -3; d <= 3; ++d) {
+                int same = 0;
+                for (int x = 3; x < w - 3; ++x)
+                    same += p->y.data[size_t(y) * p->y.width + x] == p->y.data[size_t(y - k) * p->y.width + x + d] ? 1 : 0;
+                repeats += same > (w - 6) / 2 ? 1 : 0;
+            }
+    CHECK(repeats == 0);
 }
 
 // Fine gray stripes, finer than a 160-wide camera can hold.
