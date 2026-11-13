@@ -45,10 +45,15 @@ The CPU path, for comparison (Resolve's CPU images): Resolve downloads the float
 8 bits on the CPU, uploads it, …, downloads the CRT's half-float result and converts it to float on the CPU,
 then Resolve uploads it again.
 
-Third route, `gpu-cpuconvert`: in *Clip* mode a source with transparent pixels (a title, a Fusion source smaller
-than the frame) needs the CPU path's hole filling (pull-push in `to_bgra8`); a kernel checks each row for
-transparent pixels (`hostgpu_flags/row_flags`, one GPU round trip) and if there are any the float frame is read
-into CPU memory and converted there, as on the CPU path. The output still goes back GPU to GPU.
+In *Clip* mode a source with transparent pixels (a title, a transformed clip, a Fusion source smaller than the
+frame) needs the CPU path's hole filling (`fill_transparent`'s pull-push in `to_bgra8`): a kernel checks each
+row for transparent pixels (`hostgpu_flags/row_flags`, one GPU round trip) and if there are any the holes are
+filled by kernels on the GPU, with the same bytes ([Hole filling on the GPU](#hole-filling-on-the-gpu)), so the
+frame keeps its route (`gpu-direct`, or `gpu-download` when a CPU stage needs the picture); the timings say
+` fill_route=gpu (auto: <GPU>, arith float)`. Third route, `gpu-cpuconvert`: with `NTSCRT_FILL_GPU=0`, where the
+route's rule says no, or for a frame whose fill kernels fail (` fill_route=cpu (<why>)`), the float frame is
+read into CPU memory and converted there, as on the CPU path (up to 0.5.0-rc.5, every such frame did). The
+output still goes back GPU to GPU.
 
 Ordering: `cuGraphicsMapResources` waits for the D3D11 work issued before it and `cuGraphicsUnmapResources`
 makes later D3D11 work wait for the CUDA copies issued before it, so neither side blocks the CPU; the render
@@ -103,6 +108,74 @@ but has never run in Resolve on a Mac, so the plug-in only offers Metal with `NT
   `out` the conversion of the bands it read.
   `NTSCRT_OFX_LOG_VERBOSE=1` logs every render.
 
+## Hole filling on the GPU
+
+Code: `core/src/shaders/hostgpu_fill.slang` (kernels), `core/src/host_gpu_fill.cpp` (`hostgpu::Fill`, the route
+rule), `host_gpu.cpp` (`convert_filled`). Reference and fallback: `fill_transparent` in `pixel_convert.cpp`,
+unchanged.
+
+What the CPU code computes (Clip mode, some pixel's alpha at or below 0.5/255): on to_bgra8's 8-bit picture, each
+pixel weighted 1 when its alpha is above 0.5/255, else 0, a pyramid of levels down to 1 x 1, each pixel the
+weighted mean of a 2 x 2 block of the level below (on odd sizes the edge pixel is counted twice) with weight
+`min(1, sum)`; then from the top down, every pixel of weight < 1 takes the bilinear sample of the (finished)
+coarser level; on the picture itself only transparent pixels change, to level 1's bilinear sample rounded to 8
+bits. Nothing changes when every pixel is transparent. Every step but the order of the levels is per pixel, so
+it maps onto one dispatch per level:
+
+| CPU step | kernel |
+|---|---|
+| to_bgra8's colour and weight of each pixel + the first level | `fill_down0` (from the host's source texture: convert_in's arithmetic, then the 2 x 2 means) |
+| the other levels | `fill_down`, one dispatch per level (RGBA32F: r, g, b, weight) |
+| the push, coarse to fine | `fill_up`, one dispatch per level (into a second texture per level: RW textures are only readable as R32F) |
+| the picture | `convert_fill`: convert_in, transparent pixels from level 1 (none when the top level's weight is 0), cut to the look's crop |
+
+At UHD that is 12 levels, 25 dispatches, ~45 MB of level textures (kept per instance).
+
+**Exactness: byte-identical.** The weights are 0 or 1 at every level (`min(1, a whole number)`), so each mean
+is a sum of up to four floats divided by 1, 2, 3 or 4, and the push only copies a sample where the weight is 0.
+The CPU (MSVC `/fp:precise`, SSE2: nothing fused) rounds each product and each sum to float, in a fixed order.
+The kernels do the same with the Digital video port's tools (DIGITAL-GPU.md): every value `precise` and through
+`A.mul` / `A.add`, plain float where the probe (`fill_probe`, the same three tests as Digital video's) says the
+device rounds a precise product and sum to nearest without fusing them, double-precision `*_x` kernels
+otherwise. No GPU division: `/2` and `/4` are multiplications (exact), `/3` (`div3`) takes the float nearest
+`s / 3` among the five around `s * float(1/3)`, by residuals `s - 3q` computed exactly (TwoSum: `2q + q` and its
+rounding error; the difference of two floats within a factor 2 is exact; the residual is a small multiple of
+`q`'s last place); there are no ties. The 8-bit values are `k / 255.f` from a table the CPU makes, not a GPU
+division. The colour of each pixel is convert_in's (`div` with the Newton step, `q8`). Bilinear weights are
+quarters (exact).
+
+Measured (`test_fill_gpu`, 175 cases: none / all transparent / single pixels / borders / a large hole / noise /
+a soft ramp / stripes / NaN alpha, at 1x1, 2x1, 1x2, 2x2, 3x3, 5x1, 1x7, 17x9, 64x64, 65x33, 333x197, 1001x3,
+3x1001, 241x135 and 1080p, UHD once; float, half and 8-bit sources, straight and premultiplied, both row
+orders, crops, sources smaller than the frame, moved, partly or wholly outside it): RTX 5090 0 bytes different,
+plain and double kernels. WARP: the fill itself 0 bytes different (checked against `fill_transparent` run on
+WARP's own convert_in picture); 4 premultiplied soft-alpha cases differ from the CPU path by one level in 3-215
+bytes, all in convert_in's division (WARP doesn't fuse `mad`, so `div`'s Newton step isn't exact there): a
+property of the existing conversion kernel, not of the fill, and host GPU frames never run on WARP (the bridge
+needs the host's GPU). `test_host_gpu`: Clip-mode frames with holes in every format, straight and premultiplied,
+crop, render scale, moved and smaller sources, Digital video: `gpu-direct` (`gpu-download` with
+`NTSCRT_DIGITAL_GPU=0`), 0 values different from the CPU path (float and 8-bit; half: the usual output rounding).
+
+**The rule** (`fill_gpu_route`, decided per instance on its first frame with holes, again when `NTSCRT_FILL_GPU`
+changes or the device is replaced; `GpuRoute` / `gpu_route_on` as the NTSC and Digital video routes): `0` = the
+CPU code (`gpu-cpuconvert`); not on Metal unless `force` (compiled, unverified, fast math); not on a software
+device (WARP) unless `force`; not where the probe says `inexact` unless `force`. A GPU error takes the CPU code
+for that frame, three in a row for the instance. `NTSCRT_FILL_GPU_ARITH=float` / `double` picks the kernels
+whatever the probe says (the test runs both).
+
+**Speed** (UHD float frame with transparent corners in Clip mode, `test_host_gpu`'s `NTSCRT_HOSTGPU_BENCH=1`
+case, `NTSCRT_PROFILE=1`, RTX 5090 + Ryzen 9 9950X3D, ms per frame, frames 9-11; raw: `C:/ntb/w15b-fillbench-profile2.txt`
+on the dev PC):
+
+| | `in=` (holes) | `in=` (the same frame opaque) | path |
+|---|---|---|---|
+| GPU fill (default) | 1.2-1.6 | 0.9 | `gpu-direct` |
+| `NTSCRT_FILL_GPU=0` (as 0.5.0-rc.5) | 98-102 (+ 2.0 `upload=`) | 0.9 | `gpu-cpuconvert` |
+
+So the fill's kernels cost ~0.3-0.7 ms of GPU time at UHD; the CPU fill (`fill_transparent`, then
+single-threaded) and the float frame's download had cost ~100 ms. The check for holes (`row_flags` and its 34 KB
+download at UHD) still costs a GPU round trip per Clip-mode frame, as before.
+
 ## Output vs the CPU path
 
 The conversion kernels do the CPU path's arithmetic (`to_bgra8`, `merge_alpha`): the same 8-bit rounding (round
@@ -132,9 +205,16 @@ half-float), so on 8-bit and half-float comps the effect now gets and writes flo
   at render scale 0.5, with holes in Clip mode, a source smaller than the frame), NTSC off, half float, 8-bit,
   premultiplied and straight alpha in Clip and Spill, render scale 0.5, crop, Digital video (on and off, with
   and without NTSC, formats, *Webcam (low quality)*, crop, render scale, holes; the CPU reference also with
-  `NTSCRT_DIGITAL_GPU=0`). 0 values differ except half-float output, and each case checks its route
-  (`gpu-direct` with NTSC and Digital video on the GPU, `gpu-cpuconvert` with holes, `gpu-download` with
-  `NTSCRT_DIGITAL_GPU=0`). Skipped without an NVIDIA driver (CI).
+  `NTSCRT_DIGITAL_GPU=0`), Clip mode with holes in every format (straight and premultiplied, crop, render
+  scale, moved and smaller sources). 0 values differ except half-float output, and each case checks its route
+  (`gpu-direct` with NTSC and Digital video on the GPU and with holes, `fill_route=gpu`; `gpu-cpuconvert` with
+  `NTSCRT_FILL_GPU=0`; `gpu-download` with `NTSCRT_DIGITAL_GPU=0`). Premultiplied 8-bit and half-float output in
+  Clip mode differs from the CPU path by up to one 8-bit level / half-float step on 1-27% of the values
+  (`merge_out`'s rounding of RGB × alpha, the same with the CPU fill; Resolve's GPU images are float, where it's
+  exact): there the test checks the GPU fill's output is the CPU fill's on the same path, value for value.
+  Skipped without an NVIDIA driver (CI).
+- `test_fill_gpu` (core, runs in CI on WARP): the fill kernels against `to_bgra8` + `fill_transparent`, byte for
+  byte ([Hole filling on the GPU](#hole-filling-on-the-gpu)).
 - `test_ofx` "GPU render (fake CUDA host)": the mock OpenFX host hands the plug-in CUDA images
   (`kOfxImageEffectPropCudaEnabled`, a stream) and the same frames are compared with CPU-image renders: default
   look, NTSC off, alpha in both modes, render scale 0.5, a render window smaller than the frame, Digital video

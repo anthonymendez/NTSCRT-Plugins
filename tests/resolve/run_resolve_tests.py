@@ -1834,7 +1834,9 @@ def gpu_ab(a):
                                        "cpu": count(gpu_log, r" path=cpu"), "fallback": count(gpu_log, r"cpu-fallback")},
                "cpu_session_renders": {"cpu": count(cpu_log, r" path=cpu"), "gpu": count(cpu_log, r" path=gpu-")},
                "ntsc_routes": {s: {"gpu": count(t, r" ntsc_route=gpu"), "cpu": count(t, r" ntsc_route=cpu")}
-                               for s, t in ((first, cpu_log), (second, gpu_log))}}
+                               for s, t in ((first, cpu_log), (second, gpu_log))},
+               # Clip mode's hole filling (the title in Clip mode): on the GPU unless NTSCRT_FILL_GPU=0 (HOST-GPU.md)
+               "fill_routes": {"gpu": count(gpu_log, r" fill_route=gpu"), "cpu": count(gpu_log, r" fill_route=cpu")}}
     # Informational: the sources themselves (they should match: Resolve rendered the same pictures), and
     # the int8 / float16 Fusion cases, where the GPU session's plug-in gets float images (Fusion converts
     # for GPU plug-ins) and so writes a half-float result where the CPU session's writes 8 / 16 bits.
@@ -1851,6 +1853,8 @@ def gpu_ab(a):
         problems.append("renders of the GPU session got CPU images or fell back to the CPU path")
     if first.startswith("cpu") and summary["cpu_session_renders"]["gpu"]:
         problems.append("the CPU session took the GPU path")
+    if second.startswith("gpu") and (summary["gpu_session_renders"]["gpu-cpuconvert"] or summary["fill_routes"]["cpu"]):
+        problems.append("Clip mode's holes were filled on the CPU in the GPU session (gpu-cpuconvert / fill_route=cpu)")
     doc = {"summary": summary, "problems": problems, "results": results}
     (base / "gpu-ab.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
     print("GPU_AB " + json.dumps(summary))

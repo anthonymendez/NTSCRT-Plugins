@@ -192,6 +192,10 @@ struct ntscrt_instance {
     // Host GPU frames (host_gpu.cpp): the bridge to the host's GPU memory, made
     // on the first such render.
     std::unique_ptr<hostgpu::Bridge> bridge;
+    // Clip mode's hole filling for those frames on the GPU (HOST-GPU.md; NTSCRT_FILL_GPU),
+    // made on the first frame with transparent pixels.
+    std::unique_ptr<hostgpu::Fill> fill_gpu;
+    GpuRoute fill_route;  // (facade::fill_gpu)
     PhaseTimes times;  // where the last render call's time went (ntscrt_last_timings, testing::last_phases)
 };
 
@@ -213,6 +217,8 @@ gpu::Backend pick_backend(ntscrt_gpu_backend b) {
 void drop_gpu(ntscrt_instance *inst) {
     // The stages and pooled textures belong to the device: they go first.
     inst->bridge.reset();
+    inst->fill_gpu.reset();
+    inst->fill_route = {};
     inst->tex_pool.clear();
     inst->howl.reset();
     inst->howl_crt.reset();
@@ -1092,6 +1098,18 @@ ntscrt_status facade::fail(ntscrt_instance *inst, ntscrt_status s, std::string m
 }
 gpu::Device *facade::device(ntscrt_instance *inst) { return inst->dev.get(); }
 std::unique_ptr<hostgpu::Bridge> &facade::bridge(ntscrt_instance *inst) { return inst->bridge; }
+hostgpu::Fill *facade::fill_gpu(ntscrt_instance *inst, gpu::Device &dev, std::string &why) {
+    if (!inst->fill_gpu) inst->fill_gpu = std::make_unique<hostgpu::Fill>(dev);
+    hostgpu::Fill *f = inst->fill_gpu.get();
+    return gpu_route_on(inst->fill_route, hostgpu::fill_gpu_env_text(),
+                        [&](std::string *w) { return hostgpu::fill_gpu_route(dev, w, f); }, why)
+               ? f
+               : nullptr;
+}
+void facade::fill_gpu_done(ntscrt_instance *inst, const std::string *error, std::string &why) {
+    if (!error) inst->fill_route.failures = 0;
+    else gpu_route_failed(inst->fill_route, "the CPU code (gpu-cpuconvert)", *error, why);
+}
 PhaseTimes &facade::times(ntscrt_instance *inst) { return inst->times; }
 
 extern "C" {

@@ -6,6 +6,7 @@ add_library(ntscrt_core STATIC
   src/pixel_convert.cpp
   src/frames_needed.cpp
   src/host_gpu.cpp
+  src/host_gpu_fill.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/embedded_schema.cpp)
 
 ntscrt_embed_text(${CMAKE_CURRENT_BINARY_DIR}/embedded_schema.cpp
@@ -21,7 +22,8 @@ add_subdirectory(gpu)
 ntscrt_add_shaders(ntscrt_core ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/facade.slang)
 # Host GPU frames (ntscrt_render_host_gpu): CUDA <-> D3D11 on Windows, MTLBuffer <-> Metal on macOS.
 ntscrt_add_shaders(ntscrt_core ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hostgpu_in.slang
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hostgpu_flags.slang ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hostgpu_out.slang)
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hostgpu_flags.slang ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hostgpu_out.slang
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hostgpu_fill.slang)
 if(WIN32)
   target_sources(ntscrt_core PRIVATE src/host_gpu_cuda.cpp)
 elseif(APPLE)

@@ -55,7 +55,7 @@ from pathlib import Path
 import run_resolve_tests as rrt
 
 ROOT = rrt.ROOT
-ENV_KEYS = ("NTSCRT_NTSC_GPU", "NTSCRT_DIGITAL_GPU", "NTSCRT_OFX_GPU", "NTSCRT_FAST_TRANSFER")
+ENV_KEYS = ("NTSCRT_NTSC_GPU", "NTSCRT_DIGITAL_GPU", "NTSCRT_OFX_GPU", "NTSCRT_FAST_TRANSFER", "NTSCRT_FILL_GPU")
 CPU_ENV = {"NTSCRT_NTSC_GPU": "0", "NTSCRT_DIGITAL_GPU": "0", "NTSCRT_OFX_GPU": "0", "NTSCRT_FAST_TRANSFER": "0"}
 # "digital": the Digital video route its frames must log (digital_route=; DIGITAL-GPU.md). With ntsc-rs
 # (mixb) Digital video stays on the CPU where NTSC is on (ntsc-rs needs the picture there), on the GPU where
@@ -325,7 +325,8 @@ def build_cases(quick=False):
                 continue
             add(f"{srcname}-{lab}", "format", prm, menu=menu, source=srcname, tags=("depth",) if srcname != "small" else ())
 
-    # Alpha: a title over transparency, both Transparent-areas modes (Clip fills the holes: gpu-cpuconvert).
+    # Alpha: a title over transparency, both Transparent-areas modes (Clip fills the holes: on the GPU with host GPU
+    # frames, fill_route=gpu, so the path stays gpu-direct / gpu-download; route_problems checks it).
     title_frames = [0, 149] if quick else [0, 75, 149]
     for lab, prm, menu in (("clip", {"alpha_mode": 0}, None), ("spill", {"alpha_mode": 1}, None),
                            ("all-off-clip", dict(ALL_OFF, alpha_mode=0), None),
@@ -578,6 +579,7 @@ def log_routes(text):
     """Route summary of the plug-in's render lines in `text`."""
     paths, ntsc, reasons, ts, inst, loops, errs = {}, {}, set(), set(), set(), {"gpu": 0, "cpu": 0}, []
     digital, digital_reasons = {}, set()
+    fill, fill_reasons = {}, set()  # Clip mode's hole filling (host GPU frames with transparent pixels)
     sizes, depths = set(), set()
     identity = 0
     for line in text.splitlines():
@@ -610,12 +612,17 @@ def log_routes(text):
             digital[r.group(1)] = digital.get(r.group(1), 0) + 1
             if r.group(2):
                 digital_reasons.add(f"{r.group(1)} ({r.group(2)})")
+        r = re.search(r" fill_route=(gpu|cpu)(?: \(([^)]*)\))?", rest)
+        if r:
+            fill[r.group(1)] = fill.get(r.group(1), 0) + 1
+            if r.group(2):
+                fill_reasons.add(f"{r.group(1)} ({r.group(2)})")
         lp = re.search(r" ntsc_loop=gpu:(\d+),cpu:(\d+)", rest)
         if lp:
             loops["gpu"] += int(lp.group(1))
             loops["cpu"] += int(lp.group(2))
     return {"paths": paths, "ntsc": ntsc, "ntsc_reasons": sorted(reasons), "digital": digital,
-            "digital_reasons": sorted(digital_reasons), "t": sorted(ts, key=lambda v: float(v)),
+            "digital_reasons": sorted(digital_reasons), "fill": fill, "fill_reasons": sorted(fill_reasons), "t": sorted(ts, key=lambda v: float(v)),
             "instances": sorted(inst), "ntsc_loop": loops, "errors": errs[:5], "sizes": sorted(sizes), "identity": identity,
             "depths": sorted(depths)}
 
@@ -921,6 +928,13 @@ def route_problems(cfg, r):
     dother = "cpu" if dwant == "gpu" else "gpu"
     if r.get("digital", {}).get(dother):
         out.append(f"digital_route={dother} x{r['digital'][dother]} ({'; '.join(r.get('digital_reasons', []))[:160]})")
+    # Host GPU frames in Clip mode with transparent pixels (titles, transformed / smaller clips): the holes are
+    # filled on the GPU (HOST-GPU.md), so no frame comes down for the CPU fill (gpu-cpuconvert).
+    if want["frames"] == "gpu":
+        if "path=gpu-cpuconvert" in paths:
+            out.append(f"path=gpu-cpuconvert x{paths['path=gpu-cpuconvert']} (Clip mode's holes filled on the CPU)")
+        if r.get("fill", {}).get("cpu"):
+            out.append(f"fill_route=cpu x{r['fill']['cpu']} ({'; '.join(r.get('fill_reasons', []))[:160]})")
     if r.get("errors"):
         out.append("log: " + " | ".join(r["errors"])[:300])
     return out

@@ -95,6 +95,11 @@ written but not yet built.
   the CPU version (docs/ENVIRONMENT.md); the log says which (`Digital video route: ...`).
 
 ### Changed
+- **Titles and moved or shrunk clips stay on the GPU** (NVIDIA GPU frames, *Transparent areas: Clip*): their
+  transparent areas are now filled from the nearest colours by GPU kernels, with the same pictures byte for byte,
+  instead of the frame going down to the CPU and back. The fill of a UHD frame with transparent areas took ~100 ms
+  and now ~1 ms. `NTSCRT_FILL_GPU=0` brings back the CPU fill (docs/ENVIRONMENT.md); the log line says which
+  (`fill_route=`).
 - **Glitch** and **Digital video** (with Datamosh) past the first minute of an effect look slightly different
   from 0.5.0-rc.2: the Glitch receiver's simulated history (sync, vertical roll, colour lock) restarts at every
   minute boundary of the effect (a minute of timecode: 01:00:00:00, 01:01:00:00, ...; 60 s of the rounded frame
@@ -270,6 +275,19 @@ written but not yet built.
   settings.
 
 ### Developer
+- Clip mode's hole filling on the GPU (docs/dev/HOST-GPU.md, "Hole filling on the GPU"): `fill_transparent`'s
+  pull-push as kernels (`core/src/shaders/hostgpu_fill.slang`: `fill_down0` from the host source, `fill_down`,
+  `fill_up` per level, `convert_fill`; driver `hostgpu::Fill` in `core/src/host_gpu_fill.cpp`), byte-identical
+  (weights are 0 or 1, so the means divide by 1-4: `/3` picked by exact residuals, everything else exact or
+  precise float through `IArith` with a probe and double-precision `*_x` kernels as Digital video's; 8-bit values
+  from the CPU's table). Host GPU frames with holes keep `gpu-direct` / `gpu-download`; `gpu-cpuconvert` only with
+  `NTSCRT_FILL_GPU=0` (gpu_route.h values, `GpuRoute` in the façade, per-frame fallback), off on Metal and WARP
+  unless forced; ` fill_route=` in the timings. Tests: `test_fill_gpu` (175 hole shapes / sizes / formats / row
+  orders / placements / crops, plain and double kernels, GPU and WARP), Clip-with-holes cases in every format,
+  moved and smaller sources and `NTSCRT_FILL_GPU=0` in `test_host_gpu` (and its UHD bench); the parity suite and
+  `--gpu-ab` fail on `gpu-cpuconvert` / `fill_route=cpu` in GPU-frames sessions. Found on the way: premultiplied
+  8-bit / half-float host GPU output differs from the CPU path by one level / half step on 1-27% of the values
+  (`merge_out`'s rounding, not new; Resolve hands float images), documented in HOST-GPU.md.
 - CRT render order (docs/dev/CRT.md): librashader's `clear_history` never clears `PassFeedback`, so crtsim's
   "prime on a seek" read the last frame rendered. A crtsim frame is now two chain frames, its own input with the
   persistence at 0 (exactly a zeroed feedback) then the frame; `test_crt_order` (every bundled preset, many render

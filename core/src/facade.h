@@ -17,6 +17,7 @@
 
 namespace ntscrt::hostgpu {
 class Bridge;
+class Fill;
 }
 
 namespace ntscrt::facade {
@@ -81,5 +82,11 @@ ntscrt_status fail(ntscrt_instance *inst, ntscrt_status s, std::string msg);
 gpu::Device *device(ntscrt_instance *inst);  // nullptr: no GPU
 std::unique_ptr<hostgpu::Bridge> &bridge(ntscrt_instance *inst);
 PhaseTimes &times(ntscrt_instance *inst);
+// Clip mode's hole filling on the GPU (host GPU frames; NTSCRT_FILL_GPU): the instance's
+// kernels when its route is on, else nullptr; `why` gets the route's reason either way.
+// fill_gpu_done: the kernels ran (error null) or failed (that frame takes the CPU code;
+// after 3 in a row the instance does, `why` then says so).
+hostgpu::Fill *fill_gpu(ntscrt_instance *inst, gpu::Device &dev, std::string &why);
+void fill_gpu_done(ntscrt_instance *inst, const std::string *error, std::string &why);
 
 }  // namespace ntscrt::facade
