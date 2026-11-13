@@ -791,7 +791,8 @@ class Session:
         mi = next(t for t in comp.GetToolList(False).values() if t.GetAttrs("TOOLS_RegID") == "MediaIn")
         srcs = {}
         for name, depth in (("f32", 4), ("i8", 1), ("f16", 3)):
-            if any(c["source"] == name for c in cases):
+            # (the smaller source is made from the float one, so "small" needs it too: --parity-groups format)
+            if any(c["source"] == name or (name == "f32" and c["source"] == "small") for c in cases):
                 cd = fu.add("ChangeDepth", Depth=depth)
                 cd.Input = mi.Output
                 srcs[name] = cd

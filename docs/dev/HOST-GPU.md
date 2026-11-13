@@ -418,3 +418,17 @@ With `--alpha` (transparent and half-transparent areas, Clip mode: the fill):
 | 1920x1080 | rgba8 | default | 22.40 | 9.90 | -56% | 19.24 / 1.68 / 0.53 | 6.94 / 1.65 / 0.47 |
 | 1920x1080 | rgba8 | ntsc_off | 21.23 | 8.77 | -59% | 19.21 / 0.80 / 0.51 | 6.93 / 0.75 / 0.42 |
 | 1920x1080 | rgba8 | clean_crt | 21.18 | 8.75 | -59% | 19.09 / 0.79 / 0.50 | 6.89 / 0.76 / 0.43 |
+
+Resolve (`run_resolve_tests.py --headless --only bench --bench-repeat 3`, `NTSCRT_OFX_GPU=0`: CPU frames; 300-frame
+render jobs, H.264 NVENC, 60 fps; median of 3; v0.5.0-rc.5's bundle against this one, back to back under the
+Resolve lock; raw: `C:/ntb/w15b-res/bench-{base,new}.log`). Job wall time (Resolve reports job ends in ~0.5 s
+steps) and the plug-in's own median ms per render:
+
+| | UHD rc.5 | UHD now | 1080p rc.5 | 1080p now |
+|---|---|---|---|---|
+| default look | 8.36 s / 12.7 ms | 7.87 s / 12.1 ms | 3.85 s / 4.2 ms | 3.85 s / 4.1 ms |
+| *Clean CRT* | 7.35 s / 9.8 ms | 7.35 s / 9.2 ms | 3.35 s / 3.1 ms | 3.35 s / 2.9 ms |
+| default, NTSC off | 7.35 s / 9.8 ms | 7.35 s / 9.2 ms | 3.35 s / 3.0 ms | 3.35 s / 2.9 ms |
+
+(the clip without the effect: 2.36 s UHD, 1.34 s 1080p). The bench clip is opaque, so the fill's gain doesn't
+show there; the rest is Resolve's own transfer of the float frames to and from CPU memory.
