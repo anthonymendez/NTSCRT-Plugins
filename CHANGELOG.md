@@ -195,7 +195,7 @@ written but not yet built.
   frames), and Resolve rendered and kept all of them before every frame: a UHD timeline reached 40 GB before its
   first frame. The effect now reads those frames only when it needs them, one at a time, with the same pictures. A
   jump far into a clip still has to replay up to 16 seconds of the loop, and Resolve keeps every frame it hands
-  over (about 80 MB each at 1080p, 330 MB at UHD, up to its *Limit Resolve memory usage* preference; see
+  over (about 80 MB each at 1080p, 200-330 MB at UHD, up to its *Limit Resolve memory usage* preference; see
   docs/dev/SCREENLOOP-MEMORY.md).
 - **Screen Loop playback past 16 seconds** no longer replays 8 seconds of the loop every 8 seconds: the next
   stretch's history is now built along the way (no frames read again from Resolve, no pause; same pictures).

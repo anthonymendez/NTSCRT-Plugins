@@ -372,7 +372,7 @@ def build_cases(quick=False):
                 continue
             if lab == "bottom-to-top":
                 # Screen Loop on an Edit-page clip at 1080p / UHD: frame 1850 is a cold seek that fetches 410 full-size
-                # history frames, and Resolve keeps every frame it hands out (~80 MB each at 1080p, ~330 MB at UHD:
+                # history frames, and Resolve keeps every frame it hands out (~80 MB each at 1080p, 200-330 MB at UHD:
                 # docs/dev/SCREENLOOP-MEMORY.md). A group and a section of their own, rendered last in a session.
                 if not quick:
                     add(f"{proj}-edit-{lab}", "sizeloop", prm, where=f"{proj}-editloop", look=look, fr=[0, 1850],
