@@ -37,6 +37,8 @@ struct Source {
     std::map<int64_t, std::vector<uint8_t>> px;
     std::map<int64_t, ntscrt_image> img;
     int fetches = 0;
+    size_t held_max = 0;            // host images handed out and not yet released, at most
+    int64_t first = -1, last = -1;  // the earliest / latest frame fetched since the counters were reset
     static std::vector<uint8_t> make(int64_t f) {
         std::vector<uint8_t> p(size_t(W) * H * 4);
         for (int y = 0; y < H; ++y)
@@ -55,8 +57,11 @@ const ntscrt_image *fetch(void *u, int64_t f) {
     auto *s = static_cast<Source *>(u);
     if (f < 0) return nullptr;
     ++s->fetches;
+    if (s->first < 0 || f < s->first) s->first = f;
+    if (f > s->last) s->last = f;
     s->px[f] = Source::make(f);
     s->img[f] = {W, H, ptrdiff_t(W) * 4, NTSCRT_RGBA8, s->px[f].data()};
+    if (s->img.size() > s->held_max) s->held_max = s->img.size();
     return &s->img[f];
 }
 void release(void *u, const ntscrt_image *im) {
@@ -115,6 +120,8 @@ struct Inst {
         ra.release_source = release;
         ra.user = &src;
         src.fetches = 0;
+        src.held_max = 0;
+        src.first = src.last = -1;
         const ntscrt_status st = ntscrt_render_cpu(p, &ra, &s, &d);
         CHECK_MESSAGE(st == NTSCRT_OK, ntscrt_last_error(p));
         timings = ntscrt_last_timings(p);
@@ -174,6 +181,50 @@ TEST_CASE("Screen Loop: default window, a seek past two windows and back") {
     }
     Inst b("{}", fb);
     CHECK(b.render(481) == want);  // window start 240
+}
+
+TEST_CASE("Screen Loop: a far cold seek has a bounded cost and holds one host frame at a time") {
+    // Default window (240 frames): a cold seek to N re-runs the loop from its window start
+    // A(N) = (floor(N / 240) - 1) * 240, so it fetches at most 2 * 240 - 1 earlier source frames,
+    // never one before A(N), and gives each host image back before asking for the next one (a
+    // host's UHD float frame is ~133 MB; Resolve keeps every frame fetched: docs/dev/SCREENLOOP-MEMORY.md).
+    // The frames after it continue: no fetch at all, window starts included.
+    const std::string fb = feedback("Bottom to top", 240);
+    for (int64_t n : {int64_t(1850), int64_t(2159)}) {
+        CAPTURE(n);
+        set_env("NTSCRT_SOURCE_CACHE_MB", "0");  // nothing served from the cache: every history frame is fetched
+        Inst a("{}", fb);
+        set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+        if (!a.ok) return;
+        a.render(n);
+        const int64_t anchor = (n / 240 - 1) * 240;
+        CHECK(a.src.first == anchor);
+        CHECK(a.src.last == n - 1);
+        CHECK(a.src.fetches == n - anchor);  // each history frame once (the frame itself is the render's source)
+        CHECK(a.src.fetches < 2 * 240);
+        CHECK(a.src.held_max == 1);
+        CHECK(a.src.img.empty());  // all given back
+        // What the host is told it may be asked for covers exactly that.
+        ntscrt_render_args ra{};
+        ra.frame_index = n;
+        ra.fps = 30;
+        ra.look_json = "{}";
+        ra.feedback_json = fb.c_str();
+        int64_t first = -1;
+        CHECK(ntscrt_source_frames_needed(&ra, &first) == NTSCRT_OK);
+        CHECK(first == anchor);
+        // Playing on across the next window start (1920, 2160): its run went along with the
+        // one shown, so nothing is fetched again, and the frames are the cold seek's.
+        const int64_t last = (n / 240 + 1) * 240 + 5;
+        std::vector<uint8_t> played;
+        for (int64_t f = n + 1; f <= last; ++f) {
+            CAPTURE(f);
+            played = a.render(f);
+            CHECK(a.src.fetches == 0);
+        }
+        Inst b("{}", fb);
+        CHECK(b.render(last) == played);
+    }
 }
 
 #ifndef __APPLE__  // crt-sim can hang the macOS CI runners' virtual GPU

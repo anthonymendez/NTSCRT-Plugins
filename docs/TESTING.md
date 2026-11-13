@@ -155,8 +155,10 @@ answering scripting calls for a while) and merges them in. A full run takes abou
 First run (2026-11-12, 355 cases, 972 images per pair): every image equal in every pair except the CRT *sim* shader,
 whose output depends on the frames rendered before it (it differs between two CPU sessions too), and the documented
 8-bit Fusion case. Not covered: Adjustment Clips (scripts can't give them an OpenFX effect), render scale (the
-render queue always renders at full size), Screen Loop on an Edit-page clip in 1080p / UHD projects (Resolve fetches
-hundreds of full-size history frames and stalls).
+render queue always renders at full size). Screen Loop on an Edit-page clip in 1080p / UHD projects is covered again
+since Resolve is no longer told to render the loop's whole window up front; a cold seek still has Resolve render and
+keep 240-479 full-size source frames ([dev/SCREENLOOP-MEMORY.md](dev/SCREENLOOP-MEMORY.md)).
+`--parity-case-timeout` (seconds, default 600) stops a render job that takes longer and fails its case.
 
 ### Debug logging (for a specific problem)
 The plug-in always keeps a small log (start-up, the first frames of each effect, every error). To capture

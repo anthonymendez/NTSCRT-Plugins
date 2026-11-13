@@ -370,12 +370,8 @@ def build_cases(quick=False):
         for lab, look, prm in edit:
             if lab not in ("default", "mild-vhs", "clean-crt", "bottom-to-top", "minidv"):
                 continue
-            if lab == "bottom-to-top":
-                # Screen Loop on an Edit-page clip at 1080p / UHD: getFramesNeeded asks Resolve for the loop's history
-                # (frames 1440..1850 for frame 1850), float frames of the timeline's size; Resolve grew to 20-30 GB
-                # and the render didn't finish in 10 minutes (2026-11-12, CPU path), blocking the session. Covered at
-                # 640x360 (edit-bottom-to-top) and on the Fusion page of these projects.
-                continue
+            # bottom-to-top: Screen Loop on an Edit-page clip at 1080p / UHD; frame 1850 is a cold seek that fetches
+            # 410 history frames, which Resolve keeps (docs/dev/SCREENLOOP-MEMORY.md).
             if quick and lab != "default":
                 continue
             add(f"{proj}-edit-{lab}", "size", prm, where=f"{proj}-edit", look=look, fr=[0, 1850])
@@ -658,7 +654,7 @@ class Session:
         return tl, item
 
     def render(self, tl, frames, tag):
-        return self.s.render_timeline(tl, frames, tag, codec=self.codec)
+        return self.s.render_timeline(tl, frames, tag, codec=self.codec, timeout=self.a.parity_case_timeout)
 
     def mark(self):
         return self.s.log_size(self.log)

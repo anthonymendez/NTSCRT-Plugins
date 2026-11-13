@@ -190,6 +190,15 @@ written but not yet built.
   serial numbers / hardware UUIDs), and trims crash reports to the crash itself. Non-text files are left out.
 
 ### Fixed
+- Resolve: **Screen Loop on a full-size Edit-page clip** (1080p and UHD timelines) no longer makes Resolve render
+  hundreds of frames up front. The effect told Resolve it might read the loop's whole history (up to 479 earlier
+  frames), and Resolve rendered and kept all of them before every frame: a UHD timeline reached 40 GB before its
+  first frame. The effect now reads those frames only when it needs them, one at a time, with the same pictures. A
+  jump far into a clip still has to replay up to 16 seconds of the loop, and Resolve keeps every frame it hands
+  over (about 80 MB each at 1080p, 330 MB at UHD, up to its *Limit Resolve memory usage* preference; see
+  docs/dev/SCREENLOOP-MEMORY.md).
+- **Screen Loop playback past 16 seconds** no longer replays 8 seconds of the loop every 8 seconds: the next
+  stretch's history is now built along the way (no frames read again from Resolve, no pause; same pictures).
 - **The *sim* CRT shader looks the same however Resolve renders a frame:** its picture depended on which frame
   was rendered before (scrubbing, render-queue chunks, Fusion's repeated renders and two renders of the same
   frame could differ by up to 97 of 255 levels, 243 with its persistence turned up). Each frame now builds its
@@ -267,6 +276,13 @@ written but not yet built.
   settings.
 
 ### Developer
+- Screen Loop memory (docs/dev/SCREENLOOP-MEMORY.md): `getFramesNeeded` leaves out the loop's window in Resolve
+  (`NTSCRT_OFX_DECLARE_HISTORY` overrides); the engine's run ahead (`howl_engine.h`, `NTSCRT_SCREENLOOP_AHEAD=0`
+  turns it off); the debug log's `temporal_fetch_ms=`, `temporal_held_max=`, `temporal_size=`, `temporal_missing=`;
+  `bench_screenloop --then N` and its fetches held at once / peak memory; tests: a far cold seek's fetch count, one
+  host frame held at a time and no fetch across window starts (`test_howl_seek`, `test_howl_loop`),
+  `test_ofx_resolve_host` (the mock host as Resolve); the parity suite's 1080p / UHD Edit-page Screen Loop cases
+  are back, with `--parity-case-timeout`.
 - CRT render order (docs/dev/CRT.md): librashader's `clear_history` never clears `PassFeedback`, so crtsim's
   "prime on a seek" read the last frame rendered. A crtsim frame is now two chain frames, its own input with the
   persistence at 0 (exactly a zeroed feedback) then the frame; `test_crt_order` (every bundled preset, many render
