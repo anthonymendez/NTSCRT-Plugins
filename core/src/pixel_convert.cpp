@@ -63,7 +63,9 @@ inline uint16_t float_to_half(float x) {
     uint32_t m = f & 0x7fffffu;
     if (e <= 0) return uint16_t(s);
     if (e >= 31) return uint16_t(s | 0x7c00u);
-    return uint16_t(s | (uint32_t(e) << 10) | ((m + 0x1000u) >> 13));
+    // + (not |): a mantissa that rounds up to 0x400 carries into the exponent (the next
+    // power of two; infinity past the largest half).
+    return uint16_t(s | ((uint32_t(e) << 10) + ((m + 0x1000u) >> 13)));
 }
 
 // Per-format pixel access, resolved at compile time so the conversion loops

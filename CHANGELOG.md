@@ -190,6 +190,9 @@ written but not yet built.
   serial numbers / hardware UUIDs), and trims crash reports to the crash itself. Non-text files are left out.
 
 ### Fixed
+- Half-float output with CPU frames (e.g. Fusion half-float comps with `NTSCRT_OFX_GPU=0`, AMD / Intel GPUs): a
+  value just below a power of two with an odd exponent (e.g. 0.49995) was written as half of it (the rounding's
+  carry into the exponent was lost), so premultiplied half-float frames could show rare dark specks.
 - **The *sim* CRT shader looks the same however Resolve renders a frame:** its picture depended on which frame
   was rendered before (scrubbing, render-queue chunks, Fusion's repeated renders and two renders of the same
   frame could differ by up to 97 of 255 levels, 243 with its persistence turned up). Each frame now builds its
