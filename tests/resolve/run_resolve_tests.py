@@ -1701,6 +1701,9 @@ def main():
     ap.add_argument("--parity-quick", action="store_true", help="--parity with a small subset of the cases")
     ap.add_argument("--parity-digital", action="store_true",
                     help="--parity / --parity-quick: only the cases that run Digital video (docs/dev/DIGITAL-GPU.md)")
+    ap.add_argument("--parity-groups", default="",
+                    help="--parity / --parity-quick: only the cases of these comma-separated groups (preset, crt, "
+                         "stage, ...: build_cases in tests/resolve/parity.py), e.g. crt")
     ap.add_argument("--parity-configs", default="cpu,gpu,mixa,mixb,cpu2",
                     help="--parity: the sessions, in order (cpu, gpu, mixa, mixb, cpu2 = cpu again on a subset)")
     ap.add_argument("--parity-sources", default=None, help="--parity: folder for the generated source clips (default <out>/_src)")

@@ -130,8 +130,10 @@ public:
     int fallback_status() const;
     const std::string &fallback_reason() const;
     size_t chain_load_attempts() const;  // tests: how often a chain was (re)built
-    // A preset that keeps state between frames (feedback / history) ran since
-    // construction or flush(): its pictures depend on the frames before them.
+    // A preset whose pictures depend on the frames before them ran since
+    // construction or flush(): one with feedback / history that the stage can't
+    // reset each frame. None of the 7 bundled (crtsim's feedback is reset every
+    // frame: docs/dev/CRT.md), so only a .slangp added to the resources can.
     bool ran_temporal_preset() const;
 private:
     struct Impl; std::unique_ptr<Impl> impl_;

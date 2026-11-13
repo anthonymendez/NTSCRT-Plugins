@@ -190,6 +190,11 @@ written but not yet built.
   serial numbers / hardware UUIDs), and trims crash reports to the crash itself. Non-text files are left out.
 
 ### Fixed
+- **The *sim* CRT shader looks the same however Resolve renders a frame:** its picture depended on which frame
+  was rendered before (scrubbing, render-queue chunks, Fusion's repeated renders and two renders of the same
+  frame could differ by up to 97 of 255 levels, 243 with its persistence turned up). Each frame now builds its
+  own afterglow from itself; the persistence and bleed controls still work, but no longer leave trails of the
+  previous frames. The other six CRT shaders were not affected.
 - Resolve: **choosing an animated preset an hour into a timeline** (the default 01:00:00:00 start), on an
   Adjustment Clip, froze Resolve for about a minute and put the animation an hour before the clip. Resolve gives
   an Adjustment Clip timeline frame numbers with a made-up 0..1999 range, so the keys went to frames 0..3599
@@ -262,6 +267,11 @@ written but not yet built.
   settings.
 
 ### Developer
+- CRT render order (docs/dev/CRT.md): librashader's `clear_history` never clears `PassFeedback`, so crtsim's
+  "prime on a seek" read the last frame rendered. A crtsim frame is now two chain frames, its own input with the
+  persistence at 0 (exactly a zeroed feedback) then the frame; `test_crt_order` (every bundled preset, many render
+  orders, two processes, shared and unshared chains); Screen Loop keeps its checkpoints with crtsim;
+  `bench_transfer --seek` and `shader:<id>` looks; `run_resolve_tests.py --parity-groups`.
 - Digital video's full-size steps on the GPU (docs/dev/DIGITAL-GPU.md): `Renderer::scale` (Lanczos, aliasing, One
   field) and `Renderer::upscale` as Slang kernels (`core/stages/digital/gpu/`), byte-identical to the CPU code
   (precise float arithmetic checked by a probe, double-precision `*_x` kernels otherwise; the Lanczos taps,

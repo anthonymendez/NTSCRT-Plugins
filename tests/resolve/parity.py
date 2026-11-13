@@ -228,7 +228,11 @@ def build_cases(quick=False):
         if quick and o["value"] not in ("royale", "glow_gauss"):
             continue
         add(f"crt-{o['value']}-over-default", "crt", {"crt_preset": i}, covers=["crt.preset"], tags=("noise",))
-        add(f"crt-{o['value']}-alone", "crt", dict(ALL_OFF, crt_enabled=1, crt_preset=i), covers=["crt.preset"])
+        # sim keeps a feedback (docs/dev/CRT.md): every sim case goes in the noise session too, which checks
+        # that a frame is the same in another session (another render order).
+        temporal = ("noise",) if o["value"] == "sim" else ()
+        add(f"crt-{o['value']}-alone", "crt", dict(ALL_OFF, crt_enabled=1, crt_preset=i), covers=["crt.preset"],
+            tags=temporal)
         mine = [p for p in sch["params"] if p["id"].startswith(f"crt.{o['value']}.")]
         vals, cov = {}, []
         for p in mine:
@@ -237,7 +241,8 @@ def build_cases(quick=False):
                 vals[host(p["id"])] = s[0]
                 cov.append(p["id"])
         if not quick:
-            add(f"crt-{o['value']}-all-params-strong", "crt", dict(ALL_OFF, crt_enabled=1, crt_preset=i, **vals), covers=cov)
+            add(f"crt-{o['value']}-all-params-strong", "crt", dict(ALL_OFF, crt_enabled=1, crt_preset=i, **vals), covers=cov,
+                tags=temporal)
 
     # 2. Stages on their own from the default-off state, the default look, everything off.
     add("default-look", "stage", tags=("noise", "hour"))
@@ -1218,6 +1223,9 @@ def main(a):
         cases, expected = build_cases(quick)
         if getattr(a, "parity_digital", False):
             cases = [c for c in cases if digital_case(c)]
+        groups = {g.strip() for g in (getattr(a, "parity_groups", "") or "").split(",") if g.strip()}
+        if groups:
+            cases = [c for c in cases if c["group"] in groups]
         sources = make_sources(Path(a.parity_sources) if a.parity_sources else base / "_src")
         cases_path.write_text(json.dumps({"sources": sources, "cases": cases, "expected": expected, "quick": quick},
                                          indent=1), encoding="utf-8")

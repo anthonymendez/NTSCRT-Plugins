@@ -10,6 +10,8 @@
 //                  [--fps 60] [--label NAME] [--resources DIR] [--quiet]
 //                  [--pool-threads N]   (worker pool size; 1 = no pool)
 //                  [--alpha]            (a source with transparent and half-transparent areas)
+//                  [--seek]             (every other frame: each render is a cold seek for the CRT's
+//                                        temporal presets, as when scrubbing)
 //                  [--dump DIR]         (writes each case's last frame to DIR/<case>.raw, to compare
 //                                        builds or NTSCRT_FAST_TRANSFER=0 byte for byte)
 //
@@ -21,6 +23,7 @@
 // port lacked turned off (docs/dev/NTSC-GPU.md); "preset:<name>" = the bundled
 // preset presets/<name>.json (e.g. "preset:Mild VHS"); "screenloop:<name>" = the default look with the
 // Screen Loop preset presets/Screen Loop/<name>.json (e.g. "screenloop:7 copies slow luma");
+// "shader:<id>" = the default look with the CRT preset <id> (sim, royale, glow_gauss, ...);
 // "digital:<id>" = the default look with the Digital video format <id> applied (webcam,
 // video_call, minidv, early_web, cd_rom, datamosh: the Preset menu's "Digital video/..."), its
 // step times (digital_ms in the timings note) in "digital_step_median_ms" / "_mean_ms".
@@ -182,7 +185,7 @@ int main(int argc, char **argv) {
     std::string label = "", resources = NTSCRT_BUILT_RESOURCES_DIR;
     int frames = 300, warmup = 30;
     double fps = 60;
-    bool quiet = false, alpha = false;
+    bool quiet = false, alpha = false, seek = false;
     std::string dump;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -197,6 +200,7 @@ int main(int argc, char **argv) {
         else if (a == "--resources") resources = next();
         else if (a == "--quiet") quiet = true;
         else if (a == "--alpha") alpha = true;
+        else if (a == "--seek") seek = true;
         else if (a == "--dump") dump = next();
         else if (a == "--pool-threads") ntscrt::digital::set_thread_count(std::atoi(next().c_str()));
         else {
@@ -238,6 +242,10 @@ int main(int argc, char **argv) {
                 "luma_noise": false, "chroma_noise": false, "chroma_delay_horizontal": 0,
                 "chroma_delay_vertical": 0, "vhs_edge_wave_enabled": false})");
             for (auto it = off.begin(); it != off.end(); ++it) b.look["ntsc"]["settings"][it.key()] = it.value();
+        } else if (n.rfind("shader:", 0) == 0) {
+            b = look_from(nullptr);
+            set_at(b.look, "/shader/enabled", true);
+            set_at(b.look, "/shader/preset", n.substr(7));
         } else if (n.rfind("digital:", 0) == 0) {
             // The default look with a Digital video format applied (the Preset menu's
             // "Digital video/<name>"; schema digital_formats, by id: webcam, minidv, ...).
@@ -322,7 +330,7 @@ int main(int argc, char **argv) {
                 const int64_t first = next_frame;
                 for (int f = 0; f < warmup + frames; ++f) {
                     ntscrt_render_args ra{};
-                    ra.frame_index = first + f;
+                    ra.frame_index = first + (seek ? 2 * int64_t(f) : int64_t(f));
                     ra.fps = fps;
                     ra.look_json = lk.look.c_str();
                     ra.feedback_json = lk.feedback.empty() ? nullptr : lk.feedback.c_str();
@@ -369,7 +377,7 @@ int main(int argc, char **argv) {
                         if (const char *q = std::strstr(tm, " digital_route=gpu")) (void)q, ++digital_gpu;
                     }
                 }
-                next_frame += warmup + frames + 1000;
+                next_frame += 2 * (warmup + frames) + 1000;
                 if (!dump.empty()) {
                     std::string file_name = lk.name;  // "preset:Mild VHS" -> "preset_Mild_VHS"
                     for (char &c : file_name)
@@ -411,6 +419,7 @@ int main(int argc, char **argv) {
                           {"frames", frames},
                           {"warmup", warmup},
                           {"fps", fps},
+                          {"seek", seek},
                           {"failures", failures},
                           {"median_ms", std::round(r.med * 1000) / 1000},
                           {"p95_ms", std::round(r.p95 * 1000) / 1000},

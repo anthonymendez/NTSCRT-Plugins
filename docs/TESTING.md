@@ -148,7 +148,8 @@ pass can't come from both sides taking the same route. Results: `parity.md`, `pa
 `--out`, with one folder of frames and logs per session; `--parity-compare-only` compares them again,
 `--parity-configs` picks sessions, `--parity-digital` keeps only the cases that run Digital video (62 of them;
 `cpu` and `cpu2` also set `NTSCRT_DIGITAL_GPU=0`, and every case's `digital_route=` must be its session's:
-GPU in `gpu` / `mixa`, CPU in `cpu` / `cpu2` and, where NTSC is on, `mixb`), `--parity-retry` renders again the
+GPU in `gpu` / `mixa`, CPU in `cpu` / `cpu2` and, where NTSC is on, `mixb`), `--parity-groups crt` keeps only the
+CRT shader cases (the sim ones also run in `cpu2`: docs/dev/CRT.md), `--parity-retry` renders again the
 cases a session lost (Resolve sometimes stops
 answering scripting calls for a while) and merges them in. A full run takes about two and a half hours (RTX 5090).
 First run (2026-11-12, 355 cases, 972 images per pair): every image equal in every pair except the CRT *sim* shader,

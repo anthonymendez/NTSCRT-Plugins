@@ -177,7 +177,9 @@ TEST_CASE("Screen Loop: default window, a seek past two windows and back") {
 }
 
 #ifndef __APPLE__  // crt-sim can hang the macOS CI runners' virtual GPU
-TEST_CASE("Screen Loop with a temporal CRT preset: no checkpoints, so none changes a frame") {
+// crt-sim keeps a feedback, which the CRT stage resets every frame (docs/dev/CRT.md): its TV
+// pictures are a function of the pass, so the loop keeps checkpoints and they change no frame.
+TEST_CASE("Screen Loop with the temporal CRT preset: checkpoints change no frame") {
     const std::string fb = feedback("12 copies luma key", 8);
     const std::string look = R"({"shader": {"enabled": true, "preset": "sim"}})";
     const int64_t order[] = {30, 20, 21, 18, 31};
