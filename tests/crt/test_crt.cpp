@@ -6,6 +6,8 @@
 
 #include <ntscrt/ntscrt.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -256,6 +258,41 @@ TEST_CASE("shader params and preset ids/paths are honoured") {
     CHECK(again == base);
     CHECK(by_path == base);
     CHECK(crt.fallback_status() == 0);
+}
+
+// By hand (NTSCRT_CRT_TIMINGS=1): GPU time of one CRT frame per preset, played
+// (frames in order) and sought (every other frame), finished on the GPU each frame.
+TEST_CASE("CRT frame timings" * doctest::skip(!std::getenv("NTSCRT_CRT_TIMINGS"))) {
+    auto d = device();
+    if (!d) return;
+    for (auto [iw, ih] : {std::pair{640, 480}, std::pair{1920, 1080}}) {
+        std::vector<uint8_t> px(size_t(iw) * ih * 4);
+        for (size_t i = 0; i < px.size(); ++i) px[i] = uint8_t((i * 2654435761u) >> 24);
+        auto src = bgra(*d, iw, ih, px);
+        for (auto [ow, oh] : {std::pair{3840, 2160}, std::pair{1920, 1080}}) {
+            auto out = d->create_texture({ow, oh, gpu::Format::RGBA16F, true, true});
+            for (const char *id : {"sim", "glow_gauss"}) {
+                for (int stride : {1, 2}) {
+                    CrtStage crt(*d, NTSCRT_RESOURCES_DIR);
+                    json look = {{"shader", {{"enabled", true}, {"preset", id}}}};
+                    FrameContext ctx;
+                    ctx.look = &look;
+                    std::vector<double> ms;
+                    for (int f = 0; f < 120; ++f) {
+                        ctx.frame = int64_t(f) * stride;
+                        const auto a = std::chrono::steady_clock::now();
+                        crt.render(*src, *out, ctx);
+                        d->finish();
+                        if (f >= 20)
+                            ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count());
+                    }
+                    std::sort(ms.begin(), ms.end());
+                    MESSAGE("CRT_TIMING " << std::string(id) << " in " << iw << "x" << ih << " out " << ow << "x" << oh << " "
+                                          << (stride == 1 ? "play" : "seek") << " median_ms " << ms[ms.size() / 2]);
+                }
+            }
+        }
+    }
 }
 
 // A preset that can't load draws the bypass picture, says why, and isn't

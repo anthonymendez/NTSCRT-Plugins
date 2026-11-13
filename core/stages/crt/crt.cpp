@@ -75,7 +75,8 @@ const std::map<std::string, std::map<std::string, float>> &house_defaults() {
 }
 
 // Does any pass read the previous frame (PassFeedbackN / OriginalHistoryN /
-// <alias>Feedback)? Those presets are temporal (of the 7 bundled: crtsim).
+// <alias>Feedback)? Those presets are temporal (of the 7 bundled: crtsim, whose
+// feedback shade() resets every frame: feedback_resets below).
 bool uses_history(const fs::path &slangp) {
     std::ifstream f(slangp);
     std::string line;
@@ -92,6 +93,23 @@ bool uses_history(const fs::path &slangp) {
     return false;
 }
 
+// Temporal presets whose passes can be told to ignore what they read from the
+// previous frame, and the parameter values that do it. A frame rendered with
+// these values leaves the chain's feedback holding a picture that depends on
+// that frame's input alone, exactly the picture a zeroed feedback gives
+// (librashader's clear_history clears OriginalHistory only, never the
+// PassFeedback framebuffers, and a new framebuffer's contents are undefined).
+//   crtsim composite: max(cur, persistence * (prev + bleed * neighbours)):
+//   persistence 0 -> max(cur, 0) == cur for any (finite: RGBA8) prev. Its
+//   alpha keeps a constant weight 1, but no pass reads composite's alpha
+//   except composite itself (screen samples .rgb), so no picture sees it.
+const std::map<std::string, std::map<std::string, float>> &feedback_resets() {
+    static const std::map<std::string, std::map<std::string, float>> m = {
+        {"crt/crtsim.slangp", {{"Tuning_Persistence_R", 0.f}, {"Tuning_Persistence_G", 0.f}, {"Tuning_Persistence_B", 0.f}}},
+    };
+    return m;
+}
+
 // One librashader chain and the parameter values it holds now.
 struct ChainBox {
     std::unique_ptr<crt::Chain> chain;
@@ -105,8 +123,8 @@ struct CachedChain {
     // one chain per (device, preset) then serves every CrtStage on that
     // device, so a second instance neither recompiles the preset (~140 ms
     // for glow_gauss at 1080p) nor holds its own copy (~70 MB CPU, ~20 MB
-    // GPU). Temporal presets (feedback / history) stay per stage, and on
-    // Metal every chain does (see chain_for).
+    // GPU). Temporal presets (feedback / history) stay per stage (their frames
+    // come in pairs: see shade()), and on Metal every chain does (see chain_for).
     std::shared_ptr<ChainBox> box;
     bool history = false;
     int64_t last_frame = -1000;
@@ -255,11 +273,15 @@ struct CrtStage::Impl {
                const FrameContext &ctx) {
         CachedChain &c = chain_for(rel);
         ChainBox &box = *c.box;
-        if (c.history) ran_temporal = true;
+        const auto reset = c.history ? feedback_resets().find(rel) : feedback_resets().end();
+        const bool primed = reset != feedback_resets().end();  // see below
+        if (c.history && !primed) ran_temporal = true;
         // A shared chain has one user at a time: its parameters and its frames
         // go together (the chain's frame() takes this lock as well).
         std::lock_guard<std::recursive_mutex> lock(dev->context_mutex());
-        apply_params(box, rel, sh.contains("params") ? sh["params"] : json());
+        const json no_params;
+        const json &look_params = sh.contains("params") ? sh["params"] : no_params;
+        apply_params(box, rel, look_params);
         const auto frame_count = uint64_t(std::max<int64_t>(0, shader_frame(ctx)));
         const int tw = target.desc().width, th = target.desc().height;
         const int iw = in.desc().width, ih = in.desc().height;
@@ -278,10 +300,38 @@ struct CrtStage::Impl {
         }
         bool clear = clear_history;
         clear_history = false;
+        if (primed) {
+            // A frame is a function of itself (docs/dev/CRT.md, "Render order"):
+            // every frame, played or sought, first renders its own input once
+            // from the reset state (at frame count - 1, as upstream's previous
+            // frame would be), then renders itself over that feedback. Upstream
+            // feeds the real previous frame; that is unbounded history (with
+            // persistence >= 0.1 it never fades), which no host's render order
+            // can reproduce, and this stage only ever sees the current frame.
+            // The reset frame has the frame's own parameters but for the reset
+            // values: every other one shapes the picture it leaves behind.
+            for (const auto &[k, v] : reset->second) {
+                box.chain->set_param(k, v);
+                box.applied[k] = v;
+            }
+            box.chain->frame(in, *dst, frame_count ? frame_count - 1 : 0, true);
+            // librashader's Metal runtime keeps each pass's uniforms in one shared
+            // buffer, read when the GPU runs the pass: the reset frame must have
+            // run before the next frame's encode overwrites them. (Not on a
+            // host's own command buffer, which only the host commits.)
+            if (dev->backend() == gpu::Backend::Metal) dev->finish();
+            apply_params(box, rel, look_params);
+            box.chain->frame(in, *dst, frame_count, false);
+            c.last_frame = int64_t(frame_count);
+            if (integrate) downscale_encode(*dev, *dst, target, DownscaleMethod::Area, scratch);
+            else if (dst != &target) dev->copy(*dst, target);
+            return;
+        }
         if (c.history && c.last_frame != int64_t(frame_count) - 1) {
-            // Non-sequential access to a temporal preset: prime the feedback
-            // with this frame's input so the result doesn't depend on
-            // whatever frame was rendered before.
+            // A temporal preset with no known reset (none bundled): on a seek,
+            // prime the feedback with this frame's input. Not order-independent:
+            // clear_history doesn't clear PassFeedback, so the prime still reads
+            // the last frame rendered (ran_temporal tells Screen Loop).
             box.chain->frame(in, *dst, frame_count ? frame_count - 1 : 0, true);
             clear = false;
         }

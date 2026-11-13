@@ -275,3 +275,14 @@ change.
 
 **Reason.** Digital video's full-size steps on the GPU (docs/dev/DIGITAL-GPU.md), with the route decided like
 NTSC's (one shared rule, one switch per stage: `NTSCRT_DIGITAL_GPU`).
+
+## 2026-11-12 — agent A2 — `core/stages/stages.h` (CrtStage), `core/stages/howlaround/howl_hooks.h`: comments only
+
+**Change.** No signature or ABI change. `CrtStage::ran_temporal_preset()` now means "a preset whose pictures
+depend on earlier frames ran": crtsim no longer counts, since the CRT stage resets its feedback every frame
+(docs/dev/CRT.md), so a Screen Loop with crtsim keeps its checkpoints (`HowlHooks::tv_keeps_state` is false for
+every bundled preset). A crtsim frame is two librashader frames (the reset frame, then the frame) on the same
+chain, on Metal with a `Device::finish()` between them.
+
+**Reason.** A crtsim frame depended on the frames rendered before it (librashader's `clear_history` never clears
+`PassFeedback`), so hosts rendering in any order got different pictures.

@@ -52,7 +52,8 @@ struct HowlHooks {
     std::function<std::function<std::shared_ptr<gpu::Texture>()>(const std::shared_ptr<gpu::Texture> &camera,
                                                                  const HowlPass &pass)> chain_input_begin;
     // Optional: true when render_tv's pictures depend on the frames drawn
-    // before (a temporal CRT preset): the loop then keeps no checkpoints.
+    // before (a temporal CRT preset the CRT stage can't reset each frame; none of
+    // the bundled ones): the loop then keeps no checkpoints.
     std::function<bool()> tv_keeps_state;
 };
 
