@@ -71,4 +71,39 @@ private:
 std::unique_ptr<Bridge> make_bridge(const ntscrt_host_gpu &host, std::string &err);
 bool supported(ntscrt_host_gpu_api api);
 
+// Layout of InParams in hostgpu_in.slang / hostgpu_flags.slang (the start of
+// FillParams in hostgpu_fill.slang): the host source in the frame, the crop rect.
+struct InParams {
+    uint32_t frame_w, frame_h, src_w, src_h;
+    int32_t src_x, src_y, bottom_up, mode;
+    uint32_t cx, cy, cw, ch;
+    uint32_t premult, pad0, pad1, pad2;
+};
+
+// Clip mode's hole filling (fill_transparent, pixel_convert.cpp) as kernels
+// (shaders/hostgpu_fill.slang, host_gpu_fill.cpp): a host GPU frame with transparent
+// pixels stays on the GPU. Per instance (its level textures are kept between frames).
+class Fill {
+public:
+    explicit Fill(gpu::Device &dev);
+    ~Fill();
+    // "float" / "double" (the kernels the probe picked) / "inexact"; probed once.
+    // NTSCRT_FILL_GPU_ARITH=float / double: those kernels whatever the probe says.
+    const char *arith_mode();
+    // convert_in's picture of the host source `src` placed as `p` says (Clip mode, cut
+    // to p's crop rect) with the frame's transparent pixels filled exactly as to_bgra8
+    // fills them: into `pic` (BGRA8, p.cw x p.ch, shader-writable).
+    void convert(const gpu::Texture &src, const InParams &p, gpu::Texture &pic);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// The route switch NTSCRT_FILL_GPU (gpu_route.h values) and its rule, as the NTSC and
+// Digital video routes: off with 0, on Metal (unless force), on a software device (unless
+// force), where the probe says inexact (unless force). `why` gets the reason either way.
+std::string fill_gpu_env_text();
+bool fill_gpu_route(gpu::Device &dev, std::string *why, Fill *f);
+
 }  // namespace ntscrt::hostgpu

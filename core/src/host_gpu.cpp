@@ -93,13 +93,6 @@ Bridge *bridge_for(ntscrt_instance *inst, const ntscrt_host_gpu &host, std::stri
     return br.get();
 }
 
-// Layout of InParams in hostgpu_in.slang / hostgpu_flags.slang.
-struct InParams {
-    uint32_t frame_w, frame_h, src_w, src_h;
-    int32_t src_x, src_y, bottom_up, mode;
-    uint32_t cx, cy, cw, ch;
-    uint32_t premult, pad0, pad1, pad2;
-};
 // Layout of OutParams in hostgpu_out.slang.
 struct OutParams {
     uint32_t dst_w, dst_h, src_w, src_h;
@@ -234,7 +227,39 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
         }
         return *transparent;
     };
-    auto convert = [&](gpu::Device &dev, AlphaMode mode, const crop::Rect &r) {
+    // Clip mode with transparent pixels: the holes filled on the GPU (hostgpu_fill.slang),
+    // the same bytes as to_bgra8; nullptr when the CPU code must fill them (the route is
+    // off, or its kernels failed on this frame).
+    bool fill_needed = false, fill_failed = false, fill_gpu = false;  // (the last picture made)
+    std::string fill_why;
+    auto convert_filled = [&](gpu::Device &dev, const crop::Rect &r) -> std::shared_ptr<gpu::Texture> {
+        fill_needed = true;
+        fill_gpu = false;
+        if (fill_failed) return nullptr;
+        Fill *f = facade::fill_gpu(inst, dev, fill_why);
+        if (!f) return nullptr;
+        InParams p = in_params(AlphaMode::Clip);
+        p.cx = uint32_t(r.x);
+        p.cy = uint32_t(r.y);
+        p.cw = uint32_t(r.width);
+        p.ch = uint32_t(r.height);
+        auto pic = bridge().scratch(dev, {r.width, r.height, gpu::Format::BGRA8, true, false});
+        try {
+            f->convert(*source(dev), p, *pic);
+            facade::fill_gpu_done(inst, nullptr, fill_why);
+            fill_gpu = true;
+            return pic;
+        } catch (const std::exception &e) {
+            if (dev.lost()) throw;
+            fill_failed = true;
+            const std::string what = e.what();
+            facade::fill_gpu_done(inst, &what, fill_why);
+            return nullptr;
+        }
+    };
+    // The pipeline's 8-bit picture, cut to `r`; nullptr: the CPU code must make it.
+    auto convert = [&](gpu::Device &dev, AlphaMode mode, const crop::Rect &r) -> std::shared_ptr<gpu::Texture> {
+        if (needs_fill(dev, mode)) return convert_filled(dev, r);
         InParams p = in_params(mode);
         p.cx = uint32_t(r.x);
         p.cy = uint32_t(r.y);
@@ -256,19 +281,20 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
         fw, fh, true,
         [&](gpu::Device &dev, AlphaMode mode, const json &look, std::vector<float> &alpha,
             const facade::PoolFn &) -> std::shared_ptr<gpu::Texture> {
-            if (needs_fill(dev, mode)) return nullptr;
-            alpha.clear();  // merge_out reads alpha from the source texture
             crop::Rect r{0, 0, fw, fh};
             if (auto c = crop::from_look(look)) r = c->rect(fw, fh);
-            return convert(dev, mode, r);
+            auto pic = convert(dev, mode, r);
+            if (pic) alpha.clear();  // merge_out reads alpha from the source texture
+            return pic;
         }};
 
     facade::SourceFn get_src = [&](ImageBGRA8 &raw, std::vector<float> &alpha, AlphaMode mode) {
         gpu::Device *dev = facade::device(inst);
-        if (dev && !needs_fill(*dev, mode)) {
+        std::shared_ptr<gpu::Texture> pic;
+        if (dev) pic = convert(*dev, mode, crop::Rect{0, 0, fw, fh});
+        if (pic) {
             // The 8-bit picture the CPU stages work on, made on the GPU: the only download.
             pt.path = "gpu-download";
-            auto pic = convert(*dev, mode, crop::Rect{0, 0, fw, fh});
             raw.width = fw;
             raw.height = fh;
             raw.px.resize(size_t(fw) * fh * 4);  // (the last frame's buffer, with fast transfers)
@@ -290,7 +316,8 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
             }
             return;
         }
-        // Holes to fill (or no GPU any more): the frame as the CPU path gets it.
+        // Holes the CPU code fills (the GPU route off or failed), or no GPU any more: the
+        // frame as the CPU path gets it.
         pt.path = "gpu-cpuconvert";
         const size_t pb = pixel_bytes(src->format);
         const int x1 = std::max(0, src_x), x2 = std::min(fw, src_x + src->width);
@@ -372,6 +399,8 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
 
     const gpu::Format of = facade::output_format(dst->format != NTSCRT_RGBA8);
     ntscrt_status st = facade::render(inst, args, fw, fh, of, get_src, emit, &direct);
+    // Frames with holes to fill: where they were filled, and why.
+    if (fill_needed) pt.note += std::string(" fill_route=") + (fill_gpu ? "gpu" : "cpu") + " (" + fill_why + ")";
     if (st == NTSCRT_ERR_INTERNAL && !wrote) {
         // A driver / interop failure before the result was written: the host can still
         // render this frame on the CPU path.

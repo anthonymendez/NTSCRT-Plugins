@@ -178,6 +178,7 @@ struct ntscrt_instance {
     // allocation and clear per frame): BGRA8, or RGBA16F for 16-bit / float hosts.
     ImageBGRA8 result8;
     std::vector<uint16_t> result16;
+    std::shared_ptr<gpu::Texture> readback_rgb;  // an RGBA16F result packed without alpha for its readback
     std::string last_error;
     std::string gpu_gone;  // set when the GPU was lost and couldn't be replaced: CPU stages from then on
     int device_resets = 0;  // devices recreated since the last good GPU frame
@@ -192,6 +193,10 @@ struct ntscrt_instance {
     // Host GPU frames (host_gpu.cpp): the bridge to the host's GPU memory, made
     // on the first such render.
     std::unique_ptr<hostgpu::Bridge> bridge;
+    // Clip mode's hole filling for those frames on the GPU (HOST-GPU.md; NTSCRT_FILL_GPU),
+    // made on the first frame with transparent pixels.
+    std::unique_ptr<hostgpu::Fill> fill_gpu;
+    GpuRoute fill_route;  // (facade::fill_gpu)
     PhaseTimes times;  // where the last render call's time went (ntscrt_last_timings, testing::last_phases)
 };
 
@@ -213,6 +218,9 @@ gpu::Backend pick_backend(ntscrt_gpu_backend b) {
 void drop_gpu(ntscrt_instance *inst) {
     // The stages and pooled textures belong to the device: they go first.
     inst->bridge.reset();
+    inst->fill_gpu.reset();
+    inst->fill_route = {};
+    inst->readback_rgb.reset();
     inst->tex_pool.clear();
     inst->howl.reset();
     inst->howl_crt.reset();
@@ -1092,6 +1100,18 @@ ntscrt_status facade::fail(ntscrt_instance *inst, ntscrt_status s, std::string m
 }
 gpu::Device *facade::device(ntscrt_instance *inst) { return inst->dev.get(); }
 std::unique_ptr<hostgpu::Bridge> &facade::bridge(ntscrt_instance *inst) { return inst->bridge; }
+hostgpu::Fill *facade::fill_gpu(ntscrt_instance *inst, gpu::Device &dev, std::string &why) {
+    if (!inst->fill_gpu) inst->fill_gpu = std::make_unique<hostgpu::Fill>(dev);
+    hostgpu::Fill *f = inst->fill_gpu.get();
+    return gpu_route_on(inst->fill_route, hostgpu::fill_gpu_env_text(),
+                        [&](std::string *w) { return hostgpu::fill_gpu_route(dev, w, f); }, why)
+               ? f
+               : nullptr;
+}
+void facade::fill_gpu_done(ntscrt_instance *inst, const std::string *error, std::string &why) {
+    if (!error) inst->fill_route.failures = 0;
+    else gpu_route_failed(inst->fill_route, "the CPU code (gpu-cpuconvert)", *error, why);
+}
 PhaseTimes &facade::times(ntscrt_instance *inst) { return inst->times; }
 
 extern "C" {
@@ -1138,16 +1158,34 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
                 // Converted band by band straight from the readback memory
                 // (no copy of the result), the next bands' transfer meanwhile.
                 const bool f16 = out->desc().format == gpu::Format::RGBA16F;
-                const int w = out->desc().width;
+                const int w = out->desc().width, h = out->desc().height;
+                gpu::Device &dev = *inst->dev;
+                const gpu::Texture *rb = out.get();
+                if (f16) {
+                    // RGBA16F: read back without its alpha (facade/pack_rgb, 6 bytes a pixel
+                    // instead of 8; the host's alpha comes from the source): the same halves.
+                    const int pw = (w * 3 + 3) / 4;
+                    auto &pk = inst->readback_rgb;
+                    if (!pk || pk->desc().width != pw || pk->desc().height != h)
+                        pk = dev.create_texture({pw, h, gpu::Format::RGBA16F, true, false});
+                    struct { uint32_t w, h, use_alpha, mode, premult, pad[3]; } p{uint32_t(w), uint32_t(h), 0, 0, 0, {}};
+                    gpu::Bindings b;
+                    b.constants = &p;
+                    b.constants_size = sizeof p;
+                    b.textures = {out.get()};
+                    b.out_textures = {pk.get()};
+                    dev.dispatch(dev.kernel("facade/pack_rgb"), b, pw, h, 1);
+                    rb = pk.get();
+                }
                 PhaseScope ps(pt, PhaseTimes::Readback);
-                inst->dev->read(
-                    *out,
+                dev.read(
+                    *rb,
                     [&](const uint8_t *rows, ptrdiff_t pitch, int y0, int y1) {
                         PhaseScope pc(pt, PhaseTimes::Out);
-                        if (f16) from_rgba16f_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
+                        if (f16) from_rgb16f_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
                         else from_bgra8_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
                     },
-                    readback_bands(size_t(w) * out->desc().height * (f16 ? 8 : 4)));
+                    readback_bands(size_t(w) * h * (f16 ? 6 : 4)));
                 return;
             }
             if (out->desc().format == gpu::Format::RGBA16F) {
@@ -1175,7 +1213,8 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
 
 // Metal path (FxPlug): host textures in and out, on the device given at create.
 // The CPU stages (Digital, ntsc-rs) still need the frame on the CPU, so the
-// source is read back once; everything after runs on the GPU, and the result
+// source is read back once when one is on (else it's converted on the GPU:
+// `direct` below); everything after runs on the GPU, and the result
 // is written into the host texture by a kernel (or a blit when the host
 // texture isn't shader-writable) encoded on the host's command buffer.
 ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_args *args, void *src_texture,
@@ -1244,6 +1283,48 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         if (command_buffer) dev.set_external_command_buffer(nullptr);
         else dev.finish();
     };
+    // No CPU stage on (render_once decides; on Metal NTSC and Digital video run on the CPU
+    // by default, so with either on the frame still takes get_src): the host texture
+    // converted on the GPU by the host GPU path's kernel (hostgpu_in/convert_in, rows top
+    // first as get_src reads them), cut to the look's crop there; no float readback and no
+    // CPU conversion. Clip mode with transparent pixels: get_src (the CPU fill), as before;
+    // NTSCRT_FAST_TRANSFER=0: get_src always (as the CPU path's direct source).
+    // UNVERIFIED: compile-checked by the macOS CI job only, never run on a Mac.
+    const DirectSrc direct{
+        sw, sh, true,
+        [&](gpu::Device &d, AlphaMode mode, const json &look, std::vector<float> &alpha,
+            const facade::PoolFn &pool) -> std::shared_ptr<gpu::Texture> {
+            hostgpu::InParams p{};
+            p.frame_w = p.src_w = uint32_t(sw);
+            p.frame_h = p.src_h = uint32_t(sh);
+            p.mode = mode == AlphaMode::Spill ? 1 : 0;
+            p.premult = premult ? 1 : 0;
+            gpu::Bindings b;
+            b.constants = &p;
+            b.constants_size = sizeof p;
+            b.textures = {src.get()};
+            if (mode == AlphaMode::Clip) {
+                // hostgpu_flags/row_flags: any transparent pixel? (one flag per 64 pixels of a row)
+                const int fx = (sw + 63) / 64;
+                auto flags = d.create_texture({fx, sh, gpu::Format::R32F, true, false});
+                b.out_textures = {flags.get()};
+                d.dispatch(d.kernel("hostgpu_flags/row_flags"), b, fx, sh, 1);
+                std::vector<float> rows(size_t(fx) * size_t(sh));
+                d.download(*flags, rows.data(), ptrdiff_t(fx) * 4);
+                if (std::any_of(rows.begin(), rows.end(), [](float f) { return f != 0.f; })) return nullptr;
+            }
+            crop::Rect r{0, 0, sw, sh};
+            if (auto c = crop::from_look(look)) r = c->rect(sw, sh);
+            p.cx = uint32_t(r.x);
+            p.cy = uint32_t(r.y);
+            p.cw = uint32_t(r.width);
+            p.ch = uint32_t(r.height);
+            auto pic = pool({r.width, r.height, gpu::Format::BGRA8, true, false});
+            b.out_textures = {pic.get()};
+            d.dispatch(d.kernel("hostgpu_in/convert_in"), b, r.width, r.height, 1);
+            alpha.clear();  // emit's alpha_merge reads alpha from the source texture
+            return pic;
+        }};
     const gpu::Format df = dst->desc().format;
     inst->times.clear("metal-texture");
     struct Done {
@@ -1251,7 +1332,7 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         ~Done() { i->times.finish(); }
     } done{inst};
     return render_impl(inst, args, dw, dh, output_format(df == gpu::Format::RGBA16F || df == gpu::Format::RGBA32F),
-                       get_src, emit);
+                       get_src, emit, fast_transfer() ? &direct : nullptr);
 }
 
 }  // extern "C"

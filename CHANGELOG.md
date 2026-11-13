@@ -95,6 +95,15 @@ written but not yet built.
   the CPU version (docs/ENVIRONMENT.md); the log says which (`Digital video route: ...`).
 
 ### Changed
+- **Titles and moved or shrunk clips stay on the GPU** (NVIDIA GPU frames, *Transparent areas: Clip*): their
+  transparent areas are now filled from the nearest colours by GPU kernels, with the same pictures byte for byte,
+  instead of the frame going down to the CPU and back. The fill of a UHD frame with transparent areas took ~100 ms
+  and now ~1 ms. `NTSCRT_FILL_GPU=0` brings back the CPU fill (docs/ENVIRONMENT.md); the log line says which
+  (`fill_route=`).
+- **Faster with CPU frames** (AMD / Intel GPUs, macOS, `NTSCRT_OFX_GPU=0`): a frame with transparent areas in
+  *Clip* mode (titles, moved or shrunk clips) fills them on all CPU cores: a UHD frame takes ~33 ms instead of
+  ~95 ms, 1080p ~9 ms instead of ~22 ms; 16-bit and float results come back from the GPU without their unused
+  alpha (UHD float: 7.3 ms a frame instead of 7.9 with NTSC off). The same pictures, byte for byte.
 - **Glitch** and **Digital video** (with Datamosh) past the first minute of an effect look slightly different
   from 0.5.0-rc.2: the Glitch receiver's simulated history (sync, vertical roll, colour lock) restarts at every
   minute boundary of the effect (a minute of timecode: 01:00:00:00, 01:01:00:00, ...; 60 s of the rounded frame
@@ -190,6 +199,9 @@ written but not yet built.
   serial numbers / hardware UUIDs), and trims crash reports to the crash itself. Non-text files are left out.
 
 ### Fixed
+- Half-float output with CPU frames (e.g. Fusion half-float comps with `NTSCRT_OFX_GPU=0`, AMD / Intel GPUs): a
+  value just below a power of two with an odd exponent (e.g. 0.49995) was written as half of it (the rounding's
+  carry into the exponent was lost), so premultiplied half-float frames could show rare dark specks.
 - **The *sim* CRT shader looks the same however Resolve renders a frame:** its picture depended on which frame
   was rendered before (scrubbing, render-queue chunks, Fusion's repeated renders and two renders of the same
   frame could differ by up to 97 of 255 levels, 243 with its persistence turned up). Each frame now builds its
@@ -267,6 +279,28 @@ written but not yet built.
   settings.
 
 ### Developer
+- Clip mode's hole filling on the GPU (docs/dev/HOST-GPU.md, "Hole filling on the GPU"): `fill_transparent`'s
+  pull-push as kernels (`core/src/shaders/hostgpu_fill.slang`: `fill_down0` from the host source, `fill_down`,
+  `fill_up` per level, `convert_fill`; driver `hostgpu::Fill` in `core/src/host_gpu_fill.cpp`), byte-identical
+  (weights are 0 or 1, so the means divide by 1-4: `/3` picked by exact residuals, everything else exact or
+  precise float through `IArith` with a probe and double-precision `*_x` kernels as Digital video's; 8-bit values
+  from the CPU's table). Host GPU frames with holes keep `gpu-direct` / `gpu-download`; `gpu-cpuconvert` only with
+  `NTSCRT_FILL_GPU=0` (gpu_route.h values, `GpuRoute` in the façade, per-frame fallback), off on Metal and WARP
+  unless forced; ` fill_route=` in the timings. Tests: `test_fill_gpu` (175 hole shapes / sizes / formats / row
+  orders / placements / crops, plain and double kernels, GPU and WARP), Clip-with-holes cases in every format,
+  moved and smaller sources and `NTSCRT_FILL_GPU=0` in `test_host_gpu` (and its UHD bench); the parity suite and
+  `--gpu-ab` fail on `gpu-cpuconvert` / `fill_route=cpu` in GPU-frames sessions. Found on the way: premultiplied
+  8-bit / half-float host GPU output differs from the CPU path by one level / half step on 1-27% of the values
+  (`merge_out`'s rounding, not new; Resolve hands float images), documented in HOST-GPU.md.
+- Final Cut (`ntscrt_render_metal`, not released): with no CPU stage on (NTSC and Digital video off) the host
+  texture is converted by the host GPU path's `hostgpu_in/convert_in` kernel (crop included; Clip-mode frames
+  with transparent pixels, found by `row_flags`, and `NTSCRT_FAST_TRANSFER=0` keep the float readback and CPU
+  conversion). Unverified: compile-checked by the macOS CI job only, never run on a Mac; no GPU route that was
+  off on Metal is turned on.
+- CPU-frame path (docs/dev/HOST-GPU.md, "CPU frames: the conversions"): profiled with `bench_transfer`; RGBA16F
+  results read back packed without alpha (`facade/pack_rgb`, `from_rgb16f_rows`; every half's bits checked in
+  `test_core_bitdepth`), `fill_transparent`'s levels on the thread pool, `round4` without double conversions;
+  `bench_transfer --dump` of 72 frames identical to v0.5.0-rc.5's.
 - CRT render order (docs/dev/CRT.md): librashader's `clear_history` never clears `PassFeedback`, so crtsim's
   "prime on a seek" read the last frame rendered. A crtsim frame is now two chain frames, its own input with the
   persistence at 0 (exactly a zeroed feedback) then the frame; `test_crt_order` (every bundled preset, many render

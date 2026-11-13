@@ -115,6 +115,7 @@ Diff compare(const HostImage &a, const HostImage &b) {
         for (int x = 0; x < a.w; ++x)
             for (int c = 0; c < 4; ++c) {
                 const double e = std::fabs(double(a.get(x, y, c)) - double(b.get(x, y, c)));
+
                 d.max = std::fmax(d.max, e);
                 d.off += e > 1e-5;
                 ++d.n;
@@ -130,6 +131,8 @@ struct Case {
     double scale = 1.0;
     int pad = 0;  // source smaller than the frame by this much on each side
     const char *digital_env = nullptr;  // NTSCRT_DIGITAL_GPU for the host GPU path
+    int ox = 0, oy = 0;                 // the source moved this much from the middle (|ox|, |oy| <= pad)
+    const char *fill_env = nullptr;     // NTSCRT_FILL_GPU for the host GPU path
 };
 
 }  // namespace
@@ -193,7 +196,7 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
         {"default look (NTSC on: direct route with GPU NTSC), float", look("{}"), NTSCRT_RGBA32F, Alpha::Opaque},
         {"default look, crop 4:3", look(R"({"crop":{"enabled":true,"ratio":"4:3"}})"), NTSCRT_RGBA32F, Alpha::Opaque},
         {"default look, render scale 0.5", look("{}"), NTSCRT_RGBA32F, Alpha::Opaque, 0.5},
-        {"default look, premultiplied, Clip (holes: CPU conversion)", look("{}"), NTSCRT_RGBA32F, Alpha::Premult},
+        {"default look, premultiplied, Clip (holes)", look("{}"), NTSCRT_RGBA32F, Alpha::Premult},
         {"default look, source smaller than the frame, Spill", look(R"({"alpha":{"mode":"spill"}})"), NTSCRT_RGBA32F,
          Alpha::Opaque, 1.0, 9},
         {"Clean CRT (direct route), float", clean_crt, NTSCRT_RGBA32F, Alpha::Opaque},
@@ -201,7 +204,30 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
         {"NTSC off, half float", look(off), NTSCRT_RGBA16F, Alpha::Opaque},
         {"NTSC off, 8-bit", look(off), NTSCRT_RGBA8, Alpha::Opaque},
         {"default look, 8-bit", look("{}"), NTSCRT_RGBA8, Alpha::Opaque},
-        {"NTSC off, premultiplied, Clip (holes: CPU conversion)", look(off), NTSCRT_RGBA32F, Alpha::Premult},
+        {"NTSC off, premultiplied, Clip (holes)", look(off), NTSCRT_RGBA32F, Alpha::Premult},
+        // Clip mode's hole filling on the GPU (gpu-direct; HOST-GPU.md): every host format,
+        // straight and premultiplied, transformed / smaller sources, crop, render scale, and
+        // the CPU code with NTSCRT_FILL_GPU=0 (gpu-cpuconvert).
+        {"default look, straight, Clip (holes), half", look("{}"), NTSCRT_RGBA16F, Alpha::Straight},
+        {"default look, premultiplied, Clip (holes), half", look("{}"), NTSCRT_RGBA16F, Alpha::Premult},
+        {"default look, straight, Clip (holes), 8-bit", look("{}"), NTSCRT_RGBA8, Alpha::Straight},
+        {"default look, premultiplied, Clip (holes), 8-bit", look("{}"), NTSCRT_RGBA8, Alpha::Premult},
+        {"NTSC off, straight, Clip (holes), crop 4:3", look(R"({"ntsc":{"enabled":false},"crop":{"enabled":true,"ratio":"4:3"}})"),
+         NTSCRT_RGBA32F, Alpha::Straight},
+        {"default look, premultiplied, Clip (holes), render scale 0.5", look("{}"), NTSCRT_RGBA32F, Alpha::Premult, 0.5},
+        {"default look, source moved and smaller than the frame, Clip", look("{}"), NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 12,
+         nullptr, -9, 7},
+        {"default look, source moved and smaller, premultiplied, Clip (holes), 8-bit", look("{}"), NTSCRT_RGBA8,
+         Alpha::Premult, 1.0, 20, nullptr, 17, -20},
+        {"NTSC off, source moved and smaller, Clip, half", look(off), NTSCRT_RGBA16F, Alpha::Opaque, 1.0, 6, nullptr, 6, -3},
+        {"default look, premultiplied, Clip (holes), the CPU fill", look("{}"), NTSCRT_RGBA32F, Alpha::Premult, 1.0, 0,
+         nullptr, 0, 0, "0"},
+        {"NTSC off, source smaller than the frame, Clip, the CPU fill", look(off), NTSCRT_RGBA16F, Alpha::Opaque, 1.0, 9,
+         nullptr, 0, 0, "0"},
+        {"default look, premultiplied, Clip (holes), half, the CPU fill", look("{}"), NTSCRT_RGBA16F, Alpha::Premult, 1.0,
+         0, nullptr, 0, 0, "0"},
+        {"default look, premultiplied, Clip (holes), 8-bit, the CPU fill", look("{}"), NTSCRT_RGBA8, Alpha::Premult, 1.0,
+         0, nullptr, 0, 0, "0"},
         {"NTSC off, straight, Spill", look(R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})"), NTSCRT_RGBA32F,
          Alpha::Straight},
         {"NTSC off, premultiplied, Spill", look(R"({"ntsc":{"enabled":false},"alpha":{"mode":"spill"}})"),
@@ -228,8 +254,10 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
         {"Digital video/Video call, render scale 0.5", format("video_call", "{}"), NTSCRT_RGBA32F, Alpha::Opaque, 0.5},
         {"Digital video/CD-ROM, source smaller than the frame, Spill",
          format("cd_rom", R"({"alpha":{"mode":"spill"}})"), NTSCRT_RGBA32F, Alpha::Opaque, 1.0, 9},
-        {"Digital video/Early web, premultiplied, Clip (holes: CPU conversion)", format("early_web", "{}"),
+        {"Digital video/Early web, premultiplied, Clip (holes)", format("early_web", "{}"),
          NTSCRT_RGBA32F, Alpha::Premult},
+        {"Digital video on, NTSC off, Clip (holes), the CPU code (download route)",
+         look(R"({"ntsc":{"enabled":false},"digital":{"enabled":true}})"), NTSCRT_RGBA32F, Alpha::Straight, 1.0, 0, "0"},
         {"Digital look Webcam (low quality), float", webcam_lq, NTSCRT_RGBA32F, Alpha::Opaque},
         {"Digital look Webcam (low quality), 8-bit", webcam_lq, NTSCRT_RGBA8, Alpha::Opaque},
         {"core defaults, NTSC off (no Glitch)", off, NTSCRT_RGBA32F, Alpha::Opaque},
@@ -239,7 +267,7 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
         CAPTURE(case_name);
         const int W = 333, H = 197;
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, res.c_str()};
-        ntscrt_instance *cpu = nullptr, *gpu = nullptr;
+        ntscrt_instance *cpu = nullptr, *gpu = nullptr, *gpu_cpu_fill = nullptr;
         REQUIRE(ntscrt_create(&ci, &cpu) == NTSCRT_OK);
         REQUIRE(ntscrt_create(&ci, &gpu) == NTSCRT_OK);
         const int premult = k.alpha == Alpha::Premult ? 1 : 0;
@@ -250,8 +278,9 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
             fill(src, frame, k.alpha);
             // The CPU path gets the frame padded with transparent black, as the plug-in does.
             frame_src.init(W, H, k.f);
+            const int px = k.pad + k.ox, py = k.pad + k.oy;  // the source's place (frame memory order)
             for (int y = 0; y < src.h; ++y)
-                std::memcpy(frame_src.mem.data() + frame_src.pitch * size_t(y + k.pad) + size_t(k.pad) * bpp(k.f),
+                std::memcpy(frame_src.mem.data() + frame_src.pitch * size_t(y + py) + size_t(px) * bpp(k.f),
                             src.mem.data() + src.pitch * size_t(y), size_t(src.w) * bpp(k.f));
             out_cpu.init(W, H, k.f);
             out_gpu.init(W, H, k.f);
@@ -280,8 +309,10 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
             ntscrt_gpu_image gs{src.w, src.h, ptrdiff_t(src.pitch), k.f, 1, reinterpret_cast<void *>(dsrc), 0};
             ntscrt_gpu_image gd{W, H, ptrdiff_t(out_gpu.pitch), k.f, 1, reinterpret_cast<void *>(ddst), 0};
             set_env("NTSCRT_DIGITAL_GPU", k.digital_env);
-            const ntscrt_status gs_st = ntscrt_render_host_gpu(gpu, &ra, &host, &gs, k.pad, k.pad, &gd);
+            set_env("NTSCRT_FILL_GPU", k.fill_env);
+            const ntscrt_status gs_st = ntscrt_render_host_gpu(gpu, &ra, &host, &gs, px, py, &gd);
             set_env("NTSCRT_DIGITAL_GPU", nullptr);
+            set_env("NTSCRT_FILL_GPU", nullptr);
             if (gs_st == NTSCRT_ERR_HOST_GPU && frame == 0 &&
                 std::string(ntscrt_last_error(gpu)).find("another GPU") != std::string::npos) {
                 MESSAGE("core device on another GPU than CUDA device 0: skipped (" << ntscrt_last_error(gpu) << ")");
@@ -293,10 +324,34 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
                 MESSAGE(std::string(k.name) << " frame " << frame << ": " << std::string(ntscrt_last_timings(gpu)) << "; max diff "
                                << df.max * 255 << "/255, " << df.off << " of " << df.n << " values differ");
                 CHECK(df.max <= 1.0 / 255 + 1e-5);
-                CHECK(double(df.off) <= 0.002 * double(df.n));
-                // Exact but for half-float output (the GPU rounds to nearest even), NTSC
-                // on the GPU included (bit-identical to ntsc-rs).
-                if (k.f != NTSCRT_RGBA16F) CHECK(df.off == 0);
+                // Premultiplied 8-bit / half-float output: merge_out's rounding of RGB * alpha
+                // differs from the CPU path's on more values than the rule allows (by at most
+                // one 8-bit level / half-float step; with or without the GPU fill, so it isn't
+                // the fill's: Resolve hands GPU-render plug-ins float images, docs/dev/HOST-GPU.md).
+                // There: the GPU fill's output must be the CPU fill's, on this same path.
+                const std::string nm = k.name;
+                const bool premult_low = premult && k.f != NTSCRT_RGBA32F && nm.find("Clip") != std::string::npos;
+                if (!premult_low) {
+                    CHECK(double(df.off) <= 0.002 * double(df.n));
+                    // Exact but for half-float output (the GPU rounds to nearest even), NTSC
+                    // on the GPU included (bit-identical to ntsc-rs).
+                    if (k.f != NTSCRT_RGBA16F) CHECK(df.off == 0);
+                } else if (!k.fill_env) {
+                    if (!gpu_cpu_fill) REQUIRE(ntscrt_create(&ci, &gpu_cpu_fill) == NTSCRT_OK);
+                    HostImage out_ref;
+                    out_ref.init(W, H, k.f);
+                    auto dref = cuda.upload(out_ref.mem.data(), out_ref.mem.size());
+                    ntscrt_gpu_image gr{W, H, ptrdiff_t(out_ref.pitch), k.f, 1, reinterpret_cast<void *>(dref), 0};
+                    set_env("NTSCRT_FILL_GPU", "0");
+                    REQUIRE(ntscrt_render_host_gpu(gpu_cpu_fill, &ra, &host, &gs, px, py, &gr) == NTSCRT_OK);
+                    set_env("NTSCRT_FILL_GPU", nullptr);
+                    CHECK(std::string(ntscrt_last_timings(gpu_cpu_fill)).find("path=gpu-cpuconvert") == 0);
+                    REQUIRE(cuda.download(dref, out_ref.mem.data(), out_ref.mem.size()));
+                    cuda.MemFree(dref);
+                    const Diff dr = compare(out_ref, out_gpu);
+                    MESSAGE("  against the same path with the CPU fill: " << dr.off << " values differ");
+                    CHECK(dr.off == 0);
+                }
                 // The route: no CPU picture unless a CPU stage (ntsc-rs, Digital video on the CPU)
                 // or the hole filling needs it; NTSC and Digital video on the GPU need none.
                 const std::string tm = ntscrt_last_timings(gpu);
@@ -308,8 +363,16 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
                     if (k.digital_env) CHECK(tm.find("digital_route=cpu (NTSCRT_DIGITAL_GPU=0)") != std::string::npos);
                     else CHECK(tm.find("digital_route=gpu") != std::string::npos);
                 }
-                if (name.find("holes") != std::string::npos || (k.pad > 0 && name.find("Clip") != std::string::npos))
-                    CHECK(tm.find("path=gpu-cpuconvert") == 0);
+                // Holes in Clip mode: filled on the GPU (the route as without holes), or on the CPU
+                // (gpu-cpuconvert) with NTSCRT_FILL_GPU=0.
+                const bool holes = name.find("holes") != std::string::npos || (k.pad > 0 && name.find("Clip") != std::string::npos);
+                if (holes) {
+                    if (k.fill_env) CHECK(tm.find("fill_route=cpu (NTSCRT_FILL_GPU=0)") != std::string::npos);
+                    else CHECK(tm.find("fill_route=gpu (auto: ") != std::string::npos);
+                } else {
+                    CHECK(tm.find("fill_route=") == std::string::npos);
+                }
+                if (holes && k.fill_env) CHECK(tm.find("path=gpu-cpuconvert") == 0);
                 else if (digital && tm.find("digital_route=cpu") != std::string::npos) CHECK(tm.find("path=gpu-download") == 0);
                 else if (tm.find("ntsc_route=") == std::string::npos || ntsc_gpu) CHECK(tm.find("path=gpu-direct") == 0);
                 else CHECK(tm.find("path=gpu-download") == 0);  // NTSC on ntsc-rs (WARP, NTSCRT_NTSC_GPU=0)
@@ -319,6 +382,7 @@ TEST_CASE("host GPU frames (fake CUDA host) match the CPU path") {
         }
         ntscrt_destroy(cpu);
         ntscrt_destroy(gpu);
+        if (gpu_cpu_fill) ntscrt_destroy(gpu_cpu_fill);
     }
 #endif
 }
@@ -414,14 +478,26 @@ TEST_CASE("UHD timings, CPU path vs host GPU path" * doctest::skip(std::getenv("
     if (!cuda.start()) return;
     const auto schema = ntscrt::host::Schema::parse(ntscrt_param_schema_json());
     nlohmann::json l = ntscrt::host::build_look(schema, [&](size_t i) { return schema.params[i].def; }).look;
-    for (const char *patch : {"{}", R"({"ntsc":{"enabled":false}})"}) {
+    // The default look and NTSC off, opaque; then a frame with transparent corners in Clip mode, its holes
+    // filled on the GPU (gpu-direct) and with NTSCRT_FILL_GPU=0 (gpu-cpuconvert).
+    struct B {
+        const char *patch;
+        Alpha alpha;
+        const char *fill_env;
+    };
+    for (const B &bc : {B{"{}", Alpha::Opaque, nullptr}, B{R"({"ntsc":{"enabled":false}})", Alpha::Opaque, nullptr},
+                        B{"{}", Alpha::Straight, nullptr}, B{"{}", Alpha::Straight, "0"},
+                        B{R"({"ntsc":{"enabled":false}})", Alpha::Straight, nullptr},
+                        B{R"({"ntsc":{"enabled":false}})", Alpha::Straight, "0"}}) {
+        const char *patch = bc.patch;
+        set_env("NTSCRT_FILL_GPU", bc.fill_env);
         nlohmann::json lk = l;
         lk.merge_patch(nlohmann::json::parse(patch));
         const std::string look = lk.dump();
         const int W = 3840, H = 2160;
         HostImage src, out;
         src.init(W, H, NTSCRT_RGBA32F);
-        fill(src, 0, Alpha::Opaque);
+        fill(src, 0, bc.alpha);
         out.init(W, H, NTSCRT_RGBA32F);
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, NTSCRT_BUILT_RESOURCES_DIR};
         ntscrt_instance *a = nullptr;
@@ -440,8 +516,12 @@ TEST_CASE("UHD timings, CPU path vs host GPU path" * doctest::skip(std::getenv("
             REQUIRE(ntscrt_render_cpu(a, &ra, &s, &d) == NTSCRT_OK);
             const std::string tc = ntscrt_last_timings(a);
             REQUIRE(ntscrt_render_host_gpu(a, &ra, &host, &gs, 0, 0, &gd) == NTSCRT_OK);
-            if (f >= 9) MESSAGE(std::string(patch) << " cpu: " << tc << " | gpu: " << std::string(ntscrt_last_timings(a)));
+            if (f >= 9)
+                MESSAGE(std::string(patch) << (bc.alpha == Alpha::Opaque ? " opaque" : " holes")
+                                           << (bc.fill_env ? " NTSCRT_FILL_GPU=0" : "") << " cpu: " << tc
+                                           << " | gpu: " << std::string(ntscrt_last_timings(a)));
         }
+        set_env("NTSCRT_FILL_GPU", nullptr);
         cuda.MemFree(ds);
         cuda.MemFree(dd);
         ntscrt_destroy(a);
