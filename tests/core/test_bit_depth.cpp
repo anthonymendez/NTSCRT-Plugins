@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "gpu/gpu.h"
+#include "pixel_convert.h"
 #include "testing.h"
 
 namespace {
@@ -203,4 +205,85 @@ TEST_CASE("alpha is merged at full precision too") {
         if (std::string(mode) == "clip") CHECK(n_half == size_t(W / 2) * H);  // source alpha, exactly
     }
     ntscrt_destroy(inst);
+}
+
+// The CPU path reads an RGBA16F result back without its alpha (facade/pack_rgb: 3 halves a
+// pixel, ntscrt_render_cpu): the kernel must keep every half's bits (NaN may change payload,
+// the conversion turns it into 0 either way), and from_rgb16f_rows must write what
+// from_rgba16f_rows writes from the unpacked picture.
+TEST_CASE("the packed RGB readback keeps every half and converts like the RGBA16F one") {
+    auto dev = ntscrt::gpu::Device::create(
+#ifdef _WIN32
+        ntscrt::gpu::Backend::D3D11,
+#else
+        ntscrt::gpu::Backend::Metal,
+#endif
+        nullptr, nullptr);
+    if (!dev) {
+        MESSAGE("no GPU device: skipped");
+        return;
+    }
+    // Every half pattern once in r, g, b, at a width whose packed rows have no padding
+    // (w % 4 == 0) and one whose rows do.
+    for (int w : {256, 255}) {
+        const int n = 65536, h = (n / 3 + w) / w;
+        std::vector<uint16_t> px(size_t(w) * h * 4, 0x3c00);  // alpha 1
+        for (int i = 0; i < n; ++i) px[size_t(i / 3) * 4 + size_t(i % 3)] = uint16_t(i);
+        auto t = dev->create_texture({w, h, ntscrt::gpu::Format::RGBA16F, false, false});
+        dev->upload(*t, px.data(), ptrdiff_t(w) * 8);
+        const int pw = (w * 3 + 3) / 4;
+        auto pk = dev->create_texture({pw, h, ntscrt::gpu::Format::RGBA16F, true, false});
+        struct { uint32_t w, h, use_alpha, mode, premult, pad[3]; } p{uint32_t(w), uint32_t(h), 0, 0, 0, {}};
+        ntscrt::gpu::Bindings b;
+        b.constants = &p;
+        b.constants_size = sizeof p;
+        b.textures = {t.get()};
+        b.out_textures = {pk.get()};
+        dev->dispatch(dev->kernel("facade/pack_rgb"), b, pw, h, 1);
+        std::vector<uint16_t> got(size_t(pw) * h * 4);
+        dev->download(*pk, got.data(), ptrdiff_t(pw) * 8);
+        size_t bad = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                for (int c = 0; c < 3; ++c) {
+                    const uint16_t want = px[(size_t(y) * w + x) * 4 + c];
+                    const uint16_t g = got[size_t(y) * pw * 4 + size_t(x) * 3 + c];
+                    const bool nan = (want & 0x7c00) == 0x7c00 && (want & 0x3ff);
+                    if (nan ? !((g & 0x7c00) == 0x7c00 && (g & 0x3ff)) : g != want) {
+                        char m[64];
+                        std::snprintf(m, sizeof m, "half 0x%04x came back as 0x%04x", unsigned(want), unsigned(g));
+                        if (bad < 8) MESSAGE(m);
+                        ++bad;
+                    }
+                }
+        CAPTURE(w);
+        CHECK(bad == 0);
+        // The CPU conversion from both layouts, every host format, both alpha modes, with and
+        // without alpha, straight and premultiplied.
+        std::vector<uint16_t> packed(size_t(w) * h * 3);
+        for (size_t i = 0; i < size_t(w) * h; ++i)
+            for (int c = 0; c < 3; ++c) packed[i * 3 + size_t(c)] = px[i * 4 + size_t(c)];
+        std::vector<float> alpha(size_t(w) * h);
+        for (size_t i = 0; i < alpha.size(); ++i) alpha[i] = float((i * 37) % 256) / 255.f;
+        for (ntscrt_pixel_format f : {NTSCRT_RGBA8, NTSCRT_BGRA8, NTSCRT_RGBA16, NTSCRT_RGBA16F, NTSCRT_RGBA32F})
+            for (int mode = 0; mode < 2; ++mode)
+                for (int pm = 0; pm < 2; ++pm)
+                    for (int al = 0; al < 3; ++al) {
+                        const size_t pb = f == NTSCRT_RGBA32F ? 16 : (f == NTSCRT_RGBA8 || f == NTSCRT_BGRA8) ? 4 : 8;
+                        std::vector<uint8_t> a(size_t(w) * h * pb, 0xcd), bb(a.size(), 0xcd);
+                        ntscrt_image da{w, h, ptrdiff_t(size_t(w) * pb), f, a.data()}, db{w, h, ptrdiff_t(size_t(w) * pb), f, bb.data()};
+                        const std::vector<float> none;
+                        const std::vector<float> *ap = al == 0 ? nullptr : al == 1 ? &none : &alpha;
+                        const auto m = mode ? ntscrt::AlphaMode::Spill : ntscrt::AlphaMode::Clip;
+                        ntscrt::from_rgba16f_rows(reinterpret_cast<const uint8_t *>(px.data()), ptrdiff_t(w) * 8, w, 0, h,
+                                                  ap, da, m, pm != 0);
+                        ntscrt::from_rgb16f_rows(reinterpret_cast<const uint8_t *>(packed.data()), ptrdiff_t(w) * 6, w, 0,
+                                                 h, ap, db, m, pm != 0);
+                        CAPTURE(int(f));
+                        CAPTURE(mode);
+                        CAPTURE(pm);
+                        CAPTURE(al);
+                        CHECK(a == bb);
+                    }
+    }
 }

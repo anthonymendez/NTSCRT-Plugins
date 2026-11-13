@@ -29,3 +29,28 @@ void alpha_merge(uint3 id : SV_DispatchThreadID)
     }
     dst[id.xy] = float4(c, a);
 }
+
+// facade/pack_rgb: the CPU path's readback of an RGBA16F result (ntscrt_render_cpu) without
+// its alpha, which nothing reads (the host's alpha comes from the source): 6 bytes a pixel
+// instead of 8. size = the result's w x h; dst (RGBA16F, ceil(3w / 4) x h): texel j of a row
+// holds that row's halves 4j .. 4j + 3 of r0 g0 b0 r1 g1 b1 ... (0 past the end). Each value
+// is a half read as a float and written as a half again: the same bits (NaN aside, which the
+// CPU conversion turns into 0 either way; tests/core/test_bit_depth.cpp checks every half).
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void pack_rgb(uint3 id : SV_DispatchThreadID)
+{
+    const uint pw = (P.size.x * 3u + 3u) / 4u;
+    if (id.x >= pw || id.y >= P.size.y) return;
+    // Texel j starts at half 4j: pixel 4j / 3, channel j % 3. Static swizzles only: an
+    // indexed component (v[c]) may compile to a dot product with a one-hot vector, which
+    // turns a neighbouring NaN or infinity into NaN.
+    const uint ph = id.x % 3u, p = (4u * id.x) / 3u;
+    const float4 a = rgb.Load(int3(int(p), int(id.y), 0));
+    const float4 b = p + 1u < P.size.x ? rgb.Load(int3(int(p + 1u), int(id.y), 0)) : float4(0.0, 0.0, 0.0, 0.0);
+    float4 o;
+    if (ph == 0u) o = float4(a.r, a.g, a.b, b.r);
+    else if (ph == 1u) o = float4(a.g, a.b, b.r, b.g);
+    else o = float4(a.b, b.r, b.g, b.b);
+    dst[id.xy] = o;
+}

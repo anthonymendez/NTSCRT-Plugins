@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 
 #if defined(_M_X64) || defined(__x86_64__)
 #define NTSCRT_X86 1
@@ -240,13 +241,15 @@ template <ntscrt_pixel_format F> inline __m128 load4(const uint8_t *row, int x) 
 
 // round_unit(v, max) of 4 lanes: clamped to [0, 1] first (NaN -> 0: maxps
 // returns its second operand for NaN), which round_unit's branches give too.
+// uint32_t(double(p) + 0.5) is floor(p + 0.5) (p + 0.5 is exact in double) =
+// floor(p) + (p - floor(p) >= 0.5), all exact in float (p - floor(p) is: they
+// share p's exponent range): no double conversions.
 inline __m128i round4(__m128 v, float max) {
     v = _mm_min_ps(_mm_max_ps(v, _mm_setzero_ps()), _mm_set1_ps(1.f));
     const __m128 p = _mm_mul_ps(v, _mm_set1_ps(max));
-    const __m128d half = _mm_set1_pd(0.5);
-    const __m128i lo = _mm_cvttpd_epi32(_mm_add_pd(_mm_cvtps_pd(p), half));
-    const __m128i hi = _mm_cvttpd_epi32(_mm_add_pd(_mm_cvtps_pd(_mm_movehl_ps(p, p)), half));
-    return _mm_unpacklo_epi64(lo, hi);
+    const __m128 f = _mm_floor_ps(p);
+    const __m128 up = _mm_and_ps(_mm_cmpge_ps(_mm_sub_ps(p, f), _mm_set1_ps(0.5f)), _mm_set1_ps(1.f));
+    return _mm_cvttps_epi32(_mm_add_ps(f, up));
 }
 
 // write_px for 4 lanes r, g, b, a (each in [0, 1]); RGBA16F stays scalar.
@@ -394,13 +397,29 @@ bool to_bgra8_rows(const ntscrt_image &src, uint8_t *rows, ptrdiff_t pitch, std:
 // Pull-push hole filling: average the non-transparent colours down a mip
 // pyramid, then fill each empty pixel from the next coarser level (bilinear),
 // so empty areas take the colour of the nearest content, smoothly.
+// Every pixel of a level depends only on the level before it, so each level's
+// rows run on the thread pool (for_rows): the same bytes as one thread.
+// (hostgpu_fill.slang does the same on the GPU, byte for byte.)
 void fill_transparent(ImageBGRA8 &im, const std::vector<float> &alpha) {
-    struct Level { int w, h; std::vector<float> px; };  // r, g, b, weight (colour straight)
+    struct Level {  // r, g, b, weight (colour straight); every value written before it's read
+        int w, h;
+        std::unique_ptr<float[]> px;
+    };
     const int W = im.width, H = im.height;
     if (W <= 0 || H <= 0 || alpha.size() < size_t(W) * H) return;  // empty alpha: opaque
-    bool any = false, all = true;
-    for (float a : alpha) { bool e = a <= kTransparent; any |= e; all &= e; }
-    if (!any || all) return;  // nothing to fill / nothing to fill from
+    {
+        // Per row: bit 0 = some pixel empty, bit 1 = some pixel not.
+        std::vector<uint8_t> rows(size_t(H), 0);
+        for_rows(W, H, [&](int y) {
+            const float *a = alpha.data() + size_t(y) * W;
+            uint8_t f = 0;
+            for (int x = 0; x < W && f != 3; ++x) f |= a[x] <= kTransparent ? 1 : 2;
+            rows[size_t(y)] = f;
+        });
+        uint8_t all = 0;
+        for (uint8_t f : rows) all |= f;
+        if (all != 3) return;  // nothing to fill / nothing to fill from
+    }
 
     auto px0 = [&](int x, int y, float o[4]) {  // level 0 read
         const uint8_t *p = im.row(y) + x * 4;
@@ -411,24 +430,25 @@ void fill_transparent(ImageBGRA8 &im, const std::vector<float> &alpha) {
     int w = W, h = H;
     while (w > 1 || h > 1) {
         const int nw = (w + 1) / 2, nh = (h + 1) / 2;
-        Level n{nw, nh, std::vector<float>(size_t(nw) * nh * 4, 0.f)};
-        for (int y = 0; y < nh; ++y)
+        Level n{nw, nh, std::unique_ptr<float[]>(new float[size_t(nw) * nh * 4])};
+        const Level *below = L.empty() ? nullptr : &L.back();
+        for_rows(nw, nh, [&](int y) {
             for (int x = 0; x < nw; ++x) {
                 float s[4] = {0, 0, 0, 0};
                 for (int dy = 0; dy < 2; ++dy)
                     for (int dx = 0; dx < 2; ++dx) {
                         int sx = std::min(2 * x + dx, w - 1), sy = std::min(2 * y + dy, h - 1);
                         float v[4];
-                        if (L.empty()) px0(sx, sy, v);
-                        else std::copy_n(&L.back().px[(size_t(sy) * w + sx) * 4], 4, v);
+                        if (!below) px0(sx, sy, v);
+                        else std::copy_n(&below->px[(size_t(sy) * w + sx) * 4], 4, v);
                         for (int c = 0; c < 3; ++c) s[c] += v[c] * v[3];
                         s[3] += v[3];
                     }
                 float *o = &n.px[(size_t(y) * nw + x) * 4];
-                if (s[3] > 0)
-                    for (int c = 0; c < 3; ++c) o[c] = s[c] / s[3];
+                for (int c = 0; c < 3; ++c) o[c] = s[3] > 0 ? s[c] / s[3] : 0.f;
                 o[3] = std::min(1.f, s[3]);
             }
+        });
         L.push_back(std::move(n));
         w = L.back().w;
         h = L.back().h;
@@ -447,7 +467,7 @@ void fill_transparent(ImageBGRA8 &im, const std::vector<float> &alpha) {
     for (size_t k = L.size() - 1; k-- > 0;) {  // push: coarse -> fine, levels 1+
         Level &f = L[k];
         const Level &c = L[k + 1];
-        for (int y = 0; y < f.h; ++y)
+        for_rows(f.w, f.h, [&](int y) {
             for (int x = 0; x < f.w; ++x) {
                 float *p = &f.px[(size_t(y) * f.w + x) * 4];
                 if (p[3] >= 1.f) continue;
@@ -456,8 +476,9 @@ void fill_transparent(ImageBGRA8 &im, const std::vector<float> &alpha) {
                 for (int i = 0; i < 3; ++i) p[i] = p[i] * p[3] + u[i] * (1 - p[3]);
                 p[3] = 1.f;
             }
+        });
     }
-    for (int y = 0; y < H; ++y) {  // level 0: only empty pixels change
+    for_rows(W, H, [&](int y) {  // level 0: only empty pixels change
         uint8_t *row = im.row(y);
         for (int x = 0; x < W; ++x) {
             if (alpha[size_t(y) * W + x] > kTransparent) continue;
@@ -467,9 +488,8 @@ void fill_transparent(ImageBGRA8 &im, const std::vector<float> &alpha) {
             row[x * 4 + 1] = q8(u[1]);
             row[x * 4 + 2] = q8(u[0]);
         }
-    }
+    });
 }
-
 void letterbox(const ImageBGRA8 &in, int out_w, int out_h, ImageBGRA8 &out) {
     out.resize(out_w, out_h);  // black bars (opaque black, like the GPU bypass)
     for (size_t i = 3; i < out.px.size(); i += 4) out.px[i] = 255;
@@ -488,12 +508,17 @@ namespace {
 // 0..1, NaN -> 0 (what an 8-bit UNORM target stores)
 inline float unit(float v) { return v > 0.f ? (v < 1.f ? v : 1.f) : 0.f; }
 
+// The result picture's pixel layouts merge_out reads.
+enum ResultLayout { kBgra8, kRgba16f, kRgb16f /* RGBA16F without its alpha: 3 halves a pixel */ };
+
 // Rows [y0, y1) of the result picture (in_w wide; row y0 at `rows`, rows
-// `pitch` bytes apart; RGBA16F when kHalf, else BGRA8) + source alpha -> the
-// same rows of the host image; the alpha conventions of from_bgra8.
-template <bool kHalf>
+// `pitch` bytes apart; layout kIn) + source alpha -> the same rows of the host
+// image; the alpha conventions of from_bgra8.
+template <ResultLayout kIn>
 void merge_out(const uint8_t *rows, ptrdiff_t pitch, int in_w, int y0, int y1, const std::vector<float> *alpha,
                ntscrt_image &dst, AlphaMode mode, bool premult) {
+    constexpr bool kHalf = kIn != kBgra8;
+    constexpr size_t kStride = kIn == kBgra8 ? 4 : kIn == kRgba16f ? 8 : 6;  // bytes a pixel
     const float missing = mode == AlphaMode::Spill ? 0.f : 1.f;
     const bool opaque = alpha && alpha->empty();  // to_bgra8 stores no alpha for opaque sources
     if (opaque) alpha = nullptr;
@@ -504,7 +529,7 @@ void merge_out(const uint8_t *rows, ptrdiff_t pitch, int in_w, int y0, int y1, c
     auto rgb = [&](int x, int y, float v[4]) {
         const uint8_t *r = rows + ptrdiff_t(y - y0) * pitch;
         if constexpr (kHalf) {
-            const uint16_t *s = reinterpret_cast<const uint16_t *>(r) + size_t(x) * 4;
+            const uint16_t *s = reinterpret_cast<const uint16_t *>(r + size_t(x) * kStride);
             for (int c = 0; c < 3; ++c) v[c] = unit(half_to_float(s[c]));
         } else {
             const uint8_t *s = r + size_t(x) * 4;
@@ -560,7 +585,17 @@ void merge_out(const uint8_t *rows, ptrdiff_t pitch, int in_w, int y0, int y1, c
                 for (int x = 0; x < w; ++x) {
                     __m128 v;
                     if constexpr (kHalf) {
-                        v = _mm_cvtph_ps(_mm_loadl_epi64(reinterpret_cast<const __m128i *>(src + size_t(x) * 8)));
+                        __m128i h;
+                        if (kIn == kRgb16f && x == w - 1) {
+                            // the row's last 6 bytes: an 8-byte load could cross the end of the rows
+                            uint64_t q = 0;
+                            std::memcpy(&q, src + size_t(x) * kStride, 6);
+                            h = _mm_cvtsi64_si128(int64_t(q));
+                        } else {
+                            // (kRgb16f: the 4th half is the next pixel's red, replaced by alpha below)
+                            h = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(src + size_t(x) * kStride));
+                        }
+                        v = _mm_cvtph_ps(h);
                         v = _mm_min_ps(_mm_max_ps(v, _mm_setzero_ps()), _mm_set1_ps(1.f));  // unit()
                     } else {
                         v = load4<NTSCRT_BGRA8>(src, x);
@@ -598,11 +633,16 @@ void from_rgba16f(const uint16_t *px, int w, int h, const std::vector<float> *al
 
 void from_bgra8_rows(const uint8_t *rows, ptrdiff_t pitch, int w, int y0, int y1, const std::vector<float> *alpha,
                      ntscrt_image &dst, AlphaMode mode, bool premult) {
-    merge_out<false>(rows, pitch, w, y0, y1, alpha, dst, mode, premult);
+    merge_out<kBgra8>(rows, pitch, w, y0, y1, alpha, dst, mode, premult);
 }
 
 void from_rgba16f_rows(const uint8_t *rows, ptrdiff_t pitch, int w, int y0, int y1, const std::vector<float> *alpha,
                        ntscrt_image &dst, AlphaMode mode, bool premult) {
-    merge_out<true>(rows, pitch, w, y0, y1, alpha, dst, mode, premult);
+    merge_out<kRgba16f>(rows, pitch, w, y0, y1, alpha, dst, mode, premult);
+}
+
+void from_rgb16f_rows(const uint8_t *rows, ptrdiff_t pitch, int w, int y0, int y1, const std::vector<float> *alpha,
+                      ntscrt_image &dst, AlphaMode mode, bool premult) {
+    merge_out<kRgb16f>(rows, pitch, w, y0, y1, alpha, dst, mode, premult);
 }
 }  // namespace ntscrt

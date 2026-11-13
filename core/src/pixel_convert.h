@@ -68,6 +68,10 @@ void from_bgra8_rows(const uint8_t *rows, ptrdiff_t pitch, int w, int y0, int y1
                      ntscrt_image &dst, AlphaMode mode, bool premult);
 void from_rgba16f_rows(const uint8_t *rows, ptrdiff_t pitch, int w, int y0, int y1, const std::vector<float> *alpha,
                        ntscrt_image &dst, AlphaMode mode, bool premult);
+// The same from an RGBA16F picture packed without its alpha (facade/pack_rgb: 3 halves
+// r, g, b a pixel, rows `pitch` bytes apart): the bytes from_rgba16f_rows writes.
+void from_rgb16f_rows(const uint8_t *rows, ptrdiff_t pitch, int w, int y0, int y1, const std::vector<float> *alpha,
+                      ntscrt_image &dst, AlphaMode mode, bool premult);
 
 namespace detail {
 // The SIMD conversion kernels (x86-64 with SSE4.1 + F16C; the same bytes as

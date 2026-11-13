@@ -178,6 +178,7 @@ struct ntscrt_instance {
     // allocation and clear per frame): BGRA8, or RGBA16F for 16-bit / float hosts.
     ImageBGRA8 result8;
     std::vector<uint16_t> result16;
+    std::shared_ptr<gpu::Texture> readback_rgb;  // an RGBA16F result packed without alpha for its readback
     std::string last_error;
     std::string gpu_gone;  // set when the GPU was lost and couldn't be replaced: CPU stages from then on
     int device_resets = 0;  // devices recreated since the last good GPU frame
@@ -219,6 +220,7 @@ void drop_gpu(ntscrt_instance *inst) {
     inst->bridge.reset();
     inst->fill_gpu.reset();
     inst->fill_route = {};
+    inst->readback_rgb.reset();
     inst->tex_pool.clear();
     inst->howl.reset();
     inst->howl_crt.reset();
@@ -1156,16 +1158,34 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
                 // Converted band by band straight from the readback memory
                 // (no copy of the result), the next bands' transfer meanwhile.
                 const bool f16 = out->desc().format == gpu::Format::RGBA16F;
-                const int w = out->desc().width;
+                const int w = out->desc().width, h = out->desc().height;
+                gpu::Device &dev = *inst->dev;
+                const gpu::Texture *rb = out.get();
+                if (f16) {
+                    // RGBA16F: read back without its alpha (facade/pack_rgb, 6 bytes a pixel
+                    // instead of 8; the host's alpha comes from the source): the same halves.
+                    const int pw = (w * 3 + 3) / 4;
+                    auto &pk = inst->readback_rgb;
+                    if (!pk || pk->desc().width != pw || pk->desc().height != h)
+                        pk = dev.create_texture({pw, h, gpu::Format::RGBA16F, true, false});
+                    struct { uint32_t w, h, use_alpha, mode, premult, pad[3]; } p{uint32_t(w), uint32_t(h), 0, 0, 0, {}};
+                    gpu::Bindings b;
+                    b.constants = &p;
+                    b.constants_size = sizeof p;
+                    b.textures = {out.get()};
+                    b.out_textures = {pk.get()};
+                    dev.dispatch(dev.kernel("facade/pack_rgb"), b, pw, h, 1);
+                    rb = pk.get();
+                }
                 PhaseScope ps(pt, PhaseTimes::Readback);
-                inst->dev->read(
-                    *out,
+                dev.read(
+                    *rb,
                     [&](const uint8_t *rows, ptrdiff_t pitch, int y0, int y1) {
                         PhaseScope pc(pt, PhaseTimes::Out);
-                        if (f16) from_rgba16f_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
+                        if (f16) from_rgb16f_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
                         else from_bgra8_rows(rows, pitch, w, y0, y1, a, *dst, mode, premult);
                     },
-                    readback_bands(size_t(w) * out->desc().height * (f16 ? 8 : 4)));
+                    readback_bands(size_t(w) * h * (f16 ? 6 : 4)));
                 return;
             }
             if (out->desc().format == gpu::Format::RGBA16F) {

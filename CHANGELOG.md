@@ -100,6 +100,10 @@ written but not yet built.
   instead of the frame going down to the CPU and back. The fill of a UHD frame with transparent areas took ~100 ms
   and now ~1 ms. `NTSCRT_FILL_GPU=0` brings back the CPU fill (docs/ENVIRONMENT.md); the log line says which
   (`fill_route=`).
+- **Faster with CPU frames** (AMD / Intel GPUs, macOS, `NTSCRT_OFX_GPU=0`): a frame with transparent areas in
+  *Clip* mode (titles, moved or shrunk clips) fills them on all CPU cores: a UHD frame takes ~33 ms instead of
+  ~95 ms, 1080p ~9 ms instead of ~22 ms; 16-bit and float results come back from the GPU without their unused
+  alpha (UHD float: 7.3 ms a frame instead of 7.9 with NTSC off). The same pictures, byte for byte.
 - **Glitch** and **Digital video** (with Datamosh) past the first minute of an effect look slightly different
   from 0.5.0-rc.2: the Glitch receiver's simulated history (sync, vertical roll, colour lock) restarts at every
   minute boundary of the effect (a minute of timecode: 01:00:00:00, 01:01:00:00, ...; 60 s of the rounded frame
@@ -288,6 +292,10 @@ written but not yet built.
   `--gpu-ab` fail on `gpu-cpuconvert` / `fill_route=cpu` in GPU-frames sessions. Found on the way: premultiplied
   8-bit / half-float host GPU output differs from the CPU path by one level / half step on 1-27% of the values
   (`merge_out`'s rounding, not new; Resolve hands float images), documented in HOST-GPU.md.
+- CPU-frame path (docs/dev/HOST-GPU.md, "CPU frames: the conversions"): profiled with `bench_transfer`; RGBA16F
+  results read back packed without alpha (`facade/pack_rgb`, `from_rgb16f_rows`; every half's bits checked in
+  `test_core_bitdepth`), `fill_transparent`'s levels on the thread pool, `round4` without double conversions;
+  `bench_transfer --dump` of 72 frames identical to v0.5.0-rc.5's.
 - CRT render order (docs/dev/CRT.md): librashader's `clear_history` never clears `PassFeedback`, so crtsim's
   "prime on a seek" read the last frame rendered. A crtsim frame is now two chain frames, its own input with the
   persistence at 0 (exactly a zeroed feedback) then the frame; `test_crt_order` (every bundled preset, many render

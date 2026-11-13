@@ -90,6 +90,7 @@ Metal device. The source is blitted into a core texture after an empty command b
 completed (a queue runs its buffers in commit order), the result blitted back and waited for. It compiles in CI
 but has never run in Resolve on a Mac, so the plug-in only offers Metal with `NTSCRT_OFX_GPU=1`.
 
+
 ## Fallbacks
 
 - `NTSCRT_OFX_GPU=0`: the plug-in doesn't offer GPU render; Resolve hands over CPU images (the CPU path, as in
@@ -336,3 +337,76 @@ Phases with `NTSCRT_PROFILE=1` (a wait after each GPU phase and each NTSC pass, 
 | out (merge + copy) | 0.20 | 0.17 | 0.20 | 0.18 |
 
 Raw results: `C:/ntb/w11x-res/bench{A,B,C,P}/bench.jsonl` and `C:/ntb/w11x-resolve.log` on the test machine.
+
+## CPU frames: the conversions (2026-11-12)
+
+What AMD / Intel GPUs, macOS and `NTSCRT_OFX_GPU=0` get (`ntscrt_render_cpu`). The profile first
+(`NTSCRT_PROFILE=1 bench_transfer`, UHD float, default look, ms): convert in 2.8, convert out 4.3, readback 0.5
+(with the profile's waits; without them `readback` is mostly the wait for the GPU stages, ~4 ms with NTSC on).
+Both conversions run on the thread pool at close to the memory bandwidth (UHD float: 133 MB read and 33 MB
+written in, 66 MB read and 133 MB written out), so there was little to win there; a Clip-mode frame with
+transparent pixels was another matter: `fill_transparent` ran on one thread (~80 ms at UHD). Changes, none of
+which changes a byte (`bench_transfer --dump` of 36 cases, sizes UHD / 1080p / 333x197, formats float / half /
+16-bit / 8-bit, default / NTSC off / *Clean CRT*, opaque and `--alpha`: identical to v0.5.0-rc.5's;
+`test_core_convert` with `NTSCRT_TEST_EXHAUSTIVE=1`, `test_core_bitdepth`):
+
+- RGBA16F results (16-bit and float hosts) are read back without their alpha (`facade/pack_rgb`: 6 bytes a pixel
+  instead of 8, the host's alpha comes from the source; every half's bits kept, checked for all 65536):
+  `from_rgb16f_rows` converts from that.
+- `fill_transparent` runs each level's rows on the thread pool (the levels only read the level before them) and no
+  longer zero-fills or single-thread scans its buffers.
+- The SIMD kernels' 8 / 16-bit rounding (`round4`) is `floor(p) + (p - floor(p) >= 0.5)` in float (exactly
+  `uint32_t(double(p) + 0.5)`) instead of four double conversions.
+
+Not done: uploading in the host's format with the conversion in a kernel (a UHD float frame is 133 MB over PCIe
+instead of 33 MB: slower), the GPU fill for CPU frames (it would need the picture's alpha uploaded and the fill
+route's exactness check on AMD / Intel GPUs, which nobody has measured).
+
+`bench_transfer --sizes 3840x2160,1920x1080 --formats rgba32f,rgba16f,rgba8 --looks default,ntsc_off,clean_crt
+--frames 120 --warmup 20` (and `--alpha`), v0.5.0-rc.5 (`main`, fedb8e8) against this, three interleaved runs
+each, median of the three medians, ms per frame (RTX 5090, Ryzen 9 9950X3D; no other benchmark ran meanwhile;
+raw: `C:/ntb/w15b-bench/` on the dev PC). `in / rb / out` = convert in / readback / convert out.
+
+Opaque sources:
+| size | format | look | before | after | change | before in / rb / out | after in / rb / out |
+|---|---|---|---|---|---|---|---|
+| 3840x2160 | rgba32f | default | 10.77 | 10.25 | -5% | 2.05 / 3.97 / 4.24 | 2.10 / 4.06 / 3.59 |
+| 3840x2160 | rgba32f | ntsc_off | 7.92 | 7.30 | -8% | 2.02 / 1.41 / 4.27 | 2.02 / 1.50 / 3.62 |
+| 3840x2160 | rgba32f | clean_crt | 7.93 | 7.21 | -9% | 2.01 / 1.47 / 4.28 | 1.89 / 1.54 / 3.60 |
+| 3840x2160 | rgba16f | default | 9.16 | 9.07 | -1% | 1.16 / 4.00 / 3.40 | 1.15 / 4.10 / 3.24 |
+| 3840x2160 | rgba16f | ntsc_off | 6.07 | 5.94 | -2% | 1.12 / 1.41 / 3.36 | 1.07 / 1.49 / 3.22 |
+| 3840x2160 | rgba16f | clean_crt | 6.13 | 6.02 | -2% | 1.13 / 1.45 / 3.38 | 1.08 / 1.54 / 3.24 |
+| 3840x2160 | rgba8 | default | 6.89 | 6.93 | +1% | 0.86 / 4.15 / 1.24 | 0.85 / 4.16 / 1.24 |
+| 3840x2160 | rgba8 | ntsc_off | 3.80 | 3.69 | -3% | 0.82 / 1.56 / 1.23 | 0.80 / 1.51 / 1.22 |
+| 3840x2160 | rgba8 | clean_crt | 3.77 | 3.74 | -1% | 0.81 / 1.55 / 1.22 | 0.81 / 1.54 / 1.22 |
+| 1920x1080 | rgba32f | default | 3.33 | 3.29 | -1% | 0.34 / 1.60 / 0.90 | 0.36 / 1.56 / 0.84 |
+| 1920x1080 | rgba32f | ntsc_off | 2.00 | 1.98 | -1% | 0.29 / 0.68 / 0.90 | 0.31 / 0.67 / 0.84 |
+| 1920x1080 | rgba32f | clean_crt | 2.11 | 2.00 | -5% | 0.29 / 0.72 / 0.91 | 0.32 / 0.66 / 0.84 |
+| 1920x1080 | rgba16f | default | 3.33 | 3.23 | -3% | 0.32 / 1.59 / 0.92 | 0.31 / 1.53 / 0.92 |
+| 1920x1080 | rgba16f | ntsc_off | 1.83 | 1.80 | -2% | 0.30 / 0.67 / 0.72 | 0.29 / 0.62 / 0.74 |
+| 1920x1080 | rgba16f | clean_crt | 1.90 | 1.85 | -3% | 0.30 / 0.70 / 0.73 | 0.29 / 0.66 / 0.74 |
+| 1920x1080 | rgba8 | default | 2.59 | 2.58 | -0% | 0.34 / 1.44 / 0.34 | 0.34 / 1.44 / 0.34 |
+| 1920x1080 | rgba8 | ntsc_off | 1.25 | 1.22 | -3% | 0.24 / 0.53 / 0.33 | 0.24 / 0.52 / 0.33 |
+| 1920x1080 | rgba8 | clean_crt | 1.23 | 1.25 | +1% | 0.24 / 0.52 / 0.33 | 0.24 / 0.53 / 0.33 |
+
+With `--alpha` (transparent and half-transparent areas, Clip mode: the fill):
+| size | format | look | before | after | change | before in / rb / out | after in / rb / out |
+|---|---|---|---|---|---|---|---|
+| 3840x2160 | rgba32f | default | 97.69 | 36.19 | -63% | 83.85 / 5.39 / 4.87 | 25.23 / 4.80 / 4.10 |
+| 3840x2160 | rgba32f | ntsc_off | 94.24 | 33.51 | -64% | 85.72 / 15.88 / 4.83 | 25.64 / 2.28 / 4.10 |
+| 3840x2160 | rgba32f | clean_crt | 91.61 | 33.43 | -64% | 82.93 / 16.36 / 4.57 | 25.38 / 2.30 / 4.12 |
+| 3840x2160 | rgba16f | default | 89.80 | 30.82 | -66% | 79.19 / 5.33 / 3.78 | 20.48 / 4.83 / 3.36 |
+| 3840x2160 | rgba16f | ntsc_off | 85.94 | 27.41 | -68% | 78.21 / 16.69 / 3.85 | 20.25 / 2.25 / 3.35 |
+| 3840x2160 | rgba16f | clean_crt | 86.45 | 27.49 | -68% | 55.05 / 16.86 / 3.93 | 20.38 / 2.28 / 3.37 |
+| 3840x2160 | rgba8 | default | 59.28 | 25.62 | -57% | 50.23 / 5.41 / 1.82 | 17.06 / 4.82 / 1.77 |
+| 3840x2160 | rgba8 | ntsc_off | 67.43 | 23.82 | -65% | 50.27 / 2.41 / 1.84 | 18.18 / 2.30 / 1.76 |
+| 3840x2160 | rgba8 | clean_crt | 81.93 | 24.10 | -71% | 69.72 / 2.35 / 1.87 | 18.56 / 2.31 / 1.75 |
+| 1920x1080 | rgba32f | default | 21.39 | 9.65 | -55% | 17.37 / 1.90 / 1.03 | 6.20 / 1.72 / 0.91 |
+| 1920x1080 | rgba32f | ntsc_off | 22.48 | 8.51 | -62% | 18.32 / 1.01 / 1.02 | 6.20 / 0.82 / 0.91 |
+| 1920x1080 | rgba32f | clean_crt | 21.77 | 8.56 | -61% | 18.84 / 1.02 / 1.03 | 6.23 / 0.81 / 0.91 |
+| 1920x1080 | rgba16f | default | 23.38 | 10.11 | -57% | 18.78 / 1.85 / 1.01 | 6.55 / 1.71 / 0.98 |
+| 1920x1080 | rgba16f | ntsc_off | 22.06 | 9.15 | -59% | 19.34 / 0.96 / 0.95 | 6.87 / 0.85 / 0.75 |
+| 1920x1080 | rgba16f | clean_crt | 21.78 | 9.14 | -58% | 19.16 / 0.96 / 0.91 | 6.91 / 0.84 / 0.75 |
+| 1920x1080 | rgba8 | default | 22.40 | 9.90 | -56% | 19.24 / 1.68 / 0.53 | 6.94 / 1.65 / 0.47 |
+| 1920x1080 | rgba8 | ntsc_off | 21.23 | 8.77 | -59% | 19.21 / 0.80 / 0.51 | 6.93 / 0.75 / 0.42 |
+| 1920x1080 | rgba8 | clean_crt | 21.18 | 8.75 | -59% | 19.09 / 0.79 / 0.50 | 6.89 / 0.76 / 0.43 |
