@@ -530,7 +530,9 @@ const std::vector<std::string> &missing_props() { return g_missing; }
 Host::Host() {
     g_host = this;
     PropSet &h = host_props;
-    h.set(kOfxPropName, {std::string("org.ntscrt.mockhost")});
+    // NTSCRT_MOCK_HOST_NAME: act as another host (test_ofx_resolve_host: "DaVinciResolve").
+    const char *hn = std::getenv("NTSCRT_MOCK_HOST_NAME");
+    h.set(kOfxPropName, {std::string(hn && *hn ? hn : "org.ntscrt.mockhost")});
     h.set(kOfxPropLabel, {std::string("NTSCRT mock host")});
     h.set(kOfxPropAPIVersion, {1, 5});
     h.set(kOfxPropVersion, {1, 0, 0});

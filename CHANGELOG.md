@@ -202,6 +202,18 @@ written but not yet built.
 - Half-float output with CPU frames (e.g. Fusion half-float comps with `NTSCRT_OFX_GPU=0`, AMD / Intel GPUs): a
   value just below a power of two with an odd exponent (e.g. 0.49995) was written as half of it (the rounding's
   carry into the exponent was lost), so premultiplied half-float frames could show rare dark specks.
+- Resolve: **Screen Loop on a full-size Edit-page clip** (1080p and UHD timelines) no longer makes Resolve render
+  hundreds of frames up front. The effect told Resolve it might read the loop's whole history (up to 479 earlier
+  frames), and Resolve rendered and kept all of them before every frame: a UHD timeline reached 40 GB before its
+  first frame. The effect now reads those frames only when it needs them, one at a time, with the same pictures. A
+  jump far into a clip still has to replay up to 16 seconds of the loop, and Resolve keeps every frame it hands
+  over (about 80 MB each at 1080p, 200-330 MB at UHD, up to its *Limit Resolve memory usage* preference; see
+  docs/dev/SCREENLOOP-MEMORY.md).
+- **Screen Loop playback past 16 seconds** no longer replays 8 seconds of the loop every 8 seconds: the next
+  stretch's history is now built along the way (no frames read again from Resolve, no pause; same pictures).
+- Resolve: **rendering a Screen Loop clip while the viewer shows it** no longer replays the loop from 8-16 seconds
+  back each time the viewer's small preview of the frame is drawn in between (the preview had its own size and
+  replaced the full-size history).
 - **The *sim* CRT shader looks the same however Resolve renders a frame:** its picture depended on which frame
   was rendered before (scrubbing, render-queue chunks, Fusion's repeated renders and two renders of the same
   frame could differ by up to 97 of 255 levels, 243 with its persistence turned up). Each frame now builds its
@@ -301,6 +313,14 @@ written but not yet built.
   results read back packed without alpha (`facade/pack_rgb`, `from_rgb16f_rows`; every half's bits checked in
   `test_core_bitdepth`), `fill_transparent`'s levels on the thread pool, `round4` without double conversions;
   `bench_transfer --dump` of 72 frames identical to v0.5.0-rc.5's.
+- Screen Loop memory (docs/dev/SCREENLOOP-MEMORY.md): `getFramesNeeded` leaves out the loop's window in Resolve
+  (`NTSCRT_OFX_DECLARE_HISTORY` overrides); the engine's run ahead (`howl_engine.h`, `NTSCRT_SCREENLOOP_AHEAD=0`
+  turns it off); one loop per scene size (`Howlaround::Impl::Slot`); the debug log's `temporal_fetch_ms=`,
+  `temporal_held_max=`, `temporal_size=`, `temporal_missing=`; `bench_screenloop --then N` and its fetches held at
+  once / peak memory; tests: a far cold seek's fetch count, one host frame held at a time, no fetch across window
+  starts or after a render at another scale (`test_howl_seek`, `test_howl_loop`), `test_ofx_resolve_host` (the mock
+  host as Resolve); the parity suite's 1080p Edit-page Screen Loop case is back (group `sizeloop`; the UHD one,
+  `sizeloop-uhd`, only when asked for), with `--parity-case-timeout`.
 - CRT render order (docs/dev/CRT.md): librashader's `clear_history` never clears `PassFeedback`, so crtsim's
   "prime on a seek" read the last frame rendered. A crtsim frame is now two chain frames, its own input with the
   persistence at 0 (exactly a zeroed feedback) then the frame; `test_crt_order` (every bundled preset, many render

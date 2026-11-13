@@ -37,11 +37,14 @@ struct Source {
     std::map<int64_t, std::vector<uint8_t>> px;
     std::map<int64_t, ntscrt_image> img;
     int fetches = 0;
-    static std::vector<uint8_t> make(int64_t f) {
-        std::vector<uint8_t> p(size_t(W) * H * 4);
-        for (int y = 0; y < H; ++y)
-            for (int x = 0; x < W; ++x) {
-                uint8_t *q = &p[(size_t(y) * W + x) * 4];
+    size_t held_max = 0;            // host images handed out and not yet released, at most
+    int64_t first = -1, last = -1;  // the earliest / latest frame fetched since the counters were reset
+    int w = W, h = H;               // the size frames are fetched at (a render at a reduced scale: smaller)
+    static std::vector<uint8_t> make(int64_t f, int w = W, int h = H) {
+        std::vector<uint8_t> p(size_t(w) * h * 4);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                uint8_t *q = &p[(size_t(y) * w + x) * 4];
                 const bool bar = ((x + f * 5) / 24) % 2 == 0;
                 q[0] = uint8_t((x * 3 + f * 9) % 256);
                 q[1] = uint8_t((y * 4 + f * 3) % 256);
@@ -55,8 +58,11 @@ const ntscrt_image *fetch(void *u, int64_t f) {
     auto *s = static_cast<Source *>(u);
     if (f < 0) return nullptr;
     ++s->fetches;
-    s->px[f] = Source::make(f);
-    s->img[f] = {W, H, ptrdiff_t(W) * 4, NTSCRT_RGBA8, s->px[f].data()};
+    if (s->first < 0 || f < s->first) s->first = f;
+    if (f > s->last) s->last = f;
+    s->px[f] = Source::make(f, s->w, s->h);
+    s->img[f] = {s->w, s->h, ptrdiff_t(s->w) * 4, NTSCRT_RGBA8, s->px[f].data()};
+    if (s->img.size() > s->held_max) s->held_max = s->img.size();
     return &s->img[f];
 }
 void release(void *u, const ntscrt_image *im) {
@@ -101,20 +107,25 @@ struct Inst {
         }
     }
     ~Inst() { ntscrt_destroy(p); }
-    std::vector<uint8_t> render(int64_t f) {
-        std::vector<uint8_t> in = Source::make(f), out(in.size());
-        ntscrt_image s{W, H, ptrdiff_t(W) * 4, NTSCRT_RGBA8, in.data()};
-        ntscrt_image d{W, H, ptrdiff_t(W) * 4, NTSCRT_RGBA8, out.data()};
+    // scale < 1: a host's reduced render scale (its viewer): frames that much smaller.
+    std::vector<uint8_t> render(int64_t f, double scale = 1) {
+        src.w = int(W * scale);
+        src.h = int(H * scale);
+        std::vector<uint8_t> in = Source::make(f, src.w, src.h), out(in.size());
+        ntscrt_image s{src.w, src.h, ptrdiff_t(src.w) * 4, NTSCRT_RGBA8, in.data()};
+        ntscrt_image d{src.w, src.h, ptrdiff_t(src.w) * 4, NTSCRT_RGBA8, out.data()};
         ntscrt_render_args ra{};
         ra.frame_index = f;
         ra.fps = 30;
         ra.look_json = look.c_str();
         ra.feedback_json = fb.c_str();
-        ra.render_scale = 1;
+        ra.render_scale = scale;
         ra.fetch_source = fetch;
         ra.release_source = release;
         ra.user = &src;
         src.fetches = 0;
+        src.held_max = 0;
+        src.first = src.last = -1;
         const ntscrt_status st = ntscrt_render_cpu(p, &ra, &s, &d);
         CHECK_MESSAGE(st == NTSCRT_OK, ntscrt_last_error(p));
         timings = ntscrt_last_timings(p);
@@ -174,6 +185,79 @@ TEST_CASE("Screen Loop: default window, a seek past two windows and back") {
     }
     Inst b("{}", fb);
     CHECK(b.render(481) == want);  // window start 240
+}
+
+TEST_CASE("Screen Loop: a far cold seek has a bounded cost and holds one host frame at a time") {
+    // Default window (240 frames): a cold seek to N re-runs the loop from its window start
+    // A(N) = (floor(N / 240) - 1) * 240, so it fetches at most 2 * 240 - 1 earlier source frames,
+    // never one before A(N), and gives each host image back before asking for the next one (a
+    // host's UHD float frame is ~133 MB; Resolve keeps every frame fetched: docs/dev/SCREENLOOP-MEMORY.md).
+    // The frames after it continue: no fetch at all, window starts included.
+    const std::string fb = feedback("Bottom to top", 240);
+    for (int64_t n : {int64_t(1850), int64_t(2159)}) {
+        CAPTURE(n);
+        set_env("NTSCRT_SOURCE_CACHE_MB", "0");  // nothing served from the cache: every history frame is fetched
+        Inst a("{}", fb);
+        set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+        if (!a.ok) return;
+        a.render(n);
+        const int64_t anchor = (n / 240 - 1) * 240;
+        CHECK(a.src.first == anchor);
+        CHECK(a.src.last == n - 1);
+        CHECK(a.src.fetches == n - anchor);  // each history frame once (the frame itself is the render's source)
+        CHECK(a.src.fetches < 2 * 240);
+        CHECK(a.src.held_max == 1);
+        CHECK(a.src.img.empty());  // all given back
+        // What the host is told it may be asked for covers exactly that.
+        ntscrt_render_args ra{};
+        ra.frame_index = n;
+        ra.fps = 30;
+        ra.look_json = "{}";
+        ra.feedback_json = fb.c_str();
+        int64_t first = -1;
+        CHECK(ntscrt_source_frames_needed(&ra, &first) == NTSCRT_OK);
+        CHECK(first == anchor);
+        // Playing on across the next window start (1920, 2160): its run went along with the
+        // one shown, so nothing is fetched again, and the frames are the cold seek's.
+        const int64_t last = (n / 240 + 1) * 240 + 5;
+        std::vector<uint8_t> played;
+        for (int64_t f = n + 1; f <= last; ++f) {
+            CAPTURE(f);
+            played = a.render(f);
+            CHECK(a.src.fetches == 0);
+        }
+        Inst b("{}", fb);
+        CHECK(b.render(last) == played);
+    }
+}
+
+TEST_CASE("Screen Loop: a render at another scale in between keeps the full-size history") {
+    // Resolve renders the effect's frame for its viewer / thumbnails at a reduced render scale
+    // while the render queue renders full size. That render has a loop of its own: the
+    // full-size one goes on without re-running its window (no fetch), with the same frames.
+    const std::string fb = feedback("Bottom to top", 8);
+    std::vector<std::vector<uint8_t>> seq;
+    {
+        Inst a("{}", fb);
+        if (!a.ok) return;
+        for (int64_t f = 0; f <= 30; ++f) seq.push_back(a.render(f));
+    }
+    set_env("NTSCRT_SOURCE_CACHE_MB", "0");
+    Inst b("{}", fb);
+    set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    for (int64_t f = 0; f <= 20; ++f) CHECK(b.render(f) == seq[size_t(f)]);
+    b.render(20, 0.5);  // the viewer: its own loop, its own (smaller) fetches
+    CHECK(b.src.fetches > 0);
+    for (int64_t f = 21; f <= 30; ++f) {
+        CAPTURE(f);
+        CHECK(b.render(f) == seq[size_t(f)]);
+        CHECK(b.src.fetches == 0);
+        if (f == 25) {
+            b.render(25, 0.5);  // and again: that loop continues too
+            b.render(25, 0.25);  // more sizes than loops kept: the full-size one is never the one dropped
+            b.render(25, 0.375);
+        }
+    }
 }
 
 #ifndef __APPLE__  // crt-sim can hang the macOS CI runners' virtual GPU

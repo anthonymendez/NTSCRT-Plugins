@@ -530,6 +530,17 @@ public:
     // video's stream back to its keyframe, Screen Loop's window): declared so
     // hosts that only deliver declared frames (or pre-render them) give us
     // what fetch_source asks for. Only the current frame when they're off.
+    //
+    // Except Screen Loop's history in Resolve: Resolve renders every declared
+    // source frame before it calls render, and keeps them, for each frame it is
+    // about to render (it asks for the next dozen or so ahead). Declaring the
+    // loop's window (up to 479 frames) made a UHD Edit-page render reach 40 GB
+    // before its first frame, and a cold seek render the whole window up front.
+    // Resolve hands out undeclared frames on request (same pixels, measured:
+    // docs/dev/SCREENLOOP-MEMORY.md), so there the loop fetches them one at a
+    // time, only when it re-runs, and releases each at once.
+    // NTSCRT_OFX_DECLARE_HISTORY=1 declares it anyway (A/B), 0 never declares
+    // any history (hosts that also deliver undeclared frames).
     void getFramesNeeded(const OFX::FramesNeededArguments &args, OFX::FramesNeededSetter &frames) override {
         const TimeRange range = host_range(args.time);
         const double t = std::clamp(args.time, range.origin, range.last);
@@ -537,7 +548,10 @@ public:
         // (a field render of floor(t), a retimed frame llround(t)).
         const int64_t n = frame_of(t, range.origin, true), n_hi = frame_of(t, range.origin, false);
         int64_t first = n;
-        if (temporal_sources_possible(t)) {
+        const int declare = declare_history();
+        const bool loop_on = bool_param_at("screenloop.enabled", t, true);
+        const bool skip = declare == 0 || (declare < 0 && loop_on && host_is_resolve());
+        if (!skip && temporal_sources_possible(t)) {
             std::string look, fb;
             look_at_time(t, look, fb);
             int seed = 0;
@@ -763,6 +777,28 @@ public:
         }
     }
     // Can a stage that reads other source frames (Digital video, Screen Loop) be on at t?
+    // A switch's value at t (`absent`: the schema has no such switch).
+    bool bool_param_at(const char *id, double t, bool absent) const {
+        auto it = by_id_.find(id);
+        return it == by_id_.end() ? absent : bool_at(it->second, t);
+    }
+    // NTSCRT_OFX_DECLARE_HISTORY: 1 always declare, 0 never, -1 (unset) by host.
+    static int declare_history() {
+        static const int v = [] {
+            const char *e = std::getenv("NTSCRT_OFX_DECLARE_HISTORY");
+            if (!e || !*e) return -1;
+            return std::string(e) == "0" ? 0 : 1;
+        }();
+        return v;
+    }
+    static bool host_is_resolve() {
+        static const bool v = [] {
+            const auto *h = OFX::getImageEffectHostDescription();
+            return h && h->hostName.find("Resolve") != std::string::npos;
+        }();
+        return v;
+    }
+
     bool temporal_sources_possible(double t) const {
         for (const char *id : {"digital.enabled", "screenloop.enabled"}) {
             auto it = by_id_.find(id);
@@ -1287,6 +1323,10 @@ struct RenderCtx {
     std::map<const ntscrt_image *, Live> live;
     bool animated = true;  // some param has keyframes: other frames can differ
     int fetches = 0;  // other frames the core pulled (debug log)
+    size_t live_max = 0;  // of those, the most held at once (debug log)
+    double fetch_ms = 0;  // time spent in the host's fetchImage for them (debug log)
+    std::string fetched;  // the size and depth of the first one (debug log)
+    int missing = 0;      // fetches the host answered with no image (debug log)
     // The host asked to abort (OFX abort()): the remaining fetches are skipped
     // (the core has no abort callback; a fetch is the slow part of a history
     // re-run). The stages that ran on missing frames are flushed afterwards.
@@ -1309,8 +1349,14 @@ struct RenderCtx {
         }
         ++c->fetches;
         try {
+            const auto t0 = std::chrono::steady_clock::now();
             std::unique_ptr<OFX::Image> im(c->fx->src_->fetchImage(t));
-            if (!im) return nullptr;
+            c->fetch_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if (!im) {
+                ++c->missing;
+                return nullptr;
+            }
+            if (c->fetched.empty()) c->fetched = dlog::rect(im->getBounds()) + " " + dlog::depth_name(im->getPixelDepth());
             Live l{std::move(im), std::make_unique<ntscrt_image>(), {}};
             if (c->gpu.api != NTSCRT_HOST_GPU_NONE) {
                 if (!read_gpu_padded(c->fx->inst_, c->gpu, *l.image, c->frame, *l.view, l.padded)) return nullptr;
@@ -1320,6 +1366,7 @@ struct RenderCtx {
             }
             const ntscrt_image *key = l.view.get();
             c->live[key] = std::move(l);
+            c->live_max = std::max(c->live_max, c->live.size());
             return key;
         } catch (...) {
             return nullptr;
@@ -1545,7 +1592,12 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
             o.setf(std::ios::fixed);
             o.precision(2);
             o << " fetch_ms=" << ms(t_start, t_fetched) << " look_ms=" << ms(t_fetched, t_looked)
-              << " core_ms=" << ms(t_core, t_done) << " seed=" << seed << " temporal_fetches=" << ctx.fetches
+              << " core_ms=" << ms(t_core, t_done) << " seed=" << seed << " temporal_fetches=" << ctx.fetches;
+            if (ctx.fetches)
+                o << " temporal_fetch_ms=" << ctx.fetch_ms << " temporal_held_max=" << ctx.live_max
+                  << " temporal_size=" << (ctx.fetched.empty() ? std::string("-") : ctx.fetched)
+                  << " temporal_missing=" << ctx.missing;
+            o
               << " animated=" << ctx.animated << " look_builds=" << (look_builds_ - builds_before)
               << " sequential=" << args.sequentialRenderStatus << " field=" << int(args.fieldToRender)
               << " debug_by=" << (debug_box ? "effect" : "") << (debug_box && (debug_all || debug_env) ? "," : "")

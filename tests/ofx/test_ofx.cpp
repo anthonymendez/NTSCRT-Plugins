@@ -1283,14 +1283,26 @@ TEST_CASE("host protocol: getFramesNeeded follows the temporal stages") {
         CHECK(a0 > 900);
         CHECK(a1 == 0);  // every later key dropped: the stream reaches back to frame 0
     }
-    SUBCASE("Screen Loop: its window start") {
+    SUBCASE("Screen Loop: its window start, except in Resolve") {
+        // Resolve renders and keeps every declared frame before each render (40 GB before
+        // the first UHD frame), and hands out undeclared ones on request: there the loop's
+        // history is not declared (docs/dev/SCREENLOOP-MEMORY.md; test_ofx_resolve_host).
+        const char *hn = std::getenv("NTSCRT_MOCK_HOST_NAME");
+        const bool resolve = hn && std::string(hn).find("Resolve") != std::string::npos;
         f.set("screenloop.enabled", 1);
         auto [a, b] = f.needed(1000);
         CHECK(b == 1000);
-        CHECK(a == 720);  // window 240: anchor (1000 / 240 - 1) * 240
+        CHECK(a == (resolve ? 1000 : 720));  // window 240: anchor (1000 / 240 - 1) * 240
         auto [c, d] = f.needed(300);
-        CHECK(c == 0);  // the first two windows run from frame 0
+        CHECK(c == (resolve ? 300 : 0));  // the first two windows run from frame 0
         CHECK(d == 300);
+        // Digital video's stream is still declared in Resolve (Screen Loop off).
+        f.set("screenloop.enabled", 0);
+        f.set("digital.enabled", 1);
+        f.set("digital.keyframe_interval", 2);
+        auto [e, g] = f.needed(1010);  // not on a key
+        CHECK(g == 1010);
+        CHECK(e < 1010);
     }
     SUBCASE("half-frame times cover both readings") {
         f.set("digital.enabled", 1);

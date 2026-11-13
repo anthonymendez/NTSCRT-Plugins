@@ -474,9 +474,10 @@ class Suite:
         comp = retry(lambda: item.GetFusionCompByIndex(1), "get the Fusion composition")
         return Fu(self, comp, tl), item
 
-    def render_timeline(self, tl, frames, tag, codec="RGB8"):
+    def render_timeline(self, tl, frames, tag, codec="RGB8", timeout=600):
         """Render frames of `tl` (offsets from its start) to PNG through the render queue.
         frames: list (one job per frame, in that order) or inclusive (a, b) tuple (one job).
+        A job running longer than `timeout` seconds is stopped and raises.
         Returns {frame: path}, files renamed to <tag>-<frame:04d>.png."""
         retry(lambda: self.p.SetCurrentTimeline(tl), "switch timeline")
         start = tl.GetStartFrame()
@@ -493,8 +494,12 @@ class Suite:
                 retry(lambda: self.p.StartRendering([job], False), "start rendering")
                 t0 = time.time()
                 while self.p.IsRenderingInProgress():
-                    if time.time() - t0 > 600:
-                        raise RuntimeError(f"render {tag} {a}-{b} took over 10 minutes")
+                    if time.time() - t0 > timeout:
+                        try:
+                            self.p.StopRendering()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        raise RuntimeError(f"render {tag} {a}-{b} took over {timeout:.0f} s")
                     time.sleep(0.1)
                 st = self.p.GetRenderJobStatus(job) or {}
                 if st.get("JobStatus") != "Complete":
@@ -1709,6 +1714,8 @@ def main():
     ap.add_argument("--parity-sources", default=None, help="--parity: folder for the generated source clips (default <out>/_src)")
     ap.add_argument("--parity-compare-only", action="store_true",
                     help="--parity: don't render, compare the sessions already in --out again")
+    ap.add_argument("--parity-case-timeout", type=float, default=600,
+                    help="--parity: seconds one render job of a case may take before it is stopped (the case fails)")
     ap.add_argument("--parity-retry", action="store_true",
                     help="--parity: render again the cases of --parity-configs' sessions in --out that didn't render "
                          "(each in a session of its own), merge them in and compare")

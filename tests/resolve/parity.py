@@ -372,10 +372,14 @@ def build_cases(quick=False):
             if lab not in ("default", "mild-vhs", "clean-crt", "bottom-to-top", "minidv"):
                 continue
             if lab == "bottom-to-top":
-                # Screen Loop on an Edit-page clip at 1080p / UHD: getFramesNeeded asks Resolve for the loop's history
-                # (frames 1440..1850 for frame 1850), float frames of the timeline's size; Resolve grew to 20-30 GB
-                # and the render didn't finish in 10 minutes (2026-11-12, CPU path), blocking the session. Covered at
-                # 640x360 (edit-bottom-to-top) and on the Fusion page of these projects.
+                # Screen Loop on an Edit-page clip at 1080p / UHD: frame 1850 is a cold seek that fetches 410 full-size
+                # history frames, and Resolve keeps every frame it hands out (~80 MB each at 1080p, 200-330 MB at UHD:
+                # docs/dev/SCREENLOOP-MEMORY.md). A group and a section of their own, rendered last in a session.
+                # UHD: Resolve passes 40 GB within seconds (2026-11-13: all five sessions); group sizeloop-uhd runs
+                # only when --parity-groups names it.
+                if not quick:
+                    add(f"{proj}-edit-{lab}", "sizeloop" if proj == "1080p" else "sizeloop-uhd", prm,
+                        where=f"{proj}-editloop", look=look, fr=[0, 1850], tags=("noise",))  # cpu2 renders them too
                 continue
             if quick and lab != "default":
                 continue
@@ -665,7 +669,7 @@ class Session:
         return tl, item
 
     def render(self, tl, frames, tag):
-        return self.s.render_timeline(tl, frames, tag, codec=self.codec)
+        return self.s.render_timeline(tl, frames, tag, codec=self.codec, timeout=self.a.parity_case_timeout)
 
     def mark(self):
         return self.s.log_size(self.log)
@@ -688,7 +692,8 @@ class Session:
         by_where = {}
         for c in self.cases:
             by_where.setdefault(c["where"], []).append(c)
-        order = ["clip", "hour", "title", "edit", "edit1h", "1080p-edit", "1080p-clip", "uhd-edit", "uhd-clip"]
+        order = ["clip", "hour", "title", "edit", "edit1h", "1080p-edit", "1080p-clip", "uhd-edit", "uhd-clip",
+                 "1080p-editloop", "uhd-editloop"]
         for where in order:
             cs = by_where.get(where)
             if not cs:
@@ -1241,6 +1246,8 @@ def main(a):
         groups = {g.strip() for g in (getattr(a, "parity_groups", "") or "").split(",") if g.strip()}
         if groups:
             cases = [c for c in cases if c["group"] in groups]
+        else:  # only when named (docs/dev/SCREENLOOP-MEMORY.md)
+            cases = [c for c in cases if c["group"] != "sizeloop-uhd"]
         sources = make_sources(Path(a.parity_sources) if a.parity_sources else base / "_src")
         cases_path.write_text(json.dumps({"sources": sources, "cases": cases, "expected": expected, "quick": quick},
                                          indent=1), encoding="utf-8")

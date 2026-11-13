@@ -39,6 +39,15 @@
 // turns checkpoints off (set_checkpoints) while the TV pass keeps state of
 // its own between frames (a temporal CRT preset).
 //
+// Running ahead. Sequential playback crossing a window start W (frame N =
+// W + B, whose anchor is W) would re-run the loop from W: B source frames
+// fetched again from the host, which (DaVinci Resolve) renders and keeps each
+// one. So from frame W on, a second run of anchor W goes along with the one
+// shown, on the same source pictures (no fetch of its own), one TV pass per
+// frame; at W + B it takes over. It is the run a re-run would make, step for
+// step, so the pictures are the same. Off with checkpoints (a temporal TV
+// pass), and it never takes over from a history with stand-ins.
+//
 // Pipelining. With max_inflight() > 0 a TV pass can still be running while
 // the next frame's camera is exposed: the camera reads the TV `delay` frames
 // back, so with a delay of 2 or more the previous pass needn't be done.
@@ -53,6 +62,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <string>
 #include <utility>
 
 #include "howl_counter.h"
@@ -81,6 +91,13 @@ inline size_t default_checkpoint_budget() {
     return size_t(256) << 20;
 }
 
+// NTSCRT_SCREENLOOP_AHEAD=0: no run ahead (each window start crossed re-runs its window,
+// as 0.5.0-rc.5 did; the pictures are the same either way). For A/B timing.
+inline bool default_run_ahead() {
+    const char *e = std::getenv("NTSCRT_SCREENLOOP_AHEAD");
+    return !(e && std::string(e) == "0");
+}
+
 struct EngineConfig {
     Settings settings;
     double fps = 30;
@@ -90,6 +107,7 @@ struct EngineConfig {
     int64_t window = kDefaultWindow;
     int64_t checkpoint_every = kDefaultCheckpointEvery;  // <= 0: none
     size_t checkpoint_budget = default_checkpoint_budget();
+    bool run_ahead = default_run_ahead();
 };
 
 namespace detail {
@@ -122,6 +140,7 @@ public:
                 if (!ok) {
                     e.inflight_.clear();
                     e.valid_ = false;
+                    e.ahead_.drop();
                 }
             }
         } guard{*this};
@@ -133,6 +152,7 @@ public:
         while (next_ < n) {
             const int64_t f = next_;
             Pic sc = ops.scene(f);
+            const bool got = bool(sc);
             if (sc) {
                 hold = sc;
                 hold_frame = -1;
@@ -145,9 +165,11 @@ public:
             Pic cam = camera_step(ops, f, sc, cfg_.settings.delay());
             if (cfg_.settings.tv_in_view()) push_tv(ops, f, cam, normal_pass(f));
             else store(f, Pic());
+            step_ahead(ops, f, sc, got);
         }
         drain(ops);
         Pic cam = camera_step(ops, n, scene_n, cfg_.settings.delay());
+        step_ahead(ops, n, scene_n, true);
         guard.ok = true;
         return cam;
     }
@@ -175,12 +197,15 @@ public:
         expo_.clear();
         ckpts_.clear();
         ckpt_bytes_ = 0;
+        ahead_.drop();
     }
-    // Off: drops the checkpoints and neither takes nor uses any until on again.
+    // Off: drops the checkpoints and neither takes nor uses any until on again
+    // (nor runs ahead: both assume a TV pass is a function of its camera picture).
     void set_checkpoints(bool on) {
         if (!on) {
             ckpts_.clear();
             ckpt_bytes_ = 0;
+            ahead_.drop();
         }
         ckpt_on_ = on;
     }
@@ -192,7 +217,17 @@ public:
     int64_t tv_passes() const { return tv_passes_; }
     int64_t resets() const { return resets_; }
     int64_t restores() const { return restores_; }
+    int64_t ahead_passes() const { return ahead_passes_; }  // TV passes of the run ahead (not in tv_passes)
+    int64_t takeovers() const { return takeovers_; }        // window starts crossed without a re-run
+    bool ahead_valid() const { return ahead_.valid; }
+    int64_t ahead_anchor() const { return ahead_.anchor; }
+    int64_t ahead_next() const { return ahead_.next; }
     size_t checkpoints() const { return ckpts_.size(); }
+    size_t checkpoints(int64_t anchor) const {  // of that window start's run
+        size_t k = 0;
+        for (const auto &c : ckpts_) k += c.first.first == anchor;
+        return k;
+    }
     size_t checkpoint_bytes() const { return ckpt_bytes_; }
     std::optional<double> exposure_at(int64_t f) const {
         auto it = expo_.find(f);
@@ -229,6 +264,69 @@ private:
     CounterBitmap counter_;
     int64_t tv_passes_ = 0, resets_ = 0, restores_ = 0;
 
+    // The run ahead (see "Running ahead"): the same state as the members above,
+    // swapped in while it steps.
+    struct Run {
+        bool valid = false, complete = true;
+        int64_t anchor = 0, next = 0;
+        std::map<int64_t, Pic> tv;
+        std::map<int64_t, double> expo;
+        std::deque<std::pair<int64_t, Pending>> inflight;
+        void drop() {
+            valid = false;
+            tv.clear();
+            expo.clear();
+            inflight.clear();
+        }
+    };
+    Run ahead_;
+    bool in_ahead_ = false;  // the run ahead is swapped in: TV passes synchronous
+    int64_t ahead_passes_ = 0, takeovers_ = 0;
+
+    void swap_run() {
+        std::swap(valid_, ahead_.valid);
+        std::swap(complete_, ahead_.complete);
+        std::swap(anchor_, ahead_.anchor);
+        std::swap(next_, ahead_.next);
+        std::swap(tv_, ahead_.tv);
+        std::swap(expo_, ahead_.expo);
+        std::swap(inflight_, ahead_.inflight);
+    }
+
+    // Frame f's source picture `sc` (got: the host's, not a stand-in) was just
+    // used by the run shown: the run of the next window start takes its step
+    // too, or starts there (its run-up stands on sc, so it fetches nothing).
+    void step_ahead(Ops &ops, int64_t f, const Pic &sc, bool got) {
+        const int64_t b = cfg_.window;
+        if (b <= 0 || !cfg_.run_ahead || !ckpt_on_ || !sc) return;
+        const int64_t a2 = f / b * b;  // the anchor of frames a2 + b .. a2 + 2b - 1
+        if (a2 < b || a2 <= anchor_) return;
+        const bool cont = ahead_.valid && ahead_.anchor == a2 && ahead_.next == f;
+        if (!cont && f != a2) return;
+        struct Back {
+            Engine &e;
+            int64_t passes, resets;
+            bool ok = false;
+            ~Back() {
+                e.ahead_passes_ += e.tv_passes_ - passes;
+                e.tv_passes_ = passes;
+                e.resets_ = resets;
+                e.in_ahead_ = false;
+                e.swap_run();
+                if (!ok) e.ahead_.drop();
+            }
+        };
+        swap_run();
+        in_ahead_ = true;
+        Back back{*this, tv_passes_, resets_};
+        if (!cont) reset(ops, a2, sc, got);
+        else if (!got) complete_ = false;
+        Pic cam = camera_step(ops, f, sc, cfg_.settings.delay());
+        if (cfg_.settings.tv_in_view()) store(f, tv_pass(ops, cam, normal_pass(f)));
+        else store(f, Pic());
+        back.ok = true;
+    }
+
     static size_t pic_bytes(const Pic &p) {
         if constexpr (requires { Ops::bytes(p); }) return p ? size_t(Ops::bytes(p)) : 0;
         else return 0;
@@ -248,6 +346,14 @@ private:
     int64_t start(Ops &ops, int64_t a, int64_t n, const Pic &scene_n) {
         constexpr int64_t kNever = std::numeric_limits<int64_t>::max();
         const int64_t cont = can_reach(a, n) ? (n > next_ ? n - next_ : 0) : kNever;
+        if (cont == kNever && ckpt_on_ && ahead_.valid && ahead_.complete && ahead_.anchor == a && ahead_.next == n) {
+            // Crossing into the window the run ahead started: it takes over.
+            swap_run();
+            ahead_.drop();
+            inflight_.clear();
+            ++takeovers_;
+            return -1;
+        }
         if (ckpt_on_ && !ckpts_.empty()) {
             auto it = ckpts_.upper_bound({a, n});  // the first after (a, n)
             if (it != ckpts_.begin()) {
@@ -320,7 +426,7 @@ private:
     bool begin_tv(Ops &ops, int64_t f, const Pic &cam, const HowlPass &p) {
         if constexpr (kAsync) {
             const int limit = ops.max_inflight();
-            if (limit <= 0 || cfg_.settings.delay() < 2) return false;
+            if (limit <= 0 || cfg_.settings.delay() < 2 || in_ahead_) return false;
             while (int(inflight_.size()) >= limit) finish_one(ops);
             ++tv_passes_;
             inflight_.emplace_back(f, ops.tv_begin(cam, p));

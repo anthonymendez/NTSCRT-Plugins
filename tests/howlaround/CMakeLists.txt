@@ -5,6 +5,9 @@ ntscrt_add_test(test_howlaround
 # Screen Loop playback / seek timings, run by hand (not a ctest test).
 add_executable(bench_screenloop bench_screenloop.cpp)
 target_link_libraries(bench_screenloop PRIVATE ntscrt_core)
+if(WIN32)
+  target_link_libraries(bench_screenloop PRIVATE psapi)
+endif()
 target_compile_definitions(bench_screenloop PRIVATE NTSCRT_SOURCE_DIR="${NTSCRT_ROOT}"
   NTSCRT_BUILT_RESOURCES_DIR="${NTSCRT_RESOURCES_BUILD_DIR}")
 if(TARGET ntscrt_resources)

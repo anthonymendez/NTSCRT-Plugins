@@ -486,6 +486,75 @@ TEST_CASE("missing past sources: checkpoints and pipelining change no frame") {
     }
 }
 
+TEST_CASE("playing across window starts: the run ahead takes over, no source re-read, same frames") {
+    // Window 5: frames 10.. have anchor 5, 15.. anchor 10, ... Playing in order from 0, each
+    // window start is crossed without re-running it (no past source fetched), and every frame
+    // is what a fresh engine renders cold. Also after a cold seek (the run ahead starts inside
+    // its re-run), with pipelined passes, and with checkpoints off (no run ahead: re-runs).
+    const int64_t window = 5, frames = 32;
+    std::vector<Pic> cold;
+    for (int64_t f = 0; f < frames; ++f) {
+        CpuOps ops;
+        ops.source = moving;
+        Engine<CpuOps> fresh(config(busy(), 64, 48, 10, 2.3, window));
+        cold.push_back(render(fresh, ops, f, moving(f)));
+    }
+    int fetched = 0;
+    auto counted = [&](int64_t f) -> Pic {
+        ++fetched;
+        return moving(f);
+    };
+    {
+        CpuOps ops;
+        ops.source = counted;
+        Engine<CpuOps> e(config(busy(), 64, 48, 10, 2.3, window));
+        for (int64_t f = 0; f < frames; ++f) {
+            CAPTURE(f);
+            fetched = 0;
+            CHECK(*render(e, ops, f, moving(f)) == *cold[size_t(f)]);
+            CHECK(fetched == 0);
+        }
+        CHECK(e.resets() == 1);
+        CHECK(e.takeovers() == (frames - 1) / window - 1);  // window starts 5, 10, .. 25 taken over at 10, .., 30
+        CHECK(e.ahead_passes() > 0);
+    }
+    {
+        AsyncCpuOps ops;
+        ops.source = counted;
+        ops.limit = 2;
+        Engine<AsyncCpuOps> e(config(busy(), 64, 48, 10, 2.3, window));
+        fetched = 0;
+        Pic cam = e.camera(ops, 13, moving(13));  // cold: anchor 5; the run of window start 10 begins at 10
+        CHECK(*cam == *cold[13]);
+        CHECK(fetched == 9);  // 5 (its run-up) and 5..12
+        if (e.wants_tv(13)) e.store_tv(13, ops.tv_pass(cam, e.normal_pass(13)));
+        for (int64_t f = 14; f < frames; ++f) {
+            CAPTURE(f);
+            fetched = 0;
+            cam = e.camera(ops, f, moving(f));
+            if (e.wants_tv(f)) e.store_tv(f, ops.tv_pass(cam, e.normal_pass(f)));
+            CHECK(*cam == *cold[size_t(f)]);
+            CHECK(fetched == 0);
+        }
+        CHECK(ops.in_order);
+        CHECK(ops.begun == ops.ended);
+    }
+    {
+        CpuOps ops;
+        ops.source = counted;
+        Engine<CpuOps> off(config(busy(), 64, 48, 10, 2.3, window));
+        off.set_checkpoints(false);
+        int total = 0;
+        for (int64_t f = 0; f < frames; ++f) {
+            fetched = 0;
+            CHECK(*render(off, ops, f, moving(f)) == *cold[size_t(f)]);
+            total += fetched;
+        }
+        CHECK(off.ahead_passes() == 0);
+        CHECK(total > 0);  // each window start crossed re-runs its window
+    }
+}
+
 TEST_CASE("no checkpoint from a history that stood in the asked frame for a missing window start") {
     auto source = [](int64_t f) -> Pic { return f == 6 ? nullptr : moving(f); };
     CpuOps ops;
@@ -494,7 +563,9 @@ TEST_CASE("no checkpoint from a history that stood in the asked frame for a miss
     cfg.checkpoint_every = 2;
     Engine<CpuOps> e(cfg);
     e.camera(ops, 13, moving(13));  // anchor 6, whose source is missing: run-up on frame 13
-    CHECK(e.checkpoints() == 0);
+    CHECK(e.checkpoints(6) == 0);
+    // (The run ahead from window start 12 began on the real source of frame 12: its own.)
+    CHECK(e.checkpoints() == e.checkpoints(12));
     e.camera(ops, 2, moving(2));  // anchor 0: fine
     CHECK(e.checkpoints() > 0);
 }
