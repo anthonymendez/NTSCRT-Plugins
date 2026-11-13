@@ -90,6 +90,14 @@ Metal device. The source is blitted into a core texture after an empty command b
 completed (a queue runs its buffers in commit order), the result blitted back and waited for. It compiles in CI
 but has never run in Resolve on a Mac, so the plug-in only offers Metal with `NTSCRT_OFX_GPU=1`.
 
+Final Cut (`ntscrt_render_metal`, FxPlug, not released): when no CPU stage is on (on a Mac NTSC and Digital video
+run on the CPU by default, so that's looks with both off, e.g. *Clean CRT*), the host texture is converted by
+the same `hostgpu_in/convert_in` kernel (rows top first, as the CPU conversion read them; the look's crop applied
+there) instead of being copied to RGBA32F, read back and converted on the CPU; in Clip mode `row_flags` checks for
+transparent pixels first and a frame with any takes the old way (the CPU fill; the GPU fill's route is off on
+Metal). `NTSCRT_FAST_TRANSFER=0` keeps the old way for every frame. **Unverified:** compile-checked by the macOS
+CI job only; it has never run on a Mac, and Metal compiles the kernel with fast math, so whether its 8-bit
+picture equals the CPU conversion's there is unmeasured.
 
 ## Fallbacks
 

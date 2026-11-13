@@ -292,6 +292,11 @@ written but not yet built.
   `--gpu-ab` fail on `gpu-cpuconvert` / `fill_route=cpu` in GPU-frames sessions. Found on the way: premultiplied
   8-bit / half-float host GPU output differs from the CPU path by one level / half step on 1-27% of the values
   (`merge_out`'s rounding, not new; Resolve hands float images), documented in HOST-GPU.md.
+- Final Cut (`ntscrt_render_metal`, not released): with no CPU stage on (NTSC and Digital video off) the host
+  texture is converted by the host GPU path's `hostgpu_in/convert_in` kernel (crop included; Clip-mode frames
+  with transparent pixels, found by `row_flags`, and `NTSCRT_FAST_TRANSFER=0` keep the float readback and CPU
+  conversion). Unverified: compile-checked by the macOS CI job only, never run on a Mac; no GPU route that was
+  off on Metal is turned on.
 - CPU-frame path (docs/dev/HOST-GPU.md, "CPU frames: the conversions"): profiled with `bench_transfer`; RGBA16F
   results read back packed without alpha (`facade/pack_rgb`, `from_rgb16f_rows`; every half's bits checked in
   `test_core_bitdepth`), `fill_transparent`'s levels on the thread pool, `round4` without double conversions;

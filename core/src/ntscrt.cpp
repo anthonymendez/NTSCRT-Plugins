@@ -1213,7 +1213,8 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
 
 // Metal path (FxPlug): host textures in and out, on the device given at create.
 // The CPU stages (Digital, ntsc-rs) still need the frame on the CPU, so the
-// source is read back once; everything after runs on the GPU, and the result
+// source is read back once when one is on (else it's converted on the GPU:
+// `direct` below); everything after runs on the GPU, and the result
 // is written into the host texture by a kernel (or a blit when the host
 // texture isn't shader-writable) encoded on the host's command buffer.
 ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_args *args, void *src_texture,
@@ -1282,6 +1283,48 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         if (command_buffer) dev.set_external_command_buffer(nullptr);
         else dev.finish();
     };
+    // No CPU stage on (render_once decides; on Metal NTSC and Digital video run on the CPU
+    // by default, so with either on the frame still takes get_src): the host texture
+    // converted on the GPU by the host GPU path's kernel (hostgpu_in/convert_in, rows top
+    // first as get_src reads them), cut to the look's crop there; no float readback and no
+    // CPU conversion. Clip mode with transparent pixels: get_src (the CPU fill), as before;
+    // NTSCRT_FAST_TRANSFER=0: get_src always (as the CPU path's direct source).
+    // UNVERIFIED: compile-checked by the macOS CI job only, never run on a Mac.
+    const DirectSrc direct{
+        sw, sh, true,
+        [&](gpu::Device &d, AlphaMode mode, const json &look, std::vector<float> &alpha,
+            const facade::PoolFn &pool) -> std::shared_ptr<gpu::Texture> {
+            hostgpu::InParams p{};
+            p.frame_w = p.src_w = uint32_t(sw);
+            p.frame_h = p.src_h = uint32_t(sh);
+            p.mode = mode == AlphaMode::Spill ? 1 : 0;
+            p.premult = premult ? 1 : 0;
+            gpu::Bindings b;
+            b.constants = &p;
+            b.constants_size = sizeof p;
+            b.textures = {src.get()};
+            if (mode == AlphaMode::Clip) {
+                // hostgpu_flags/row_flags: any transparent pixel? (one flag per 64 pixels of a row)
+                const int fx = (sw + 63) / 64;
+                auto flags = d.create_texture({fx, sh, gpu::Format::R32F, true, false});
+                b.out_textures = {flags.get()};
+                d.dispatch(d.kernel("hostgpu_flags/row_flags"), b, fx, sh, 1);
+                std::vector<float> rows(size_t(fx) * size_t(sh));
+                d.download(*flags, rows.data(), ptrdiff_t(fx) * 4);
+                if (std::any_of(rows.begin(), rows.end(), [](float f) { return f != 0.f; })) return nullptr;
+            }
+            crop::Rect r{0, 0, sw, sh};
+            if (auto c = crop::from_look(look)) r = c->rect(sw, sh);
+            p.cx = uint32_t(r.x);
+            p.cy = uint32_t(r.y);
+            p.cw = uint32_t(r.width);
+            p.ch = uint32_t(r.height);
+            auto pic = pool({r.width, r.height, gpu::Format::BGRA8, true, false});
+            b.out_textures = {pic.get()};
+            d.dispatch(d.kernel("hostgpu_in/convert_in"), b, r.width, r.height, 1);
+            alpha.clear();  // emit's alpha_merge reads alpha from the source texture
+            return pic;
+        }};
     const gpu::Format df = dst->desc().format;
     inst->times.clear("metal-texture");
     struct Done {
@@ -1289,7 +1332,7 @@ ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_arg
         ~Done() { i->times.finish(); }
     } done{inst};
     return render_impl(inst, args, dw, dh, output_format(df == gpu::Format::RGBA16F || df == gpu::Format::RGBA32F),
-                       get_src, emit);
+                       get_src, emit, fast_transfer() ? &direct : nullptr);
 }
 
 }  // extern "C"
