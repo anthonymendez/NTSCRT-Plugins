@@ -57,10 +57,11 @@ for a cold seek to 1850 (`tests/howlaround/bench_screenloop.cpp`, "at most N hel
   each window's life, and the run-up (about 60 passes) on the window-start frame instead of on the frame B later. Off
   with checkpoints (a temporal CRT preset), never taken over from a history with stand-ins;
   `NTSCRT_SCREENLOOP_AHEAD=0` turns it off (A/B).
-- **One loop per scene size** (`howlaround.cpp`, `Howlaround::Impl::Slot`, two kept, least recently used dropped): a
+- **One loop per scene size** (`howlaround.cpp`, `Howlaround::Impl::Slot`; three kept, the least recently used
+  dropped but never the biggest for a smaller one; Resolve used scales 1, 0.16, 0.11 and 0.056 in one session): a
   render at another render scale has its own history and leaves the full-size one alone. Each is the same
-  deterministic loop, so no picture changes (`test_howl_seek` "a render at another scale in between"). Cost: a second
-  set of TV pictures and checkpoints while both are alive.
+  deterministic loop, so no picture changes (`test_howl_seek` "a render at another scale in between"). Cost: the
+  small loops' TV pictures and checkpoints while they are alive.
 - Debug log: each render's `temporal_fetches=`, and with fetches `temporal_fetch_ms=` (time in the host's
   `fetchImage`), `temporal_held_max=`, `temporal_size=` (the fetched image's bounds and depth), `temporal_missing=`
   (fetches the host answered with no image).

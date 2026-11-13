@@ -252,7 +252,11 @@ TEST_CASE("Screen Loop: a render at another scale in between keeps the full-size
         CAPTURE(f);
         CHECK(b.render(f) == seq[size_t(f)]);
         CHECK(b.src.fetches == 0);
-        if (f == 25) b.render(25, 0.5);  // and again: that loop continues too
+        if (f == 25) {
+            b.render(25, 0.5);  // and again: that loop continues too
+            b.render(25, 0.25);  // more sizes than loops kept: the full-size one is never the one dropped
+            b.render(25, 0.375);
+        }
     }
 }
 

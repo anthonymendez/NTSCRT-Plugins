@@ -202,7 +202,7 @@ struct Howlaround::Impl {
         int chain_w = 0, chain_h = 0;
         uint64_t used = 0;
     };
-    static constexpr size_t kSlots = 2;
+    static constexpr size_t kSlots = 3;  // Resolve: full size and two or three viewer / thumbnail scales
     std::vector<std::unique_ptr<Slot>> slots;
     Slot *cur = nullptr;  // the loop of the last camera() call
     uint64_t tick = 0;
@@ -214,10 +214,16 @@ struct Howlaround::Impl {
     Slot &slot_for(const gpu::TextureDesc &sd) {
         for (auto &s : slots)
             if (s->w == sd.width && s->h == sd.height && s->format == int(sd.format)) return *s;
-        if (slots.size() >= kSlots) {  // the least recently used goes
-            auto lru = slots.begin();
+        if (slots.size() >= kSlots) {
+            // The least recently used goes, but never the biggest for a smaller one: the
+            // full-size history is the expensive one (a re-run fetches full-size frames).
+            auto big = slots.begin();
             for (auto i = slots.begin(); i != slots.end(); ++i)
-                if ((*i)->used < (*lru)->used) lru = i;
+                if (int64_t((*i)->w) * (*i)->h > int64_t((*big)->w) * (*big)->h) big = i;
+            const bool keep_big = int64_t(sd.width) * sd.height < int64_t((*big)->w) * (*big)->h;
+            auto lru = slots.end();
+            for (auto i = slots.begin(); i != slots.end(); ++i)
+                if (!(keep_big && i == big) && (lru == slots.end() || (*i)->used < (*lru)->used)) lru = i;
             if (cur == lru->get()) cur = nullptr;
             slots.erase(lru);
         }
