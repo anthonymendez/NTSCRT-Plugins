@@ -370,8 +370,14 @@ def build_cases(quick=False):
         for lab, look, prm in edit:
             if lab not in ("default", "mild-vhs", "clean-crt", "bottom-to-top", "minidv"):
                 continue
-            # bottom-to-top: Screen Loop on an Edit-page clip at 1080p / UHD; frame 1850 is a cold seek that fetches
-            # 410 history frames, which Resolve keeps (docs/dev/SCREENLOOP-MEMORY.md).
+            if lab == "bottom-to-top":
+                # Screen Loop on an Edit-page clip at 1080p / UHD: frame 1850 is a cold seek that fetches 410 full-size
+                # history frames, and Resolve keeps every frame it hands out (~80 MB each at 1080p, ~330 MB at UHD:
+                # docs/dev/SCREENLOOP-MEMORY.md). A group and a section of their own, rendered last in a session.
+                if not quick:
+                    add(f"{proj}-edit-{lab}", "sizeloop", prm, where=f"{proj}-editloop", look=look, fr=[0, 1850],
+                        tags=("noise",))  # cpu2 renders them too
+                continue
             if quick and lab != "default":
                 continue
             add(f"{proj}-edit-{lab}", "size", prm, where=f"{proj}-edit", look=look, fr=[0, 1850])
@@ -677,7 +683,8 @@ class Session:
         by_where = {}
         for c in self.cases:
             by_where.setdefault(c["where"], []).append(c)
-        order = ["clip", "hour", "title", "edit", "edit1h", "1080p-edit", "1080p-clip", "uhd-edit", "uhd-clip"]
+        order = ["clip", "hour", "title", "edit", "edit1h", "1080p-edit", "1080p-clip", "uhd-edit", "uhd-clip",
+                 "1080p-editloop", "uhd-editloop"]
         for where in order:
             cs = by_where.get(where)
             if not cs:

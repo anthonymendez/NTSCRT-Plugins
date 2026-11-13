@@ -190,18 +190,50 @@ struct Howlaround::Impl {
     gpu::Device &dev;
     GpuOps ops;
     HowlHooks hooks;
-    std::unique_ptr<howl::Engine<GpuOps>> engine;
-    std::string key;
-    // Chain input size learned for a scene size (from the main path, or one probe).
-    int chain_for_w = 0, chain_for_h = 0, chain_w = 0, chain_h = 0;
+    // One loop per scene size: a host renders the same effect at another size in between
+    // (Resolve's viewer and thumbnails at a reduced render scale while the render queue
+    // renders full size). Each keeps its own history, so such a render doesn't throw away
+    // the other's, which costs a re-run of up to 479 full-size source frames.
+    struct Slot {
+        int w = 0, h = 0, format = 0;  // the scene this loop is for
+        std::unique_ptr<howl::Engine<GpuOps>> engine;
+        std::string key;
+        // Chain input size learned for this scene size (from the main path, or one probe).
+        int chain_w = 0, chain_h = 0;
+        uint64_t used = 0;
+    };
+    static constexpr size_t kSlots = 2;
+    std::vector<std::unique_ptr<Slot>> slots;
+    Slot *cur = nullptr;  // the loop of the last camera() call
+    uint64_t tick = 0;
     TexPtr last_camera;
     int64_t last_frame = -1;
 
     explicit Impl(gpu::Device &d) : dev(d), ops(d) {}
 
+    Slot &slot_for(const gpu::TextureDesc &sd) {
+        for (auto &s : slots)
+            if (s->w == sd.width && s->h == sd.height && s->format == int(sd.format)) return *s;
+        if (slots.size() >= kSlots) {  // the least recently used goes
+            auto lru = slots.begin();
+            for (auto i = slots.begin(); i != slots.end(); ++i)
+                if ((*i)->used < (*lru)->used) lru = i;
+            if (cur == lru->get()) cur = nullptr;
+            slots.erase(lru);
+        }
+        auto s = std::make_unique<Slot>();
+        s->w = sd.width;
+        s->h = sd.height;
+        s->format = int(sd.format);
+        slots.push_back(std::move(s));
+        return *slots.back();
+    }
+
     // Checkpoints only while the TV pass keeps no state of its own.
     void sync_checkpoints() {
-        if (engine) engine->set_checkpoints(!(hooks.tv_keeps_state && hooks.tv_keeps_state()));
+        const bool on = !(hooks.tv_keeps_state && hooks.tv_keeps_state());
+        for (auto &s : slots)
+            if (s->engine) s->engine->set_checkpoints(on);
     }
 };
 
@@ -215,8 +247,8 @@ void Howlaround::set_hooks(HowlHooks hooks) {
     const bool changed = complete(impl_->hooks) != complete(hooks);
     impl_->hooks = std::move(hooks);
     if (changed) {
-        impl_->engine.reset();
-        impl_->chain_w = impl_->chain_h = 0;
+        impl_->slots.clear();
+        impl_->cur = nullptr;
     }
 }
 
@@ -241,17 +273,18 @@ std::shared_ptr<gpu::Texture> Howlaround::camera(const std::shared_ptr<gpu::Text
     m.ops.scene_h = sd.height;
     m.ops.scene_format = sd.format;
 
-    if (m.chain_for_w != sd.width || m.chain_for_h != sd.height || m.chain_w <= 0) {
-        m.chain_for_w = sd.width;
-        m.chain_for_h = sd.height;
-        m.chain_w = sd.width;
-        m.chain_h = sd.height;
+    Impl::Slot &sl = m.slot_for(sd);
+    sl.used = ++m.tick;
+    m.cur = &sl;
+    if (sl.chain_w <= 0) {
+        sl.chain_w = sd.width;
+        sl.chain_h = sd.height;
         if (m.ops.has_hooks()) {
             // One probe pass for the chain input size (the run-up plan needs it).
             HowlPass p = howl::Engine<GpuOps>::normal_pass(ctx.frame, ctx.fps);
             if (auto c = m.hooks.chain_input(scene, p)) {
-                m.chain_w = c->desc().width;
-                m.chain_h = c->desc().height;
+                sl.chain_w = c->desc().width;
+                sl.chain_h = c->desc().height;
             }
         }
     }
@@ -260,22 +293,22 @@ std::shared_ptr<gpu::Texture> Howlaround::camera(const std::shared_ptr<gpu::Text
     if (auto it = feedback.find("window"); it != feedback.end() && it->is_number_integer())
         window = it->get<int64_t>();
     std::string key = feedback.dump() + "|" + std::to_string(ctx.fps) + "|" + std::to_string(sd.width) + "x" +
-                      std::to_string(sd.height) + "|" + std::to_string(m.chain_w) + "x" + std::to_string(m.chain_h) +
+                      std::to_string(sd.height) + "|" + std::to_string(sl.chain_w) + "x" + std::to_string(sl.chain_h) +
                       "|" + std::to_string(int(sd.format)) + "|" + std::to_string(window);
-    if (!m.engine || key != m.key) {
+    if (!sl.engine || key != sl.key) {
         howl::EngineConfig cfg;
         cfg.settings = s;
         cfg.fps = ctx.fps > 0 ? ctx.fps : 30.0;
         cfg.length = fb.length;
         cfg.aspect = double(sd.width) / double(std::max(1, sd.height));
-        cfg.chain_w = m.chain_w;
-        cfg.chain_h = m.chain_h;
+        cfg.chain_w = sl.chain_w;
+        cfg.chain_h = sl.chain_h;
         cfg.window = window;
-        m.engine = std::make_unique<howl::Engine<GpuOps>>(cfg);
-        m.key = key;
+        sl.engine = std::make_unique<howl::Engine<GpuOps>>(cfg);
+        sl.key = key;
     }
     m.sync_checkpoints();
-    TexPtr cam = m.engine->camera(m.ops, ctx.frame, scene);
+    TexPtr cam = sl.engine->camera(m.ops, ctx.frame, scene);
     m.sync_checkpoints();  // a temporal preset may first have run just now
     m.ops.ctx = nullptr;
     m.last_camera = cam;
@@ -285,36 +318,39 @@ std::shared_ptr<gpu::Texture> Howlaround::camera(const std::shared_ptr<gpu::Text
 
 void Howlaround::after_frame(const gpu::Texture &chain_input, const json &, const FrameContext &ctx) {
     Impl &m = *impl_;
-    if (!m.engine || m.last_frame != ctx.frame || !m.engine->wants_tv(ctx.frame)) return;
-    if (!m.engine->config().settings.tv_in_view()) {
-        m.engine->store_tv(ctx.frame, nullptr);
+    if (!m.cur || !m.cur->engine || m.last_frame != ctx.frame) return;
+    Impl::Slot &sl = *m.cur;
+    auto &engine = *sl.engine;
+    if (!engine.wants_tv(ctx.frame)) return;
+    if (!engine.config().settings.tv_in_view()) {
+        engine.store_tv(ctx.frame, nullptr);
         return;
     }
     m.ops.hooks = &m.hooks;
     if (m.ops.has_hooks()) {
         const auto &d = chain_input.desc();
-        if (d.width != m.chain_w || d.height != m.chain_h) {
+        if (d.width != sl.chain_w || d.height != sl.chain_h) {
             // The chain size changed (look edited): rebuild on the next frame.
-            m.chain_w = d.width;
-            m.chain_h = d.height;
-            m.engine.reset();
+            sl.chain_w = d.width;
+            sl.chain_h = d.height;
+            sl.engine.reset();
             return;
         }
-        TexPtr tv = m.ops.render_tv(chain_input, m.engine->normal_pass(ctx.frame));
+        TexPtr tv = m.ops.render_tv(chain_input, engine.normal_pass(ctx.frame));
         m.sync_checkpoints();
-        m.engine->store_tv(ctx.frame, tv);
+        engine.store_tv(ctx.frame, tv);
     } else {
         // No chain hooks: the TV shows the camera's picture directly, the same
         // as every recomputed history frame (so results don't depend on order).
-        m.engine->store_tv(ctx.frame, m.ops.tv_pass(m.last_camera, m.engine->normal_pass(ctx.frame)));
+        engine.store_tv(ctx.frame, m.ops.tv_pass(m.last_camera, engine.normal_pass(ctx.frame)));
     }
 }
 
 void Howlaround::flush() {
-    impl_->engine.reset();
+    impl_->slots.clear();
+    impl_->cur = nullptr;
     impl_->last_camera.reset();
     impl_->last_frame = -1;
-    impl_->chain_w = impl_->chain_h = 0;
     impl_->ops.pool.clear();
 }
 

@@ -30,6 +30,15 @@ A headless parity run stalled on an Edit-page clip with a Screen Loop preset in 
    first frame whose anchor is W) re-ran the loop from W: 240 more source fetches every 240 frames past frame 480,
    and a stall of the whole re-run on that frame.
 
+4. **A render at another size threw the history away.** Resolve renders the effect's frame for its viewer and
+   thumbnails at a reduced render scale (0.11-0.16) in between the render queue's full-size frames, on the same
+   effect instance. The loop kept one history, keyed by the scene size, so that render replaced it and the next
+   full-size frame re-ran its window: in a CPU-path render of frames 1850..2149, frame 1870 came after a 215x122
+   render of 1850 and re-ran 1440..1869 (430 fetches, 13.6 s, about 34 GB more in Resolve).
+
+Resolve does not create a new effect instance per render (the render queue and the viewer use the one on the clip),
+and its checkpoints survive between renders; history was lost only as in 3 and 4.
+
 The core alone (`bench_screenloop`, generated sources) never holds more than one source frame and peaks at 1.3-2.3 GB
 for a cold seek to 1850 (`tests/howlaround/bench_screenloop.cpp`, "at most N held at once", "peak memory").
 
@@ -48,6 +57,10 @@ for a cold seek to 1850 (`tests/howlaround/bench_screenloop.cpp`, "at most N hel
   each window's life, and the run-up (about 60 passes) on the window-start frame instead of on the frame B later. Off
   with checkpoints (a temporal CRT preset), never taken over from a history with stand-ins;
   `NTSCRT_SCREENLOOP_AHEAD=0` turns it off (A/B).
+- **One loop per scene size** (`howlaround.cpp`, `Howlaround::Impl::Slot`, two kept, least recently used dropped): a
+  render at another render scale has its own history and leaves the full-size one alone. Each is the same
+  deterministic loop, so no picture changes (`test_howl_seek` "a render at another scale in between"). Cost: a second
+  set of TV pictures and checkpoints while both are alive.
 - Debug log: each render's `temporal_fetches=`, and with fetches `temporal_fetch_ms=` (time in the host's
   `fetchImage`), `temporal_held_max=`, `temporal_size=` (the fetched image's bounds and depth), `temporal_missing=`
   (fetches the host answered with no image).

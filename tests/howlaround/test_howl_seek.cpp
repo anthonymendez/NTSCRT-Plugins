@@ -39,11 +39,12 @@ struct Source {
     int fetches = 0;
     size_t held_max = 0;            // host images handed out and not yet released, at most
     int64_t first = -1, last = -1;  // the earliest / latest frame fetched since the counters were reset
-    static std::vector<uint8_t> make(int64_t f) {
-        std::vector<uint8_t> p(size_t(W) * H * 4);
-        for (int y = 0; y < H; ++y)
-            for (int x = 0; x < W; ++x) {
-                uint8_t *q = &p[(size_t(y) * W + x) * 4];
+    int w = W, h = H;               // the size frames are fetched at (a render at a reduced scale: smaller)
+    static std::vector<uint8_t> make(int64_t f, int w = W, int h = H) {
+        std::vector<uint8_t> p(size_t(w) * h * 4);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                uint8_t *q = &p[(size_t(y) * w + x) * 4];
                 const bool bar = ((x + f * 5) / 24) % 2 == 0;
                 q[0] = uint8_t((x * 3 + f * 9) % 256);
                 q[1] = uint8_t((y * 4 + f * 3) % 256);
@@ -59,8 +60,8 @@ const ntscrt_image *fetch(void *u, int64_t f) {
     ++s->fetches;
     if (s->first < 0 || f < s->first) s->first = f;
     if (f > s->last) s->last = f;
-    s->px[f] = Source::make(f);
-    s->img[f] = {W, H, ptrdiff_t(W) * 4, NTSCRT_RGBA8, s->px[f].data()};
+    s->px[f] = Source::make(f, s->w, s->h);
+    s->img[f] = {s->w, s->h, ptrdiff_t(s->w) * 4, NTSCRT_RGBA8, s->px[f].data()};
     if (s->img.size() > s->held_max) s->held_max = s->img.size();
     return &s->img[f];
 }
@@ -106,16 +107,19 @@ struct Inst {
         }
     }
     ~Inst() { ntscrt_destroy(p); }
-    std::vector<uint8_t> render(int64_t f) {
-        std::vector<uint8_t> in = Source::make(f), out(in.size());
-        ntscrt_image s{W, H, ptrdiff_t(W) * 4, NTSCRT_RGBA8, in.data()};
-        ntscrt_image d{W, H, ptrdiff_t(W) * 4, NTSCRT_RGBA8, out.data()};
+    // scale < 1: a host's reduced render scale (its viewer): frames that much smaller.
+    std::vector<uint8_t> render(int64_t f, double scale = 1) {
+        src.w = int(W * scale);
+        src.h = int(H * scale);
+        std::vector<uint8_t> in = Source::make(f, src.w, src.h), out(in.size());
+        ntscrt_image s{src.w, src.h, ptrdiff_t(src.w) * 4, NTSCRT_RGBA8, in.data()};
+        ntscrt_image d{src.w, src.h, ptrdiff_t(src.w) * 4, NTSCRT_RGBA8, out.data()};
         ntscrt_render_args ra{};
         ra.frame_index = f;
         ra.fps = 30;
         ra.look_json = look.c_str();
         ra.feedback_json = fb.c_str();
-        ra.render_scale = 1;
+        ra.render_scale = scale;
         ra.fetch_source = fetch;
         ra.release_source = release;
         ra.user = &src;
@@ -224,6 +228,31 @@ TEST_CASE("Screen Loop: a far cold seek has a bounded cost and holds one host fr
         }
         Inst b("{}", fb);
         CHECK(b.render(last) == played);
+    }
+}
+
+TEST_CASE("Screen Loop: a render at another scale in between keeps the full-size history") {
+    // Resolve renders the effect's frame for its viewer / thumbnails at a reduced render scale
+    // while the render queue renders full size. That render has a loop of its own: the
+    // full-size one goes on without re-running its window (no fetch), with the same frames.
+    const std::string fb = feedback("Bottom to top", 8);
+    std::vector<std::vector<uint8_t>> seq;
+    {
+        Inst a("{}", fb);
+        if (!a.ok) return;
+        for (int64_t f = 0; f <= 30; ++f) seq.push_back(a.render(f));
+    }
+    set_env("NTSCRT_SOURCE_CACHE_MB", "0");
+    Inst b("{}", fb);
+    set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    for (int64_t f = 0; f <= 20; ++f) CHECK(b.render(f) == seq[size_t(f)]);
+    b.render(20, 0.5);  // the viewer: its own loop, its own (smaller) fetches
+    CHECK(b.src.fetches > 0);
+    for (int64_t f = 21; f <= 30; ++f) {
+        CAPTURE(f);
+        CHECK(b.render(f) == seq[size_t(f)]);
+        CHECK(b.src.fetches == 0);
+        if (f == 25) b.render(25, 0.5);  // and again: that loop continues too
     }
 }
 

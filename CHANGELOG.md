@@ -199,6 +199,9 @@ written but not yet built.
   docs/dev/SCREENLOOP-MEMORY.md).
 - **Screen Loop playback past 16 seconds** no longer replays 8 seconds of the loop every 8 seconds: the next
   stretch's history is now built along the way (no frames read again from Resolve, no pause; same pictures).
+- Resolve: **rendering a Screen Loop clip while the viewer shows it** no longer replays the loop from 8-16 seconds
+  back each time the viewer's small preview of the frame is drawn in between (the preview had its own size and
+  replaced the full-size history).
 - **The *sim* CRT shader looks the same however Resolve renders a frame:** its picture depended on which frame
   was rendered before (scrubbing, render-queue chunks, Fusion's repeated renders and two renders of the same
   frame could differ by up to 97 of 255 levels, 243 with its persistence turned up). Each frame now builds its
@@ -278,7 +281,7 @@ written but not yet built.
 ### Developer
 - Screen Loop memory (docs/dev/SCREENLOOP-MEMORY.md): `getFramesNeeded` leaves out the loop's window in Resolve
   (`NTSCRT_OFX_DECLARE_HISTORY` overrides); the engine's run ahead (`howl_engine.h`, `NTSCRT_SCREENLOOP_AHEAD=0`
-  turns it off); the debug log's `temporal_fetch_ms=`, `temporal_held_max=`, `temporal_size=`, `temporal_missing=`;
+  turns it off); one loop per scene size (`Howlaround::Impl::Slot`); the debug log's `temporal_fetch_ms=`, `temporal_held_max=`, `temporal_size=`, `temporal_missing=`;
   `bench_screenloop --then N` and its fetches held at once / peak memory; tests: a far cold seek's fetch count, one
   host frame held at a time and no fetch across window starts (`test_howl_seek`, `test_howl_loop`),
   `test_ofx_resolve_host` (the mock host as Resolve); the parity suite's 1080p / UHD Edit-page Screen Loop cases
