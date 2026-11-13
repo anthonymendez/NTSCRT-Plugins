@@ -17,6 +17,7 @@
 #include "renderer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -27,6 +28,16 @@
 namespace ntscrt::digital {
 
 static inline float clampf(float v, float lo, float hi) { return std::min(hi, std::max(lo, v)); }
+
+namespace {
+using ProfileClock = std::chrono::steady_clock;
+// Adds the time since `t` to `acc` (ms) and restarts `t`.
+inline void lap(double &acc, ProfileClock::time_point &t) {
+    const auto now = ProfileClock::now();
+    acc += std::chrono::duration<double, std::milli>(now - t).count();
+    t = now;
+}
+}  // namespace
 
 // ---- params ------------------------------------------------------------------------
 
@@ -236,6 +247,20 @@ void Renderer::process(int n, uint8_t *pixels, int width, int height, int rowByt
                        double sourceFPS, const Settings &settings, const SettingsAt &settingsAt,
                        const EarlierFrames &earlier, uint64_t seed) {
     if (width <= 0 || height <= 0 || capture.width <= 0 || capture.height <= 0) return;
+    profile_ = {};
+    auto t = ProfileClock::now();
+    // The current picture at the capture size, scaled once.
+    std::vector<uint8_t> current = scale(pixels, width, height, rowBytes, capture, settings);
+    lap(profile_.scale, t);
+    const std::vector<uint8_t> &shown = code(n, std::move(current), capture, sourceFPS, settings, settingsAt, earlier, seed);
+    t = ProfileClock::now();
+    upscale(shown, capture, pixels, width, height, rowBytes);
+    lap(profile_.upscale, t);
+}
+
+const std::vector<uint8_t> &Renderer::code(int n, std::vector<uint8_t> current, Size capture, double sourceFPS,
+                                           const Settings &settings, const SettingsAt &settingsAt,
+                                           const EarlierFrames &earlier, uint64_t seed) {
     n = std::max(0, n);
     const Settings &structure = settings;
     Timing timing(sourceFPS, structure);
@@ -247,12 +272,9 @@ void Renderer::process(int n, uint8_t *pixels, int width, int height, int rowByt
         lastCapture_.reset();
         run_ = {};
     }
-    Call call{n, structure, timing, geometry, key, settingsAt, earlier, capture, {}, {}};
+    Call call{n, structure, timing, geometry, key, settingsAt, earlier, capture, std::move(current), {}};
     const int c = timing.captureOfFrame(n);
     lastRunLength_ = 0;
-
-    // The current picture at the capture size, scaled once.
-    call.current = scale(pixels, width, height, rowBytes, capture, structure);
 
     // The frame rendered again (an edit elsewhere on the timeline re-renders
     // the frame on screen): check every capture of the run. A repeat during
@@ -280,10 +302,9 @@ void Renderer::process(int n, uint8_t *pixels, int width, int height, int rowByt
     } else {
         rerun(call, c);
     }
-
-    upscale(shown_, capture, pixels, width, height, rowBytes);
+    profile_.captures = lastRunLength_;
+    return shown_;
 }
-
 bool Renderer::runHolds(Call &call, const Run &run, int from, int upTo) {
     if (upTo < run.origin || size_t(upTo - run.origin) >= run.fps.size()) return false;
     for (int k = std::max(from, run.origin); k <= upTo; ++k)
@@ -327,7 +348,12 @@ void Renderer::rerun(Call &call, int c) {
     if (first > c) {
         // The checkpoint is the frame itself.
         const Settings &s = call.settingsFor(c);
-        shown_ = render(*state_->decoder, call.geometry, s, codec::Steps(s[kQuality], 1).inter);
+        auto t = ProfileClock::now();
+        double deblock = 0;
+        shown_ = render(*state_->decoder, call.geometry, s, codec::Steps(s[kQuality], 1).inter, &deblock);
+        lap(profile_.upsample, t);
+        profile_.upsample -= deblock;
+        profile_.deblock += deblock;
         lastCapture_ = c;
         return;
     }
@@ -345,16 +371,24 @@ void Renderer::rerun(Call &call, int c) {
 
 std::optional<std::vector<uint8_t>> Renderer::earlierCapture(Call &call, int k) {
     if (!call.earlier) return call.current;
+    auto t = ProfileClock::now();
     auto f = call.earlier(call.timing.frameOfCapture(k));
-    if (!f || !f->data || f->width <= 0 || f->height <= 0) return std::nullopt;
-    return scale(f->data, f->width, f->height, f->rowBytes, call.size, call.structure);
+    if (!f || !f->data || f->width <= 0 || f->height <= 0) {
+        lap(profile_.earlier, t);
+        return std::nullopt;
+    }
+    auto out = scale(f->data, f->width, f->height, f->rowBytes, call.size, call.structure);
+    lap(profile_.earlier, t);
+    return out;
 }
 
 void Renderer::advance(Call &call, int k, const std::vector<uint8_t> &source) {
     if (!state_) state_ = std::make_shared<CodecState>(call.geometry);
     if (run_.fps.size() != size_t(k - run_.origin)) run_ = Run{k, {}};  // never: runs are contiguous
     const Settings &settings = call.settingsFor(k);
+    auto t = ProfileClock::now();
     PicturePtr picture = capture(source, call.geometry, settings, k, call.key.seedMix);
+    lap(profile_.camera, t);
     FrameKind kind = call.timing.kind(k, settings.effective(kDatamosh), call.key.seedMix);
     if (kind != FrameKind::IntraOnly && !state_->encoder) kind = FrameKind::Key;
     const codec::FrameSettings frame{settings[kQuality], settings[kFixedBitrate], settings[kDataLoss]};
@@ -363,9 +397,14 @@ void Renderer::advance(Call &call, int k, const std::vector<uint8_t> &source) {
     case CodecKind::DCT: result = codec::step(*state_, picture, kind, k, frame, call.key.seedMix); break;
     case CodecKind::BlockColors: result = {video1::step(*state_, picture, kind, k, frame, call.key.seedMix), 0}; break;
     }
+    lap(profile_.codec, t);
     lastRunLength_ += 1;
     lastCapture_ = k;
-    shown_ = render(*result.picture, call.geometry, settings, result.step);
+    double deblock = 0;
+    shown_ = render(*result.picture, call.geometry, settings, result.step, &deblock);
+    lap(profile_.upsample, t);
+    profile_.upsample -= deblock;
+    profile_.deblock += deblock;
     run_.fps.push_back(settings.fingerprint());
 
     // Checkpoint at keyframes the decoder lost (the only places its history
@@ -543,6 +582,58 @@ std::vector<uint8_t> Renderer::scale(const uint8_t *base, int width, int height,
         for (int y = 1; y < ch; y += 2) std::memcpy(o + size_t(y) * cw * 4, o + size_t(y - 1) * cw * 4, size_t(cw) * 4);
     }
     return out;
+}
+
+// scale() as tables (ScalePlan, for the GPU port): the same taps, the same
+// aliasing coordinates and factors, from the same expressions.
+ScalePlan Renderer::scalePlan(int width, int height, Size size, const Settings &optics) {
+    ScalePlan p;
+    p.width = width;
+    p.height = height;
+    p.cw = size.width;
+    p.ch = size.height;
+    p.copy = width == p.cw && height == p.ch;
+    if (!p.copy) {
+        auto fill = [](const Taps &t, int &taps, std::vector<int32_t> &span, std::vector<float> &weight) {
+            taps = t.maxTaps;
+            span.resize(t.start.size() * 2);
+            for (size_t i = 0; i < t.start.size(); ++i) {
+                span[i * 2] = t.start[i];
+                span[i * 2 + 1] = t.count[i];
+            }
+            weight = t.w;
+        };
+        fill(makeTaps(width, p.cw), p.tapsX, p.spanX, p.weightX);
+        fill(makeTaps(height, p.ch), p.tapsY, p.spanY, p.weightY);
+    }
+    const float aliasing = float(optics[kAliasing]);
+    if (aliasing > 0) {
+        p.mix = std::min(1.0f, aliasing * 2);
+        p.boost = std::max(0.0f, aliasing * 2 - 1) * 1.5f;
+        const double kx = double(width) / double(p.cw), ky = double(height) / double(p.ch);
+        p.aliasRow.resize(size_t(p.ch));
+        for (int y = 0; y < p.ch; ++y) p.aliasRow[size_t(y)] = std::min(height - 1, int((double(y) + 0.5) * ky));
+        p.aliasCol.resize(size_t(p.cw) * 4);
+        for (int x = 0; x < p.cw; ++x) {
+            double center = (double(x) + 0.5) * kx;
+            int32_t *o = &p.aliasCol[size_t(x) * 4];
+            o[0] = std::min(width - 1, int(center + kx / 3));                // blue
+            o[1] = std::min(width - 1, int(center));                         // green
+            o[2] = std::min(width - 1, std::max(0, int(center - kx / 3)));  // red
+            o[3] = 0;
+        }
+    }
+    p.fields = optics[kFields] >= 0.5;
+    return p;
+}
+
+const std::vector<float> &Renderer::ninths() {
+    static const std::vector<float> t = [] {
+        std::vector<float> v(9 * 255 + 1);
+        for (size_t s = 0; s < v.size(); ++s) v[s] = float(s) / 9;
+        return v;
+    }();
+    return t;
 }
 
 namespace {
@@ -801,14 +892,16 @@ PicturePtr Renderer::capture(const std::vector<uint8_t> &bgra, const Geometry &g
 // ---- pixels out ---------------------------------------------------------------------------------
 
 std::vector<uint8_t> Renderer::render(const Picture &decoded, const Geometry &g, const Settings &settings,
-                                      float step) {
+                                      float step, double *deblock_ms) {
     const Picture *picture = &decoded;
     std::optional<Picture> deblocked;
     const double deblocking = settings.effective(kDeblocking);
     if (deblocking > 0) {
+        auto t = ProfileClock::now();
         deblocked.emplace(decoded);
         codec::deblock(*deblocked, deblocking, step);
         picture = &*deblocked;
+        if (deblock_ms) lap(*deblock_ms, t);
     }
     const int w = g.width, h = g.height;
     std::vector<uint8_t> out(size_t(w) * h * 4, 255);
@@ -843,17 +936,24 @@ std::vector<uint8_t> Renderer::render(const Picture &decoded, const Geometry &g,
     return out;
 }
 
+void Renderer::upscaleMaps(Size size, int width, int height, std::vector<int32_t> &xs, std::vector<int32_t> &ys) {
+    const int cw = size.width, ch = size.height;
+    xs.resize(size_t(width));
+    for (int x = 0; x < width; ++x) xs[size_t(x)] = std::min(cw - 1, int((double(x) + 0.5) * double(cw) / double(width)));
+    ys.resize(size_t(height));
+    for (int y = 0; y < height; ++y) ys[size_t(y)] = std::min(ch - 1, int((double(y) + 0.5) * double(ch) / double(height)));
+}
+
 void Renderer::upscale(const std::vector<uint8_t> &picture, Size size, uint8_t *base, int width, int height,
                        int rowBytes) {
     const int cw = size.width, ch = size.height;
     if (picture.size() != size_t(cw) * ch * 4) return;
-    std::vector<int> xs(static_cast<size_t>(width));
-    for (int x = 0; x < width; ++x) xs[size_t(x)] = std::min(cw - 1, int((double(x) + 0.5) * double(cw) / double(width)));
-    const int *map = xs.data();
+    std::vector<int32_t> xs, ys;
+    upscaleMaps(size, width, height, xs, ys);
+    const int32_t *map = xs.data();
     const uint8_t *src = picture.data();
     parallel_for(height, [&](int y) {
-        int sy = std::min(ch - 1, int((double(y) + 0.5) * double(ch) / double(height)));
-        const uint8_t *srow = src + size_t(sy) * cw * 4;
+        const uint8_t *srow = src + size_t(ys[size_t(y)]) * cw * 4;
         uint8_t *drow = base + size_t(y) * rowBytes;
         for (int x = 0; x < width; ++x) std::memcpy(drow + size_t(x) * 4, srow + size_t(map[x]) * 4, 4);
     });

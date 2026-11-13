@@ -32,12 +32,12 @@ Resolve's stream. GPU to GPU, on the same adapter (the core checks the LUIDs mat
 loaded from `nvcuda.dll` at run time with prototypes declared in the code: no CUDA toolkit is needed to build,
 nothing extra to install.
 
-| step | Digital video or Screen Loop on, or NTSC on ntsc-rs: `gpu-download` | everything else (the default look included, NTSC on the GPU): `gpu-direct` |
+| step | Screen Loop on, NTSC on ntsc-rs, or Digital video on the CPU: `gpu-download` | everything else (the default look and Digital looks included, NTSC and Digital video on the GPU): `gpu-direct` |
 |---|---|---|
 | source | Resolve's CUDA buffer → registered D3D11 texture (GPU copy) | same |
 | convert | `hostgpu_in/convert_in`: float → the pipeline's 8-bit picture (alpha mode, premultiplication, row order, crop) | same, plus the look's crop |
-| CPU stages | the 8-bit picture comes down (¼ of the float frame's bytes), ntsc-rs / Digital video run, it goes up again | — |
-| NTSC on the GPU | (Screen Loop: on the camera texture, docs/dev/NTSC-GPU.md) | `NtscGpu::run` on the convert kernel's 8-bit picture: the same bytes the CPU path gives ntsc-rs |
+| CPU stages | the 8-bit picture comes down (¼ of the float frame's bytes), ntsc-rs / Digital video run, it goes up again | Digital video on the GPU: only its capture-size picture comes down (e.g. 320x180) and goes up again (docs/dev/DIGITAL-GPU.md) |
+| NTSC on the GPU | (Screen Loop: on the camera texture, docs/dev/NTSC-GPU.md) | `NtscGpu::run` on the convert kernel's 8-bit picture (or Digital video's): the same bytes the CPU path gives ntsc-rs |
 | Downscale, Glitch, CRT | GPU, as before | GPU |
 | output | `hostgpu_out/merge_out`: CRT result + the source's alpha (from the source texture) → the output texture in Resolve's format and row order → Resolve's CUDA buffer (GPU copy) | same |
 
@@ -62,6 +62,12 @@ before ntsc-rs (0 values different, `test_host_gpu`), so no `from_bgra8` variant
 The plan's CPU tables are built on another thread while the copy and the convert kernel are queued. If the
 NTSC GPU route fails for a frame (`ntsc_route=cpu (GPU error: ...)`) that frame becomes `gpu-download` with
 ntsc-rs, as before.
+
+Digital video (since docs/dev/DIGITAL-GPU.md) works the same way: its full-size steps (the scale-down to the
+camera's size, the upscale back) run as kernels on that 8-bit picture and only the capture-size picture crosses
+to the CPU for the codec, so a Digital look is `gpu-direct` (`digital_route=gpu`). It stays on the CPU, and the
+frame `gpu-download`, with `NTSCRT_DIGITAL_GPU=0`, where NTSC runs on ntsc-rs (`digital_route=cpu (ntsc-rs needs
+the picture on the CPU)`), and for a frame whose Digital GPU steps fail.
 
 ### Why not OpenCL
 
@@ -124,9 +130,11 @@ half-float), so on 8-bit and half-float comps the effect now gets and writes flo
   stream, padded rows, bottom row first) and compares `ntscrt_render_host_gpu` (default NTSC route) with
   `ntscrt_render_cpu` with `NTSCRT_NTSC_GPU=0` (ntsc-rs) over three frames each: default look (also cropped,
   at render scale 0.5, with holes in Clip mode, a source smaller than the frame), NTSC off, half float, 8-bit,
-  premultiplied and straight alpha in Clip and Spill, render scale 0.5, crop, Digital video. 0 values differ
-  except half-float output, and each case checks its route (`gpu-direct` with NTSC on the GPU,
-  `gpu-cpuconvert` with holes, `gpu-download` with Digital video). Skipped without an NVIDIA driver (CI).
+  premultiplied and straight alpha in Clip and Spill, render scale 0.5, crop, Digital video (on and off, with
+  and without NTSC, formats, *Webcam (low quality)*, crop, render scale, holes; the CPU reference also with
+  `NTSCRT_DIGITAL_GPU=0`). 0 values differ except half-float output, and each case checks its route
+  (`gpu-direct` with NTSC and Digital video on the GPU, `gpu-cpuconvert` with holes, `gpu-download` with
+  `NTSCRT_DIGITAL_GPU=0`). Skipped without an NVIDIA driver (CI).
 - `test_ofx` "GPU render (fake CUDA host)": the mock OpenFX host hands the plug-in CUDA images
   (`kOfxImageEffectPropCudaEnabled`, a stream) and the same frames are compared with CPU-image renders: default
   look, NTSC off, alpha in both modes, render scale 0.5, a render window smaller than the frame, Digital video

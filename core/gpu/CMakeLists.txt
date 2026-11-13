@@ -1,5 +1,6 @@
 # Owner: agent D. GPU HAL: d3d11/ (WIN32), metal/ (APPLE), shader registry.
-target_sources(ntscrt_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/device.cpp)
+target_sources(ntscrt_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/device.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/gpu_route.cpp)  # the CPU stages' GPU route switches (NTSC, Digital video)
 ntscrt_add_shaders(ntscrt_core ${CMAKE_CURRENT_SOURCE_DIR}/shaders/gpu_builtin.slang)
 
 if(WIN32)

@@ -28,3 +28,11 @@ else()
 endif()
 
 target_link_libraries(ntscrt_core PRIVATE ntscrt_digital Threads::Threads)
+
+# The full-size pictures on the GPU (docs/dev/DIGITAL-GPU.md): the capture
+# scale-down and the upscale as kernels; the code above stays the reference and
+# the fallback. The driver only dispatches (no float arithmetic of its own).
+target_sources(ntscrt_core PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/gpu/digital_gpu.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/gpu/digital_gpu.h)
+ntscrt_add_shaders(ntscrt_core ${CMAKE_CURRENT_SOURCE_DIR}/gpu/shaders/digital_gpu.slang)

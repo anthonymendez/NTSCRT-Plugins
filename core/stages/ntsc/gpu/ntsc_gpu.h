@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../../../gpu/gpu.h"
+#include "../../../gpu/gpu_route.h"
 
 namespace ntscrt {
 
@@ -97,8 +98,9 @@ class NtscGpu;
 
 // NTSCRT_NTSC_GPU: unset / "" / "auto" = Auto (the default), "0" = Off (ntsc-rs
 // always), "1" = On (as Auto), "force" = also on software devices (WARP) and
-// on a GPU whose mad() isn't fused and that has no doubles.
-enum class NtscGpuEnv { Auto, Off, On, Force };
+// on a GPU whose mad() isn't fused and that has no doubles (gpu_route.h, shared
+// with NTSCRT_DIGITAL_GPU).
+using NtscGpuEnv = GpuRouteEnv;
 NtscGpuEnv ntsc_gpu_env();
 // The raw value ("" when unset): a change re-decides an instance's route.
 std::string ntsc_gpu_env_text();
@@ -113,8 +115,6 @@ std::string ntsc_gpu_env_text();
 bool ntsc_gpu_route(gpu::Device &dev, std::string *why = nullptr, NtscGpu *g = nullptr);
 // NTSCRT_NTSC_GPU isn't "0" (the route may be on).
 bool ntsc_gpu_requested();
-// The D3D11 device is Microsoft's software rasterizer (WARP).
-bool gpu_is_software(gpu::Device &dev);
 // This CPU's ntsc-rs fuses its multiply-adds (fearless_simd's AVX2 level,
 // which requires FMA, or NEON): the GPU route is then bit-identical to it.
 // Without (pre-AVX2 x86) ntsc-rs rounds its products separately and the GPU,
