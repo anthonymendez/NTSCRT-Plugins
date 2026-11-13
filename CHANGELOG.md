@@ -281,11 +281,12 @@ written but not yet built.
 ### Developer
 - Screen Loop memory (docs/dev/SCREENLOOP-MEMORY.md): `getFramesNeeded` leaves out the loop's window in Resolve
   (`NTSCRT_OFX_DECLARE_HISTORY` overrides); the engine's run ahead (`howl_engine.h`, `NTSCRT_SCREENLOOP_AHEAD=0`
-  turns it off); one loop per scene size (`Howlaround::Impl::Slot`); the debug log's `temporal_fetch_ms=`, `temporal_held_max=`, `temporal_size=`, `temporal_missing=`;
-  `bench_screenloop --then N` and its fetches held at once / peak memory; tests: a far cold seek's fetch count, one
-  host frame held at a time and no fetch across window starts (`test_howl_seek`, `test_howl_loop`),
-  `test_ofx_resolve_host` (the mock host as Resolve); the parity suite's 1080p / UHD Edit-page Screen Loop cases
-  are back, with `--parity-case-timeout`.
+  turns it off); one loop per scene size (`Howlaround::Impl::Slot`); the debug log's `temporal_fetch_ms=`,
+  `temporal_held_max=`, `temporal_size=`, `temporal_missing=`; `bench_screenloop --then N` and its fetches held at
+  once / peak memory; tests: a far cold seek's fetch count, one host frame held at a time, no fetch across window
+  starts or after a render at another scale (`test_howl_seek`, `test_howl_loop`), `test_ofx_resolve_host` (the mock
+  host as Resolve); the parity suite's 1080p Edit-page Screen Loop case is back (group `sizeloop`; the UHD one,
+  `sizeloop-uhd`, only when asked for), with `--parity-case-timeout`.
 - CRT render order (docs/dev/CRT.md): librashader's `clear_history` never clears `PassFeedback`, so crtsim's
   "prime on a seek" read the last frame rendered. A crtsim frame is now two chain frames, its own input with the
   persistence at 0 (exactly a zeroed feedback) then the frame; `test_crt_order` (every bundled preset, many render
