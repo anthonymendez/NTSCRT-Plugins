@@ -14,8 +14,12 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-13
+
 Animated presets, the Digital video formats in the Preset menu and a second codec (Microsoft Video 1, for the
-CD-ROM look), synced with upstream NTSCRT v0.21.0. Faster seeks and edits, less memory with several effects,
+CD-ROM look), synced with upstream NTSCRT v0.21.0. Every stage now runs on the GPU by default with the same
+pictures as before (the NTSC signal, Digital video's scaling, Clip mode's hole filling, NVIDIA GPU frames in
+Resolve), so most looks render many times faster. Faster seeks and edits, less memory with several effects,
 half-float CRT output on 16-bit and float timelines, and fixes for Horizontal resolution and preset files.
 Installs are now checked against the release's checksums. Still Resolve-only: the Final Cut plug-in is
 written but not yet built.
@@ -510,6 +514,7 @@ The macOS installer skips Final Cut Pro until a release includes it.
   `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log` / `~/Library/Logs/NTSCRT/ntscrt-ofx.log`, rotated at 1 MB.
   `NTSCRT_OFX_LOG=<file|off>` moves or disables it, `NTSCRT_OFX_LOG_VERBOSE=1` logs every frame.
 
-[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/anthonymendez/NTSCRT-Plugins/releases/tag/v0.3.0
