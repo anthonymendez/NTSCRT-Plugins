@@ -128,11 +128,11 @@ struct Fixture {
         REQUIRE_MESSAGE(p, "missing param " << name);
         return p;
     }
-    OfxStatus changed(const std::string &name, double t = 20) {
+    OfxStatus changed(const std::string &name, double t = 20, const char *reason = kOfxChangeUserEdited) {
         mock::PropSet in;
         in.set(kOfxPropType, {std::string(kOfxTypeParameter)});
         in.set(kOfxPropName, {name});
-        in.set(kOfxPropChangeReason, {std::string(kOfxChangeUserEdited)});
+        in.set(kOfxPropChangeReason, {std::string(reason)});
         in.set(kOfxPropTime, {t});
         in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
         OfxStatus st = host.action(plug, kOfxActionInstanceChanged, inst.get(), &in);
@@ -1875,4 +1875,95 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
     }
     MESSAGE(report);
     std::printf("[timing] Screen Loop edits %dx%d\n%s", w, h, report.c_str());
+}
+
+// ---- projects saved with an earlier plug-in version ---------------------------------------
+// A Resolve project whose NTSCRT effect was made with 0.4.0 / a 0.5.0 release candidate locked
+// Resolve up when the clip's Effects tab was opened with 0.5.0. The instance as Resolve restores
+// it: 0.4.0's Digital video values (now the hidden "(from 0.4.0)" controls), choices and preset
+// menus at the indices it saved, keyframes. Opening the panel, then a notification for every
+// param (a host re-syncing a restored instance, or the Inspector building its rows): no value
+// may be rewritten (the project keeps its look), and the grey-out / hide state is written only
+// where it changes. Before, every notification rewrote it for all ~480 conditional params (each
+// a property set Resolve acts on in the open Inspector): ~150,000 for one pass over the params.
+TEST_CASE("old projects: opening the panel keeps the saved values and stays bounded") {
+    ProtoFixture f;
+    const json &s = f.schema;
+    // 0.4.0's saved state (keys of a host param name -> value), then two keyed params.
+    const std::vector<std::pair<std::string, double>> saved = {
+        {"digital_enabled", 1}, {"digital_quality", 0.22}, {"digital_exposure", 0.5},
+        {"digital_black_level", 0.1}, {"digital_lens_blur", 0.3}, {"digital_fields", 0},
+        {"downscale_enabled", 1}, {"downscale_preset", 4}, {"ntsc_use_field", 2},
+        {"host_preset", 5}, {"host_screenloop_preset", 2}, {"screenloop_enabled", 1}};
+    for (const auto &[n, v] : saved) f.param(n)->v[0] = v;
+    f.param("glitch_signal_strength")->keys = {{0.0, {0.2}}, {50.0, {0.9}}};
+    f.param("ntsc_luma_smear")->keys = {{0.0, {0.1}}, {30.0, {0.6}}};
+
+    // Values and keys as restored, and the write counters, before the panel opens.
+    struct Snap {
+        std::vector<double> v;
+        std::string str;
+        std::map<double, std::vector<double>> keys;
+        int sets, key_sets, key_clears;
+    };
+    std::map<std::string, Snap> before;
+    for (const auto &p : f.inst->params.params)
+        before[p->name] = {p->v, p->str, p->keys, p->sets, p->key_sets, p->key_clears};
+    auto ui_sets = [&] {
+        long n = 0;
+        for (const auto &p : f.inst->params.params) {
+            auto get = [&](const char *k) {
+                auto it = p->props.set_counts.find(k);
+                return it == p->props.set_counts.end() ? 0L : it->second;
+            };
+            n += get(kOfxParamPropEnabled) + get(kOfxParamPropSecret);
+        }
+        return n;
+    };
+    const long ui0 = ui_sets();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(f.host.action(f.plug, kOfxActionBeginInstanceEdit, f.inst.get()) != kOfxStatFailed);
+    size_t notified = 0;
+    for (const char *reason : {kOfxChangePluginEdited, kOfxChangeTime}) {
+        for (const auto &p : f.inst->params.params) {
+            if (p->type == kOfxParamTypeGroup || p->type == kOfxParamTypePage) continue;
+            REQUIRE(f.changed(p->name, 1000, reason) == kOfxStatOK);
+            ++notified;
+        }
+    }
+    REQUIRE(f.render(1000) == kOfxStatOK);
+    REQUIRE(f.host.action(f.plug, kOfxActionEndInstanceEdit, f.inst.get()) != kOfxStatFailed);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const long ui = ui_sets() - ui0;
+    size_t conditional = 0;
+    for (const auto &sp : s["params"]) conditional += sp.contains("enabled_if") + sp.contains("visible_if");
+    MESSAGE("old project panel: " << notified << " notifications, " << ui << " enabled/secret writes ("
+                                  << conditional << " conditional properties), " << ms << " ms");
+
+    // Every saved value and keyframe is kept, nothing was written to a value param.
+    for (const auto &p : f.inst->params.params) {
+        if (p->name == "host_debug_all_status" || p->name == "host_debug_all") continue;  // display only
+        const Snap &b = before[p->name];
+        CAPTURE(p->name);
+        CHECK(p->v == b.v);
+        CHECK(p->str == b.str);
+        CHECK(p->keys == b.keys);
+        CHECK(p->sets == b.sets);
+        CHECK(p->key_sets == b.key_sets);
+        CHECK(p->key_clears == b.key_clears);
+    }
+    // The grey-out / hide state: at most one write per conditional property for the whole
+    // pass (only where the restored values change it), not one per property per notification.
+    CHECK(ui <= long(conditional));
+    // ... and it is right: 0.4.0's Exposure / Black level / Quality show, Lens softness stays hidden.
+    for (const char *n : {"digital_exposure", "digital_black_level", "digital_quality"})
+        CHECK(f.param(n)->props.i(kOfxParamPropSecret) == 0);
+    CHECK(f.param("digital_lens_blur")->props.i(kOfxParamPropSecret) == 1);
+    CHECK(f.param("digital_quality2")->props.i(kOfxParamPropEnabled) == 1);
+    // Further notifications with nothing changed write no UI state at all.
+    const long ui1 = ui_sets();
+    for (const auto &p : f.inst->params.params)
+        if (p->type != kOfxParamTypeGroup && p->type != kOfxParamTypePage) REQUIRE(f.changed(p->name, 1000, kOfxChangePluginEdited) == kOfxStatOK);
+    CHECK(ui_sets() == ui1);
 }
