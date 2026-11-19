@@ -198,16 +198,86 @@ struct Howlaround::Impl {
         int w = 0, h = 0, format = 0;  // the scene this loop is for
         std::unique_ptr<howl::Engine<GpuOps>> engine;
         std::string key;
+        // Loops of the settings shown before (parked: Engine::park), newest last. Trying
+        // Screen Loop presets in turn and going back to one continues its history instead of
+        // re-running up to 479 source frames. Each is keyed by everything its pictures depend
+        // on that the key holds (the feedback JSON, fps, sizes, window); the look is not in the
+        // key: whoever changes the look flushes (ntscrt_flush_caches_mask), as before.
+        struct Parked {
+            std::unique_ptr<howl::Engine<GpuOps>> engine;
+            std::string key;
+            uint64_t used = 0;
+        };
+        std::vector<Parked> parked;
         // Chain input size learned for this scene size (from the main path, or one probe).
         int chain_w = 0, chain_h = 0;
         uint64_t used = 0;
     };
     static constexpr size_t kSlots = 3;  // Resolve: full size and two or three viewer / thumbnail scales
+    static constexpr size_t kParkedPerSlot = 4;
     std::vector<std::unique_ptr<Slot>> slots;
     Slot *cur = nullptr;  // the loop of the last camera() call
     uint64_t tick = 0;
     TexPtr last_camera;
     int64_t last_frame = -1;
+    std::string last_feedback;  // the feedback JSON of the last camera() call
+    size_t parked_budget = default_parked_budget();
+
+    // NTSCRT_SCREENLOOP_KEEP_MB: memory the parked loops may hold in all (0 = none kept), default 256 MB.
+    static size_t default_parked_budget() {
+        if (const char *e = std::getenv("NTSCRT_SCREENLOOP_KEEP_MB"); e && *e) {
+            char *end = nullptr;
+            double mb = std::strtod(e, &end);
+            if (end != e && mb >= 0) return size_t(mb * 1024 * 1024);
+        }
+        return size_t(256) << 20;
+    }
+
+    // The slot's loop for `key`: the current one, a parked one taken back, or none (made by the caller).
+    void select(Slot &sl, const std::string &key) {
+        if (sl.engine && sl.key == key) return;
+        if (sl.engine) {
+            sl.engine->park();
+            sl.parked.push_back({std::move(sl.engine), sl.key, ++tick});
+        }
+        sl.engine.reset();
+        sl.key.clear();
+        for (auto it = sl.parked.begin(); it != sl.parked.end(); ++it)
+            if (it->key == key) {
+                sl.engine = std::move(it->engine);
+                sl.key = key;
+                sl.parked.erase(it);
+                break;
+            }
+        trim_parked();
+    }
+    // At most kParkedPerSlot per slot and parked_budget bytes in all: the least recently parked go.
+    void trim_parked() {
+        for (;;) {
+            size_t bytes = 0;
+            Slot *worst = nullptr;
+            size_t worst_i = 0;
+            bool over_count = false;
+            for (auto &s : slots) {
+                for (size_t i = 0; i < s->parked.size(); ++i) {
+                    bytes += s->parked[i].engine->held_bytes();
+                    if (!worst || s->parked[i].used < worst->parked[worst_i].used) worst = s.get(), worst_i = i;
+                }
+                if (s->parked.size() > kParkedPerSlot) over_count = true;
+            }
+            if (!worst) return;
+            if (over_count) {
+                for (auto &s : slots)
+                    if (s->parked.size() > kParkedPerSlot) {
+                        s->parked.erase(s->parked.begin());  // the oldest of that slot
+                        break;
+                    }
+                continue;
+            }
+            if (bytes <= parked_budget) return;
+            worst->parked.erase(worst->parked.begin() + ptrdiff_t(worst_i));
+        }
+    }
 
     explicit Impl(gpu::Device &d) : dev(d), ops(d) {}
 
@@ -236,10 +306,18 @@ struct Howlaround::Impl {
     }
 
     // Checkpoints only while the TV pass keeps no state of its own.
+    bool tv_keeps_state() const { return hooks.tv_keeps_state && hooks.tv_keeps_state(); }
     void sync_checkpoints() {
-        const bool on = !(hooks.tv_keeps_state && hooks.tv_keeps_state());
+        const bool on = !tv_keeps_state();
         for (auto &s : slots)
             if (s->engine) s->engine->set_checkpoints(on);
+    }
+    void clear() {
+        slots.clear();
+        cur = nullptr;
+        last_camera.reset();
+        last_frame = -1;
+        ops.pool.clear();
     }
 };
 
@@ -272,6 +350,18 @@ std::shared_ptr<gpu::Texture> Howlaround::camera(const std::shared_ptr<gpu::Text
     // Zero zoom without the counter: the camera sees the room only — exactly the scene.
     if (!fb.enabled || (!s.tv_in_view() && !s.counter())) return scene;
 
+    // A change of the Screen Loop settings while the loop's CRT keeps state of its own (a temporal
+    // shader preset): no loop can be kept or taken back (each depends on what that CRT drew before),
+    // so the loop and its CRT start over, as a flush does (hooks.tv_reset).
+    std::string fb_text = feedback.dump();
+    if (fb_text != m.last_feedback) {
+        if (!m.last_feedback.empty() && m.tv_keeps_state()) {
+            if (m.hooks.tv_reset) m.hooks.tv_reset();
+            m.clear();
+        }
+        m.last_feedback = std::move(fb_text);
+    }
+
     const auto &sd = scene->desc();
     m.ops.ctx = &ctx;
     m.ops.hooks = &m.hooks;
@@ -298,10 +388,11 @@ std::shared_ptr<gpu::Texture> Howlaround::camera(const std::shared_ptr<gpu::Text
     int64_t window = howl::kDefaultWindow;
     if (auto it = feedback.find("window"); it != feedback.end() && it->is_number_integer())
         window = it->get<int64_t>();
-    std::string key = feedback.dump() + "|" + std::to_string(ctx.fps) + "|" + std::to_string(sd.width) + "x" +
+    std::string key = m.last_feedback + "|" + std::to_string(ctx.fps) + "|" + std::to_string(sd.width) + "x" +
                       std::to_string(sd.height) + "|" + std::to_string(sl.chain_w) + "x" + std::to_string(sl.chain_h) +
                       "|" + std::to_string(int(sd.format)) + "|" + std::to_string(window);
-    if (!sl.engine || key != sl.key) {
+    m.select(sl, key);
+    if (!sl.engine) {
         howl::EngineConfig cfg;
         cfg.settings = s;
         cfg.fps = ctx.fps > 0 ? ctx.fps : 30.0;
@@ -353,11 +444,8 @@ void Howlaround::after_frame(const gpu::Texture &chain_input, const json &, cons
 }
 
 void Howlaround::flush() {
-    impl_->slots.clear();
-    impl_->cur = nullptr;
-    impl_->last_camera.reset();
-    impl_->last_frame = -1;
-    impl_->ops.pool.clear();
+    impl_->clear();
+    impl_->last_feedback.clear();
 }
 
 }  // namespace ntscrt

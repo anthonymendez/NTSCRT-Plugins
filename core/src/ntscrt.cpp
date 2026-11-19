@@ -876,6 +876,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             };
         };
         h.tv_keeps_state = [inst] { return inst->howl_crt->ran_temporal_preset(); };
+        h.tv_reset = [inst] { inst->howl_crt->flush(); };
         h.render_tv = [&](const gpu::Texture &ch, gpu::Texture &tv, const HowlPass &p) {
             const auto pin = look_ptr(p.frame);
             inst->howl_crt->render(ch, tv, at(p.shader_frame - 1, pin));  // shader_frame == p.shader_frame
