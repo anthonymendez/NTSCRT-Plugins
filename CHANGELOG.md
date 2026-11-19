@@ -14,6 +14,14 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Changed
+- Docs: **the README is rewritten for video editors:** what the effect does, what you need, how to install,
+  update and remove it, how to apply it in Resolve, a tour of the presets and sections, tips and
+  troubleshooting in plain words. All the technical information it had (install scripts and options,
+  checksums and attestations, GPU routes, known limitations, build from source) moves to a separate
+  *For developers and technical details* section further down, with project layout, tests and upstream sync
+  pointers added.
+
 ## [0.5.1] - 2026-11-19
 
 ### Fixed

@@ -6,7 +6,7 @@ anything misbehaves.
 
 ## 1. Install
 Use the installer from the [latest release](https://github.com/anthonymendez/NTSCRT-Plugins/releases/latest)
-(or the one-line install in the [README](../README.md#install)):
+(or the one-line install in the [README](../README.md#install-with-one-line)):
 - **Windows:** `NTSCRT-Installer-windows.msi`. If SmartScreen warns, click *More info → Run anyway*
   (the installer isn't code-signed yet).
 - **macOS:** `NTSCRT-Installer-macos.pkg`. If macOS blocks it, open *System Settings → Privacy & Security*
