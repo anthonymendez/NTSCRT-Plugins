@@ -60,6 +60,7 @@ template <class T>
 OfxStatus set_one(OfxPropertySetHandle h, const char *k, int idx, T v) {
     if (!h || idx < 0) return kOfxStatErrBadHandle;
     auto &vec = P(h)->props[k];
+    ++P(h)->set_counts[k];
     if (int(vec.size()) <= idx) vec.resize(size_t(idx) + 1, Value(T{}));
     vec[size_t(idx)] = Value(v);
     return kOfxStatOK;

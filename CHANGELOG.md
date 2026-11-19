@@ -22,6 +22,14 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   controls already have, or editing Digital video (off while Screen Loop is on) re-runs nothing. A preset or
   edit that does change what the loop shows still re-runs it once for each size Resolve renders. Pictures are
   unchanged.
+- Resolve: **opening the Effects tab, or editing a control, no longer makes the effect grey out or hide its
+  controls again one by one:** every notification Resolve sent (one per control when the Inspector syncs an
+  effect, as with projects made with 0.4.0 or a 0.5.0 release candidate) re-set all ~480 grey-out / hide
+  states, each a redraw of the open Inspector (about 310,000 per pass over the controls in the test host); it
+  now sets only the ones that change (51 for a 0.4.0 instance). Suspected cause of older projects locking up
+  when their clip's Effects tab is opened (not yet reproduced in Resolve itself). Saved values are kept as
+  they are. With `NTSCRT_OFX_LOG_VERBOSE=1` the log now also records when Resolve opens and closes the
+  effect's controls.
 
 ## [0.5.0] - 2026-11-13
 

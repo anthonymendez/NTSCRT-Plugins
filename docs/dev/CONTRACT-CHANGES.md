@@ -286,3 +286,36 @@ chain, on Metal with a `Device::finish()` between them.
 
 **Reason.** A crtsim frame depended on the frames rendered before it (librashader's `clear_history` never clears
 `PassFeedback`), so hosts rendering in any order got different pictures.
+
+## 2026-11-19 — agent D2 — OpenFX param set: rules for projects saved with older plug-in versions
+
+**Change.** No param, id, type or option changed. Written down: the rules that keep projects made with an
+earlier plug-in version (0.3.0, 0.4.0, the 0.5.0 release candidates) opening and editing normally, and the
+OpenFX plug-in's `update_dependents` now writes a control's enabled / secret state only when it changes.
+
+**Old projects.** Resolve keeps an effect in a saved project by plug-in id and identity major
+(`kOfxIdentityMajor` = 1) and restores every persistent param by name, as saved (params added later take their
+default). So:
+- Never remove, rename or retype a schema param or a `host_*` param. A control that goes away stays as a
+  hidden legacy param (`legacy: true`, `visible_if` on its own value, as `digital.quality` / `exposure` /
+  `black_level` / `lens_blur` from 0.4.0) and the core migrates it (`core/stages/digital/migrate.h`); a control
+  with a new meaning gets a new id (`digital.quality2`).
+- Choice params store an index: options are only ever appended, never reordered or removed (the Preset menus:
+  released presets first, `released_preset_order`; Horizontal resolution's formats after Custom).
+- A changed default only reaches new instances; a changed range must still accept every value saved before.
+  Turning `animatable` on (29 params in 0.5.0-rc.1) loads the saved static value; don't turn it off for a param
+  that may hold keyframes.
+- Nothing that runs without the user asking (instance creation, beginInstanceEdit, instanceChanged with reason
+  plugin / time, getClipPreferences, render) writes a param value. Presets, file loads and choice applies run only
+  on a user edit. Display-only state (labels, the status line, enabled / secret) is written only when it differs
+  from what was last written: each write is a property set Resolve acts on in the open Inspector, and a host can
+  send a notification for every param when it opens an effect.
+- `tests/ofx` "old projects: opening the panel keeps the saved values and stays bounded" restores a 0.4.0
+  instance's values and keys, opens the panel and notifies every param twice: no value may change and at most
+  one enabled / secret write per conditional property (310,728 before this change, 51 after).
+
+**Reason.** User report after 0.5.0: projects that used earlier versions locked up Resolve when the clip was
+selected and the Effects tab opened. Every instanceChanged re-set all ~480 enabled / secret properties
+(306 `enabled_if`, 178 `visible_if`). Not reproduced in Resolve's own Inspector (the headless runs were blocked
+by an open Resolve session); `NTSCRT_OFX_LOG_VERBOSE=1` now logs beginInstanceEdit / endInstanceEdit next to every
+instanceChanged, so the user's log shows what Resolve does when the tab opens.

@@ -600,7 +600,13 @@ public:
     }
 
     // The panel was opened: show the global switch's current state.
-    void beginEdit() override { show_debug_all(true); }
+    void beginEdit() override {
+        if (dlog::verbose()) dlog::write("instance #" + std::to_string(id_) + " beginInstanceEdit");
+        show_debug_all(true);
+    }
+    void endEdit() override {
+        if (dlog::verbose()) dlog::write("instance #" + std::to_string(id_) + " endInstanceEdit");
+    }
 
     void changedParam(const OFX::InstanceChangedArgs &args, const std::string &name) override {
         if (dlog::verbose()) {
@@ -1254,10 +1260,28 @@ private:
     void update_dependents(double t) {
         const Schema &s = g_.schema;
         auto val = [&](size_t i) { return value_at(i, t); };
+        // Only the ones whose state changes: each is a property set the host may act on at once
+        // (Resolve redraws the open Inspector), and ~480 of them ran on every param change.
+        if (shown_enabled_.size() != s.params.size()) {
+            shown_enabled_.assign(s.params.size(), -1);
+            shown_secret_.assign(s.params.size(), -1);
+        }
         for (size_t i = 0; i < s.params.size(); ++i) {
             const ParamDef &p = s.params[i];
-            if (p.enabled_if) params_[i]->setEnabled(is_enabled(s, p, val));
-            if (p.visible_if) params_[i]->setIsSecret(!is_visible(s, p, val));
+            if (p.enabled_if) {
+                const signed char on = is_enabled(s, p, val) ? 1 : 0;
+                if (on != shown_enabled_[i]) {
+                    params_[i]->setEnabled(on != 0);
+                    shown_enabled_[i] = on;
+                }
+            }
+            if (p.visible_if) {
+                const signed char secret = is_visible(s, p, val) ? 0 : 1;
+                if (secret != shown_secret_[i]) {
+                    params_[i]->setIsSecret(secret != 0);
+                    shown_secret_[i] = secret;
+                }
+            }
         }
     }
 
@@ -1327,6 +1351,7 @@ private:
     OFX::PushButtonParam *debug_all_ = nullptr;
     OFX::StringParam *debug_all_status_ = nullptr;
     int shown_all_label_ = -1;   // global switch state the button's label shows (-1 = the default)
+    std::vector<signed char> shown_enabled_, shown_secret_;  // update_dependents' last writes (-1 = none yet)
     size_t last_look_hash_ = 0;  // debug logging: full look only when it changes
     bool was_debug_ = false;     // the previous render logged in detail (under mu_)
     std::map<std::string, size_t> by_name_;  // host param name -> schema index

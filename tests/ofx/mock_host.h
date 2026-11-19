@@ -21,6 +21,7 @@ using Value = std::variant<int, double, std::string, void *>;
 
 struct PropSet {
     std::map<std::string, std::vector<Value>> props;
+    std::map<std::string, long> set_counts;  // property sets by name (the plug-in's and the host's)
     void set(const std::string &k, std::vector<Value> v) { props[k] = std::move(v); }
     bool has(const std::string &k) const { return props.count(k) != 0; }
     int i(const std::string &k, int idx = 0) const;
