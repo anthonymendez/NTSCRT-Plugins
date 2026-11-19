@@ -670,10 +670,12 @@ public:
             // or after) can change frames between its probes. Re-simulating it
             // costs time in proportion to the frame number (seconds an hour into
             // a timeline), so it is kept when no Glitch param is keyed. A Load
-            // that read no file changed nothing.
+            // that read no file changed nothing. A Screen Loop preset writes only
+            // Screen Loop params (no keyframes): only the loop can be affected.
             if (presets && applied) {
                 uint32_t m = NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE;
                 if (!glitch_keyed_before && !glitch_keyed()) m &= ~uint32_t(NTSCRT_CACHE_GLITCH);
+                if (name == kLoopPresetParam) m = NTSCRT_CACHE_SCREENLOOP;
                 flush_before_next_render(m);
             }
         }
