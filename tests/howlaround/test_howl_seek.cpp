@@ -260,6 +260,60 @@ TEST_CASE("Screen Loop: a render at another scale in between keeps the full-size
     }
 }
 
+TEST_CASE("Screen Loop: other settings in between, then back: the history goes on, the same frames") {
+    // Trying Screen Loop presets in an editor's Inspector: each one's loop is kept (parked) while
+    // another is shown, so going back to one continues its history instead of re-running its
+    // window. The frames are those of an instance that only ever had that setting.
+    const std::string fa = feedback("Bottom to top", 8), fb = feedback("12 copies luma key", 8),
+                      fc = feedback("22 copies bottom left", 8);
+    std::vector<std::vector<uint8_t>> seq_a, seq_b;
+    {
+        Inst a("{}", fa);
+        if (!a.ok) return;
+        for (int64_t f = 0; f <= 30; ++f) seq_a.push_back(a.render(f));
+        Inst b("{}", fb);
+        for (int64_t f = 0; f <= 30; ++f) seq_b.push_back(b.render(f));
+    }
+    set_env("NTSCRT_SOURCE_CACHE_MB", "0");  // 8 frames kept: a re-run fetches again
+    Inst x("{}", fa);
+    set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    CHECK(x.render(20) == seq_a[20]);  // a cold seek
+    CHECK(x.src.fetches > 0);
+    x.render(20, 0.5);  // the viewer's size, its own loop
+    x.fb = fb;
+    CHECK(x.render(20) == seq_b[20]);  // new settings: their own run
+    CHECK(x.src.fetches > 0);
+    x.fb = fc;
+    x.render(20);
+    x.fb = fa;  // back: A's history goes on
+    CHECK(x.render(20) == seq_a[20]);
+    CHECK(x.src.fetches == 0);
+    x.render(20, 0.5);
+    CHECK(x.src.fetches == 0);
+    CHECK(x.render(21) == seq_a[21]);
+    CHECK(x.src.fetches == 0);
+    x.fb = fb;  // and B's
+    CHECK(x.render(21) == seq_b[21]);
+    CHECK(x.src.fetches == 0);
+    CHECK(x.render(22) == seq_b[22]);
+    CHECK(x.src.fetches == 0);
+    // Seeking back after coming back: a parked loop kept no checkpoints, so this re-runs the
+    // window; the frame is still the one an undisturbed instance renders.
+    CHECK(x.render(9) == seq_b[9]);
+    // NTSCRT_SCREENLOOP_KEEP_MB=0: nothing is kept, going back re-runs (the same frame).
+    set_env("NTSCRT_SCREENLOOP_KEEP_MB", "0");
+    set_env("NTSCRT_SOURCE_CACHE_MB", "0");
+    Inst y("{}", fa);
+    set_env("NTSCRT_SCREENLOOP_KEEP_MB", nullptr);
+    set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    y.render(20);
+    y.fb = fb;
+    y.render(20);
+    y.fb = fa;
+    CHECK(y.render(20) == seq_a[20]);
+    CHECK(y.src.fetches > 0);
+}
+
 #ifndef __APPLE__  // crt-sim can hang the macOS CI runners' virtual GPU
 // crt-sim keeps a feedback, which the CRT stage resets every frame (docs/dev/CRT.md): its TV
 // pictures are a function of the pass, so the loop keeps checkpoints and they change no frame.

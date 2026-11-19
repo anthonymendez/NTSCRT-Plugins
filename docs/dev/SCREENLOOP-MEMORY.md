@@ -124,3 +124,50 @@ The cold-seek time scales the same way (about 10 s for 410 frames at 1080p, GPU 
 the feedback JSON's `window` (the tests use it); the plug-ins' controls don't set it. Not verified: how Resolve
 behaves when its cache reaches its own limit (75% of RAM by default) during a UHD cold seek; the tests stop it at
 40 GB, and on this 62 GB PC that limit is 46 GB.
+
+## Preset changes and Inspector edits (2026-11-18)
+
+User report on 0.5.0: changing Screen Loop presets in the Inspector lags Resolve far more than changing regular
+presets. What it costs, step by step:
+
+- **Every edit re-ran the loop.** Any param change (`NtscrtEffect::changedParam`, `host::cache_mask`) flushed
+  `NTSCRT_CACHE_SCREENLOOP`, so the next render of the playhead frame N re-ran the loop from A(N): N - A(N) source
+  frames fetched from the host (240-479 far in, N near the start), once for each render scale Resolve asks for.
+  That held for edits that change nothing the loop shows: a preset writing the values the controls already have,
+  choosing the preset that is already set, a Digital video edit (Digital is off while Screen Loop is on), and for
+  going back to a preset tried a moment before.
+- **The loop depends on almost the whole look**, not only its own settings: the crop shapes the room the camera
+  films, and its TV picture runs through NTSC, Downscale, Glitch and the CRT shader (`HowlHooks`). So a CRT or
+  Glitch edit has to re-run it; there is no "downstream-only" param apart from Digital video.
+- **A Screen Loop preset writes 25 params, a look preset 288** (each echoed back as a plug-in edit). The writes
+  are one edit block and the flush waits for the next render (`pending_flush_`), so a preset costs one re-run
+  per render scale, not one per write.
+
+Now:
+
+- **The plug-in drops the history only when something it depends on changed** (`loop_flush_needed`): a param change
+  marks it, and the next render compares the look without Digital video, plus the seed, with the last render's.
+  The Screen Loop settings themselves are in the core's key for each loop (the feedback JSON), so their changes need
+  no flush. With keyframes anywhere (before or now) it is dropped as before: earlier frames' looks could differ.
+- **The core keeps the loops of the last few settings** (`Howlaround::Impl::Slot::parked`, four per render size,
+  256 MB in all, `NTSCRT_SCREENLOOP_KEEP_MB`): a loop put aside keeps only its state at its last frame
+  (`Engine::park`: no checkpoints, no run ahead), so going back to a setting at the same playhead continues it.
+  A temporal CRT preset in the loop (none of the bundled ones) keeps nothing across a settings change and resets
+  the loop's CRT, as the flush did (`HowlHooks::tv_reset`).
+- No picture changes: each kept loop is the same deterministic run (`test_howl_seek` "other settings in between,
+  then back", `test_ofx` "Screen Loop: preset changes and Inspector edits ..." compares every step with a fresh
+  instance's render).
+
+Mock host (`test_ofx`, the sequence above with each plug-in write echoed back, renders of N at render scales 1 and
+0.25; re-runs = renders that fetched earlier frames; `NTSCRT_BENCH_SL_SIZE=1920x1080 NTSCRT_BENCH_SL_FRAMES=1850`
+for the timings):
+
+| step at frame 1850 (1080p) | before: re-runs, earlier frames fetched, ms | after |
+|---|---|---|
+| Screen Loop preset B | 2, 820, 4000 | 2, 820, 4000 (needed) |
+| the same preset again | 2, 820, 4000 | 0, 0, 10 |
+| back to preset A | 2, 820, 5400 | 0, 0, 10 |
+| Screen Loop zoom edit | 2, 820, 5300 | 2, 820, 5300 (needed) |
+| Digital video edit | 2, 820, 5300 | 0, 0, 10 |
+| look preset (Clean CRT) | 2, 820, 5000 | 2, 820, 5000 (needed) |
+| the same look preset again | 2, 820, 5000 | 0, 0, 5 |

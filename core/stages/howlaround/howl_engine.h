@@ -210,6 +210,24 @@ public:
         ckpt_on_ = on;
     }
 
+    // Put aside while another setting's loop is shown (Howlaround keeps a few, so going
+    // back to a setting continues its history instead of re-running it): only the
+    // state at next() stays, the checkpoints and the run ahead go. Neither changes a
+    // picture (a later re-run or window start re-makes them, step for step).
+    void park() {
+        inflight_.clear();  // empty between calls anyway
+        ckpts_.clear();
+        ckpt_bytes_ = 0;
+        ahead_.drop();
+    }
+    // Bytes of the pictures this loop holds (its history, the run ahead's, checkpoints).
+    size_t held_bytes() const {
+        size_t b = ckpt_bytes_;
+        for (const auto &t : tv_) b += pic_bytes(t.second);
+        for (const auto &t : ahead_.tv) b += pic_bytes(t.second);
+        return b;
+    }
+
     // ---- introspection (tests) ----
     bool valid() const { return valid_; }
     int64_t anchor() const { return anchor_; }

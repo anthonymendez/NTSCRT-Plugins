@@ -603,6 +603,12 @@ public:
     void beginEdit() override { show_debug_all(true); }
 
     void changedParam(const OFX::InstanceChangedArgs &args, const std::string &name) override {
+        if (dlog::verbose()) {
+            // Every notification (NTSCRT_OFX_LOG_VERBOSE): how many a preset's writes come back as.
+            dlog::write("instance #" + std::to_string(id_) + " changed " + name + " reason=" +
+                        (args.reason == OFX::eChangeUserEdit ? "user" : args.reason == OFX::eChangePluginEdit ? "plugin" : "time") +
+                        " t=" + std::to_string(args.time) + (applying_ ? " (during our own edit)" : ""));
+        }
         // Diagnostics only: they never touch the look, so no cache flush.
         if (name == kDebugAllStatusParam) return;  // our own display update
         if (name == kOpenLogsParam) {
@@ -924,7 +930,44 @@ public:
     // Cache flushes asked for by param changes run at the start of the next
     // render, under mu_: a changedParam (Resolve's UI thread) never waits for a
     // render in flight, which can take seconds.
-    void flush_before_next_render(uint32_t m) { pending_flush_.fetch_or(m); }
+    // Screen Loop's history is the expensive one (a re-run fetches up to 479 source frames from the
+    // host): a param change only marks it to be checked; the next render drops it only if something
+    // it depends on did change (loop_flush_needed).
+    void flush_before_next_render(uint32_t m) {
+        if (m & NTSCRT_CACHE_SCREENLOOP) loop_dirty_ = true;
+        if (m &= ~uint32_t(NTSCRT_CACHE_SCREENLOOP)) pending_flush_.fetch_or(m);
+    }
+
+    // At a render, under mu_, after a param change that can touch Screen Loop: must its history go?
+    // Its history at frame N depends on the settings of every earlier frame back to its window start:
+    // the Screen Loop settings (the core keys each history on the frame's feedback JSON, so a change of
+    // those alone needs no flush here) and the look, all of it except Digital video (off whenever
+    // Screen Loop is on): the crop shapes the room the camera films, and the loop's TV picture runs
+    // through NTSC, Downscale, Glitch and the CRT shader. With no keyframes anywhere, before and now,
+    // every frame has the current look: the history is still right if the look and the seed are what
+    // they were at the last render (a preset writing the values the params already had, a Digital
+    // video edit, a Screen Loop preset). Keyframes: dropped, as before (the earlier frames' looks
+    // could differ).
+    bool loop_flush_needed(const std::string &look, int seed, bool animated_now) {
+        std::string key;
+        try {
+            json j = json::parse(look);
+            j.erase("digital");
+            key = j.dump() + "|" + std::to_string(seed);
+        } catch (...) {
+            key.clear();  // unreadable: always differs
+        }
+        // Without keyframes a different look drops it even without a notification (one that arrives
+        // while a render is between reading the params and getting here is then still caught by the
+        // next render).
+        const bool dirty = loop_dirty_.exchange(false);
+        const bool changed = key.empty() || key != loop_look_key_;
+        const bool animated = animated_now || loop_key_animated_;
+        loop_look_key_ = std::move(key);
+        loop_key_animated_ = animated_now;
+        // (With keyframes the look differs from frame to frame: only a notification counts, as before.)
+        return animated ? dirty : changed;
+    }
 
     // Does any Glitch param have keyframes (unreadable: assume so)?
     bool glitch_keyed() const {
@@ -1165,6 +1208,12 @@ private:
                   << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()
                   << " ms;" << host_ranges_text() << (guards ? "; guard keys" : "") << "; keys of " << sample;
                 dlog::write(o.str());
+            } else if (dlog::verbose()) {
+                std::ostringstream o;
+                o << "instance #" << id_ << " preset applied at t=" << t << ": " << plan.look.keys.size() << " look and "
+                  << plan.feedback.size() << " Screen Loop params written in "
+                  << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() << " ms";
+                dlog::write(o.str());
             }
         } catch (...) {
             endEditBlock();
@@ -1285,6 +1334,9 @@ private:
     std::atomic<uint64_t> look_gen_{0};      // bumped by every param change
     std::atomic<bool> keys_dirty_{true};     // re-count keyframes before the next render
     std::atomic<uint32_t> pending_flush_{0};  // NTSCRT_CACHE_* to drop before the next render
+    std::atomic<bool> loop_dirty_{false};     // a param change may have touched Screen Loop's history
+    std::string loop_look_key_;               // the look (no Digital video) + seed at the last render (under mu_)
+    bool loop_key_animated_ = true;           // ... and whether any param had keyframes then
     bool animated_ = true;
     uint64_t keys_sig_ = 0;      // key counts per param, hashed (0 = no keys anywhere)
     bool keys_counted_ = false;
@@ -1483,8 +1535,21 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
     }
     if (debug && !was_debug_) last_look_hash_ = 0;  // just turned on: the full look first
     was_debug_ = debug;
-    if (uint32_t m = pending_flush_.exchange(0)) ntscrt_flush_caches_mask(inst_, m);
+    if (uint32_t m = pending_flush_.exchange(0)) {
+        ntscrt_flush_caches_mask(inst_, m);
+        if (dlog::verbose()) {
+            std::ostringstream o;
+            o << "instance #" << id_ << " caches flushed before t=" << args.time << ": mask=0x" << std::hex << m;
+            dlog::write(o.str());
+        }
+    }
     ctx.animated = animated();
+    if (loop_flush_needed(look, seed, ctx.animated)) {
+        ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_SCREENLOOP);
+        if (dlog::verbose())
+            dlog::write("instance #" + std::to_string(id_) + " Screen Loop history dropped before t=" +
+                        std::to_string(args.time) + " (the look, the seed or keyframes changed)");
+    }
     if (ctx.animated) note_current_look(args.time, look);
     const size_t builds_before = look_builds_;
     const auto t_core = std::chrono::steady_clock::now();

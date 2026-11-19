@@ -1621,3 +1621,251 @@ TEST_CASE("GPU render (fake CUDA host) matches the CPU render") {
     }
 #endif
 }
+
+// ---- Screen Loop: what a preset change or an Inspector edit costs ------------------------------
+// The sequence a host goes through when the editor picks a Screen Loop preset in the Inspector with
+// the playhead at frame T: the menu's user edit, the plug-in's own writes (each echoed back as a
+// plug-in edit, as DaVinci Resolve does), then renders of T at full size and at the viewer's reduced
+// render scale. A history re-run fetches T - A(T) earlier source frames; "replays" counts the renders
+// that fetched any earlier frame. Pictures are checked against a render from clean caches.
+namespace {
+struct LoopEditFixture : ProtoFixture {
+    LoopEditFixture(int w_, int h_) {
+        w = w_;
+        h = h_;
+        mock::Clip &s = src();
+        mock::Clip &dst = *inst->clips[kOfxImageEffectOutputClipName];
+        s.width = dst.width = w;
+        s.height = dst.height = h;
+        s.any_frame.assign(size_t(w) * h * 4, 0.f);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                float *p = &s.any_frame[(size_t(y) * w + x) * 4];
+                p[0] = x / float(w - 1);
+                p[1] = y / float(h - 1);
+                p[2] = float((x / 8 + y / 8) % 2);
+                p[3] = 1.f;
+            }
+        dst.any_frame.assign(s.any_frame.size(), 0.f);
+    }
+    OfxStatus change(const std::string &name, const char *reason, double t) {
+        mock::PropSet in;
+        in.set(kOfxPropType, {std::string(kOfxTypeParameter)});
+        in.set(kOfxPropName, {name});
+        in.set(kOfxPropChangeReason, {std::string(reason)});
+        in.set(kOfxPropTime, {t});
+        in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
+        OfxStatus st = host.action(plug, kOfxActionInstanceChanged, inst.get(), &in);
+        return st == kOfxStatReplyDefault ? kOfxStatOK : st;
+    }
+    std::vector<int> writes() const {
+        std::vector<int> v;
+        for (auto &p : inst->params.params) v.push_back(p->sets + p->key_sets + p->key_clears);
+        return v;
+    }
+    // A user edit of `name` at t, then the host's echo of every param the plug-in wrote meanwhile.
+    // Returns the number of echoed plug-in edits.
+    int user_edit(const std::string &name, double t) {
+        const std::vector<int> before = writes();
+        REQUIRE(change(name, kOfxChangeUserEdited, t) == kOfxStatOK);
+        const std::vector<int> after = writes();
+        int echoed = 0;
+        for (size_t i = 0; i < after.size(); ++i)
+            if (after[i] != before[i]) {
+                REQUIRE(change(inst->params.params[i]->name, kOfxChangePluginEdited, t) == kOfxStatOK);
+                ++echoed;
+            }
+        return echoed;
+    }
+    int choose(const char *menu, const std::string &label, double t) {
+        mock::Param *p = param(menu);
+        const int i = choice_index(*p, label);
+        REQUIRE_MESSAGE(i > 0, "no preset " << label);
+        p->v[0] = i;
+        return user_edit(menu, t);
+    }
+    OfxStatus render_at(double t, double scale) {
+        const int rw = std::max(1, int(std::lround(w * scale))), rh = std::max(1, int(std::lround(h * scale)));
+        mock::Clip &s = src();
+        mock::Clip &dst = *inst->clips[kOfxImageEffectOutputClipName];
+        // The host hands over images at the render scale.
+        const int sw = s.width, sh = s.height;
+        std::vector<float> full = s.any_frame;
+        if (scale != 1.0) {
+            std::vector<float> small(size_t(rw) * rh * 4);
+            for (int y = 0; y < rh; ++y)
+                for (int x = 0; x < rw; ++x)
+                    for (int c = 0; c < 4; ++c)
+                        small[(size_t(y) * rw + x) * 4 + c] =
+                            full[(size_t(std::min(sh - 1, y * sh / rh)) * sw + std::min(sw - 1, x * sw / rw)) * 4 + c];
+            s.any_frame = small;
+            s.width = dst.width = rw;
+            s.height = dst.height = rh;
+            dst.any_frame.assign(small.size(), 0.f);
+        }
+        mock::PropSet in;
+        in.set(kOfxPropTime, {t});
+        in.set(kOfxImageEffectPropFieldToRender, {std::string(kOfxImageFieldNone)});
+        in.set(kOfxImageEffectPropRenderWindow, {0, 0, rw, rh});
+        in.set(kOfxImageEffectPropRenderScale, {scale, scale});
+        in.set(kOfxImageEffectPropSequentialRenderStatus, {0});
+        in.set(kOfxImageEffectPropInteractiveRenderStatus, {1});
+        in.set(kOfxImageEffectPropRenderQualityDraft, {0});
+        OfxStatus st = host.action(plug, kOfxImageEffectActionRender, inst.get(), &in);
+        if (scale != 1.0) {
+            s.any_frame = std::move(full);
+            s.width = dst.width = sw;
+            s.height = dst.height = sh;
+            dst.any_frame.assign(s.any_frame.size(), 0.f);
+        }
+        return st;
+    }
+    struct Shot {
+        int fetches = 0;  // earlier source frames fetched
+        double ms = 0;
+        std::vector<float> px;
+    };
+    Shot shot(double t, double scale = 1.0) {
+        const size_t mark = src().fetched.size();
+        const auto t0 = std::chrono::steady_clock::now();
+        REQUIRE(render_at(t, scale) == kOfxStatOK);
+        Shot s;
+        s.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        for (size_t i = mark; i < src().fetched.size(); ++i) s.fetches += src().fetched[i] != int(t);
+        s.px = out;
+        return s;
+    }
+    // Frame t from a second instance with the same param values and clean caches: what a
+    // render gives that never saw any edit (this instance's caches are left as they are).
+    std::unique_ptr<mock::Effect> ref;
+    std::vector<float> clean(double t) {
+        if (!ref) {
+            ref = host.make_instance(desc, kOfxImageEffectContextFilter);
+            REQUIRE(host.action(plug, kOfxActionCreateInstance, ref.get()) == kOfxStatOK);
+        }
+        for (const char *c : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName}) {
+            mock::Clip &a = *inst->clips[c], &b = *ref->clips[c];
+            b.props.props = a.props.props;
+            b.width = a.width;
+            b.height = a.height;
+            b.any_frame = a.any_frame;
+            b.any_frame_last = a.any_frame_last;
+        }
+        for (size_t i = 0; i < inst->params.params.size(); ++i) {
+            mock::Param &a = *inst->params.params[i], &b = *ref->params.params[i];
+            b.v = a.v;
+            b.str = a.str;
+            b.keys = a.keys;
+        }
+        std::swap(inst, ref);
+        REQUIRE(change(inst->params.params.front()->name, kOfxChangePluginEdited, t) == kOfxStatOK);  // re-read the params
+        REQUIRE(host.action(plug, kOfxActionPurgeCaches, inst.get()) != kOfxStatFailed);
+        const size_t mark = src().fetched.size();
+        const OfxStatus st = render_at(t, 1.0);
+        std::vector<float> px = out;
+        src().fetched.resize(mark);
+        std::swap(inst, ref);
+        REQUIRE(st == kOfxStatOK);
+        return px;
+    }
+    ~LoopEditFixture() {
+        if (ref) host.action(plug, kOfxActionDestroyInstance, ref.get());
+    }
+};
+
+struct LoopEditStep {
+    std::string what;
+    int echoes = 0, replays = 0, fetches = 0;
+    double ms = 0;
+};
+
+// What each kind of edit at frame T costs: renders of T at full size and at the viewer's scale after it.
+std::vector<LoopEditStep> loop_edit_steps(LoopEditFixture &f, double T, bool check_pictures) {
+    std::vector<LoopEditStep> steps;
+    auto after = [&](const std::string &what, int echoes) {
+        LoopEditStep s{what, echoes};
+        const size_t log_mark = read_log().size();
+        for (double scale : {1.0, 0.25}) {
+            auto sh = f.shot(T, scale);
+            s.replays += sh.fetches > 0;
+            s.fetches += sh.fetches;
+            s.ms += sh.ms;
+        }
+        steps.push_back(s);
+        if (std::getenv("NTSCRT_BENCH_SL_LOG")) std::printf("---- %s\n%s", what.c_str(), read_log().substr(log_mark).c_str());
+        if (check_pictures) {
+            const std::vector<float> got = f.shot(T).px;
+            CHECK_MESSAGE(got == f.clean(T), what << ": the picture differs from a render from clean caches");
+        }
+    };
+    after("first render, Screen Loop preset A", f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T));
+    after("render again (nothing changed)", 0);
+    after("Screen Loop preset B", f.choose("host_screenloop_preset", "Screen Loop/12 copies luma key", T));
+    after("Screen Loop preset B again (same values)", f.choose("host_screenloop_preset", "Screen Loop/12 copies luma key", T));
+    after("back to Screen Loop preset A", f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T));
+    f.param("screenloop_zoom")->v[0] = 0.5;
+    after("Screen Loop zoom edit", f.user_edit("screenloop_zoom", T));
+    f.param("digital_quality2")->v[0] = 0.2;  // Digital video is off while Screen Loop is on
+    after("Digital video edit (off under Screen Loop)", f.user_edit("digital_quality2", T));
+    f.param("host_debug_logging")->v[0] = 1;
+    after("debug logging checkbox", f.user_edit("host_debug_logging", T));
+    f.param("host_debug_logging")->v[0] = 0;
+    f.user_edit("host_debug_logging", T);
+    after("regular preset (a look)", f.choose("host_preset", "Clean CRT", T));
+    after("regular preset again (same values)", f.choose("host_preset", "Clean CRT", T));
+    return steps;
+}
+
+std::string loop_steps_table(const std::vector<LoopEditStep> &steps, double T) {
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(0);
+    o << "frame " << T << ":\n";
+    for (const auto &s : steps)
+        o << "  " << s.what << ": echoes " << s.echoes << ", replays " << s.replays << ", earlier frames fetched "
+          << s.fetches << ", " << s.ms << " ms\n";
+    return o.str();
+}
+}  // namespace
+
+TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history only when they must") {
+    // NTSCRT_BENCH_SL_SIZE=WxH: another frame size (timings); NTSCRT_BENCH_SL_FRAMES=a,b: other playheads.
+    int w = 128, h = 72;
+    if (const char *e = std::getenv("NTSCRT_BENCH_SL_SIZE"); e && *e) std::sscanf(e, "%dx%d", &w, &h);
+    std::vector<double> frames = {100, 1850};
+    if (const char *e = std::getenv("NTSCRT_BENCH_SL_FRAMES"); e && *e) {
+        frames.clear();
+        std::istringstream in(e);
+        for (std::string x; std::getline(in, x, ',');) frames.push_back(std::atof(x.c_str()));
+    }
+    const bool bench = std::getenv("NTSCRT_BENCH_SL_SIZE") || std::getenv("NTSCRT_BENCH_SL_FRAMES");
+    std::string report;
+    for (double T : frames) {
+        LoopEditFixture f(w, h);
+        f.shot(0);  // warm-up: shaders
+        const auto steps = loop_edit_steps(f, T, !bench);
+        report += loop_steps_table(steps, T);
+        // Each render after an edit that changes what the loop shows re-runs it once (one loop per
+        // render scale: 2); an edit that changes nothing the loop depends on, or a setting tried
+        // before, re-runs nothing.
+        const std::map<std::string, int> want = {{"first render, Screen Loop preset A", 2},
+                                                 {"render again (nothing changed)", 0},
+                                                 {"Screen Loop preset B", 2},
+                                                 {"Screen Loop preset B again (same values)", 0},
+                                                 {"back to Screen Loop preset A", 0},
+                                                 {"Screen Loop zoom edit", 2},
+                                                 {"Digital video edit (off under Screen Loop)", 0},
+                                                 {"debug logging checkbox", 0},
+                                                 {"regular preset (a look)", 2},
+                                                 {"regular preset again (same values)", 0}};
+        REQUIRE(steps.size() == want.size());
+        for (const auto &st : steps) {
+            CAPTURE(T);
+            CAPTURE(st.what);
+            CHECK(st.replays == want.at(st.what));
+            CHECK(st.fetches == st.replays * int(T - (T < 480 ? 0 : (int64_t(T) / 240 - 1) * 240)));
+        }
+    }
+    MESSAGE(report);
+    std::printf("[timing] Screen Loop edits %dx%d\n%s", w, h, report.c_str());
+}

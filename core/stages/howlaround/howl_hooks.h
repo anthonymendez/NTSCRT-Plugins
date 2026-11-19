@@ -55,6 +55,10 @@ struct HowlHooks {
     // before (a temporal CRT preset the CRT stage can't reset each frame; none of
     // the bundled ones): the loop then keeps no checkpoints.
     std::function<bool()> tv_keeps_state;
+    // Optional: start render_tv's CRT copy over (as a cache flush does). Howlaround calls it when
+    // the Screen Loop settings change while tv_keeps_state() is true: then no loop is kept across
+    // the change (2026-11-18, agent e2: other loops are kept and taken back otherwise).
+    std::function<void()> tv_reset;
 };
 
 }  // namespace ntscrt

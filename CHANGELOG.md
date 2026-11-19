@@ -14,6 +14,15 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Fixed
+- **Screen Loop presets and edits no longer redo the loop's history when they don't have to:** choosing a
+  Screen Loop preset in the Inspector, then another, then going back to the first shows the first again at
+  once (the effect keeps the loops of the last few settings) instead of re-running up to 479 earlier frames,
+  each fetched from Resolve; choosing the preset that is already set, a regular preset with the values the
+  controls already have, or editing Digital video (off while Screen Loop is on) re-runs nothing. A preset or
+  edit that does change what the loop shows still re-runs it once for each size Resolve renders. Pictures are
+  unchanged.
+
 ## [0.5.0] - 2026-11-13
 
 Animated presets, the Digital video formats in the Preset menu and a second codec (Microsoft Video 1, for the
