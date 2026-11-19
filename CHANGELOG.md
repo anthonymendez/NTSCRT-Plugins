@@ -14,6 +14,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-19
+
 ### Fixed
 - **Screen Loop presets and edits no longer redo the loop's history when they don't have to:** choosing a
   Screen Loop preset in the Inspector, then another, then going back to the first shows the first again at
@@ -531,7 +533,8 @@ The macOS installer skips Final Cut Pro until a release includes it.
   `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log` / `~/Library/Logs/NTSCRT/ntscrt-ofx.log`, rotated at 1 MB.
   `NTSCRT_OFX_LOG=<file|off>` moves or disables it, `NTSCRT_OFX_LOG_VERBOSE=1` logs every frame.
 
-[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/anthonymendez/NTSCRT-Plugins/releases/tag/v0.3.0
