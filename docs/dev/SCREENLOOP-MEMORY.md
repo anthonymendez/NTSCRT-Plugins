@@ -162,12 +162,15 @@ Mock host (`test_ofx`, the sequence above with each plug-in write echoed back, r
 0.25; re-runs = renders that fetched earlier frames; `NTSCRT_BENCH_SL_SIZE=1920x1080 NTSCRT_BENCH_SL_FRAMES=1850`
 for the timings):
 
-| step at frame 1850 (1080p) | before: re-runs, earlier frames fetched, ms | after |
-|---|---|---|
-| Screen Loop preset B | 2, 820, 4000 | 2, 820, 4000 (needed) |
-| the same preset again | 2, 820, 4000 | 0, 0, 10 |
-| back to preset A | 2, 820, 5400 | 0, 0, 10 |
-| Screen Loop zoom edit | 2, 820, 5300 | 2, 820, 5300 (needed) |
-| Digital video edit | 2, 820, 5300 | 0, 0, 10 |
-| look preset (Clean CRT) | 2, 820, 5000 | 2, 820, 5000 (needed) |
-| the same look preset again | 2, 820, 5000 | 0, 0, 5 |
+| step (1080p) | frame 1850 before: re-runs, earlier frames fetched, ms | after | frame 100 before | after |
+|---|---|---|---|---|
+| Screen Loop preset B | 2, 820, 4386 | 2, 820, 4239 | 2, 200, 1202 | 2, 200, 1058 |
+| the same preset again | 2, 820, 4239 | 0, 0, 34 | 2, 200, 1135 | 0, 0, 34 |
+| back to preset A | 2, 820, 5548 | 0, 0, 39 | 2, 200, 1411 | 0, 0, 35 |
+| Screen Loop zoom edit | 2, 820, 5683 | 2, 820, 5332 | 2, 200, 1357 | 2, 200, 1310 |
+| Digital video edit | 2, 820, 5614 | 0, 0, 37 | 2, 200, 1339 | 0, 0, 35 |
+| look preset (Clean CRT) | 2, 820, 6200 | 2, 820, 6337 | 2, 200, 1799 | 2, 200, 1480 |
+| the same look preset again | 2, 820, 7091 | 0, 0, 41 | 2, 200, 1468 | 0, 0, 35 |
+
+(*before* = this test against the 0.5.0 plug-in, `NTSCRT_TEST_OFX_BINARY`; ms = the two renders after the edit; the
+re-runs left are the ones the edit needs.)
