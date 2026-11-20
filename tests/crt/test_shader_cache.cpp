@@ -256,10 +256,10 @@ void cache_case(gpu::Device &dev) {
     REQUIRE_MESSAGE(state.on, state.why);
     CHECK(fs::u8path(state.dir).parent_path() == root);
     CHECK(there(fs::u8path(state.dir) / "key.txt"));
-    CHECK(c1.writes - c0.writes > 20);
-    CHECK(c1.misses - c0.misses > 20);
+    CHECK(c1.writes - c0.writes > 10);  // macOS: SPIR-V only (15 for 5 presets)
+    CHECK(c1.misses - c0.misses > 10);
     const auto files = cache_files(root);
-    CHECK(files.size() > 20);
+    CHECK(files.size() > 10);
     MESSAGE(files.size() << " cached objects, " << (c1.writes - c0.writes) << " writes");
 
     {
@@ -330,7 +330,7 @@ void cache_case(gpu::Device &dev) {
     {
         INFO("a folder that disappears is no failure");
         fs::remove_all(root);
-        for (const char *id : {"aperture", "sim"}) CHECK(render(*d, *in, id) == ref[id]);
+        for (const char *id : {presets[0], presets[1]}) CHECK(render(*d, *in, id) == ref[id]);
         CHECK(!there(root));  // not created again behind the plug-in's back
     }
     fs::remove_all(root);
