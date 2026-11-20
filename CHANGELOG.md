@@ -39,8 +39,9 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 - **A new effect's first frame and the first frame of each CRT shader come much sooner.** The plug-in's own GPU
   code now comes compiled with it on Windows (compiling it took about 0.7 s on a new effect's first frame), and
   the CRT shaders it compiles are kept in a cache folder (`%LOCALAPPDATA%\NTSCRT\cache` on Windows,
-  `~/Library/Caches/NTSCRT` on macOS), so later sessions load them instead of compiling again: on a fast PC at
-  1080p, Royale's first frame went from about 0.7 s to 0.13 s, the other shaders from 0.1-0.2 s to 0.02-0.04 s.
+  `~/Library/Caches/NTSCRT` on macOS), so later sessions load them instead of compiling again. Measured in Resolve at 1080p on a fast PC: a new
+  effect's first frame went from 0.54 s to 0.025 s; Royale's first frame from 0.6 s to 0.17 s; the other
+  shaders' setup from 25-100 ms to 4-20 ms.
   Pictures are unchanged, byte for byte. The folder is safe to delete, shared safely by several Resolve windows,
   cleaned up by itself (256 MB at most; the seven shaders take about 1 MB), and a damaged or read-only folder
   just means compiling as before. `NTSCRT_SHADER_CACHE=0` turns it off or `=<folder>` moves it

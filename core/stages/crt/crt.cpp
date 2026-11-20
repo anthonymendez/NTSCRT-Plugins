@@ -218,7 +218,7 @@ struct CrtStage::Impl {
             lib->shader_cache_stats(h1, m1, w1);  // process-wide counters: other chains built meanwhile count too
             const crt::ShaderCacheState &cache = crt::configure_shader_cache(*lib, *dev);
             std::ostringstream n;
-            n << "crt_compile=" << u8str(fs::u8path(rel).stem()) << ":" << long(ms + 0.5) << "ms";
+            n << "crt_compile=" << u8str(p.stem()) << ":" << long(ms + 0.5) << "ms";
             if (cache.on) n << "(cache found " << (h1 - h0) << " compiled " << (m1 - m0) << ")";
             else n << "(cache off: " << cache.why << ")";
             compile_note += (compile_note.empty() ? "" : " ") + n.str();
