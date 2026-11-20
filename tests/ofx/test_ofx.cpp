@@ -2111,7 +2111,8 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
     // NTSCRT_BENCH_SL_SIZE=WxH: another frame size (timings); NTSCRT_BENCH_SL_FRAMES=a,b: other playheads.
     int w = 128, h = 72;
     if (const char *e = std::getenv("NTSCRT_BENCH_SL_SIZE"); e && *e) std::sscanf(e, "%dx%d", &w, &h);
-    std::vector<double> frames = {100, 1850};
+    // With the store on (its own ctest run) one playhead: its checks don't depend on how far in it is.
+    std::vector<double> frames = loop_store_on() ? std::vector<double>{100} : std::vector<double>{100, 1850};
     if (const char *e = std::getenv("NTSCRT_BENCH_SL_FRAMES"); e && *e) {
         frames.clear();
         std::istringstream in(e);
@@ -2273,18 +2274,18 @@ TEST_CASE("Screen Loop: an animated preset's look (no keyframes) through re-runs
     // (from the store of source frames when it is on: test_ofx_screenloop_store); every picture is
     // a clean instance's.
     LoopEditFixture f(128, 72);
-    const double T = 600;
+    const double T = 150;  // inside the first two windows: the loop runs from frame 0
     f.shot(0);
     f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
     f.choose("host_preset", "Glitch pop", T);
     REQUIRE_FALSE(f.param("host_animation")->str.empty());
     const auto first = f.shot(T);
-    CHECK(first.fetches == int(T) - 240);
+    CHECK(first.fetches == int(T));
     CHECK(first.px == f.clean(T));
     f.param("screenloop_zoom")->v[0] = 0.5;
     f.user_edit("screenloop_zoom", T);
     const auto edited = f.shot(T);
-    CHECK(edited.fetches == (loop_store_on() ? 0 : int(T) - 240));
+    CHECK(edited.fetches == (loop_store_on() ? 0 : int(T)));
     CHECK(edited.px == f.clean(T));
     const auto next = f.shot(T + 1);
     CHECK(next.fetches == 0);
