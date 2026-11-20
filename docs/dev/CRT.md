@@ -18,7 +18,9 @@ Cur = saturate(max(Cur, Persistence * 10 / (1 + 2 * Bleed) * (Prev + Bleed * (Pr
 ```
 
 Royale, aperture, easymode, glow_gauss, glow_lanczos and hyllian read nothing from earlier frames
-(`test_crt_order` checks all 7, with the plug-in's default look and alone).
+(`test_crt_order` checks all 7, with the plug-in's default look and alone). Since 2026-11-20 sim doesn't load
+crtsim's own `.slangp` but our `crt/crtsim-single.slangp`, which reads nothing from earlier frames either
+(see "One chain frame" below).
 
 ## The bug (fixed 2026-11-12)
 
@@ -64,14 +66,67 @@ output byte depends on it. Parameter values for the reset live in `feedback_rese
 
 On Metal a `Device::finish()` separates the two frames (point 3). With a host's own Metal command buffer
 (`ntscrt_render_metal`, not used by the OpenFX plug-in) the stage can't wait, so there the reset frame may run
-with the frame's uniforms.
+with the frame's uniforms. (Both only with `NTSCRT_SIM_SINGLE=0` since the single chain frame below: one frame
+has no second encode to wait for.)
 
 A temporal preset with no entry in `feedback_resets()` (none bundled: only a `.slangp` added to the resources)
 keeps the old prime-on-seek path, which is not order-independent; `CrtStage::ran_temporal_preset()` then tells
 Screen Loop to keep no checkpoints. With crtsim, Screen Loop now keeps its checkpoints (its TV pictures are a
 function of the pass).
 
-## What it costs
+## One chain frame (2026-11-20)
+
+The rule above rendered every sim frame twice on the chain, and the two pictures were the same frame. Now
+one chain frame gives the same bytes. Clearing the feedback ourselves (or patching librashader so
+`clear_history` clears `feedback_framebuffers` too) would not: a zeroed `PassFeedback0` gives
+`max(Cur, 0) = Cur`, the *reset* frame's picture, while the rule's frame reads the reset frame's composite
+output as its previous frame (its own afterglow and bleed). What the second frame needs is that picture, made
+in the same chain frame. So sim (`kPresets` still says `crt/crtsim.slangp`; `chain_file()` in `crt.cpp` swaps
+the file) loads **`crt/crtsim-single.slangp`** (`core/stages/crt/slang/`, copied into
+`<resources>/shaders/` next to the vendored files by `copy_resources.cmake`), crtsim with one pass more:
+
+| pass | shader | what it does |
+| --- | --- | --- |
+| 0 | `crtsim-single/prime.slang` | composite as the reset frame ran it: persistence 0 (a constant), frame count n - 1 (0 stays 0) for the NTSC artifact phase; its "previous frame" is `Source`, multiplied by 0 |
+| 1 | `crtsim-single/composite.slang` | composite as the frame ran it: current frame `Original`, previous frame `PassOutput0` (pass 0) |
+| 2-5 | crtsim's `screen`, `post-downsample`, `post-upsample`, `present` | unchanged (`CRTPASS` alias, `Original`) |
+
+Both new files are crtsim's `composite.slang` (CC0) changed only on the lines marked `NTSCRT`. Why it is the
+same bytes: pass 0 renders into an RGBA8 framebuffer of the input's size with nearest filtering, exactly
+what the reset frame wrote into composite's feedback framebuffer (same size, format, filter and wrap: librashader
+binds `PassOutput0` and `PassFeedback0` with the producing pass's filter / wrap, and `Original` with pass 0's,
+which is nearest as composite's `Source` was); pass 1 runs composite's code on the same input, parameters and
+frame count. The alpha channel differs (pass 0 reads `Source.a` where the reset frame read the feedback's
+alpha), but as above no output byte reads composite's alpha. Nothing reads an earlier frame, so
+`uses_history()` is false: sim's chain is now shared between instances on D3D11 like the other presets, needs no
+`Device::finish()` on Metal, and `ran_temporal_preset()` stays false as before.
+
+`NTSCRT_SIM_SINGLE=0` (read when a chain is made) loads crtsim's own `.slangp` with the two-frame rule again,
+for comparison; `test_crt_order` "sim: one chain frame renders the two-frame reset's bytes" compares the two
+(4 sim looks x 5 frames, 0, 1, 2, 75, 1850: both artifact phases, x 200x150 and 1280x720, the second supersampled;
+the single-frame instance renders them backwards). Changing pass 0's frame count to n makes it fail (7,000-8,000
+of 120,000 values per frame), so it does see the difference. In Resolve (headless, `--parity --parity-groups crt
+--parity-configs cpu,gpu`, run once as is and once with `NTSCRT_SIM_SINGLE=0`) all 134 frames of the two runs,
+the 18 sim ones included, decode to the same pixels; `--only order` (now with an `order:sim` case: 16 frames
+in order, then 6 of them out of order in a fresh tool) gives the same pixels for every sim frame.
+
+What it saves (RTX 5090, Release, the GPU shared with other work at ~90% load, so medians swung 2-4x;
+the minimum of 8 interleaved runs' medians is the steady figure). The stage alone (`test_crt "CRT frame timings"`,
+`NTSCRT_CRT_TIMINGS=1`, one frame finished on the GPU), `NTSCRT_SIM_SINGLE=0` -> default:
+
+| chain input -> output | played | sought (every other frame) |
+| --- | --- | --- |
+| 640x480 -> 3840x2160 | 0.326 -> 0.248 ms | 0.317 -> 0.240 ms |
+| 640x480 -> 1920x1080 | 0.253 -> 0.171 ms | 0.238 -> 0.173 ms |
+| 1920x1080 -> 3840x2160 | 0.334 -> 0.265 ms | 0.338 -> 0.227 ms |
+| 1920x1080 -> 1920x1080 | 0.273 -> 0.200 ms | 0.266 -> 0.191 ms |
+
+Through the whole pipeline (`bench_transfer --looks shader:sim --formats rgba32f`, `NTSCRT_PROFILE=1`, its
+`crt_median_ms`: the timings note's `crt=` with the GPU waited for; best of 3 interleaved runs, played): UHD
+0.32 -> 0.24 ms, 1080p 0.21 -> 0.17 ms. Every case's last frame (UHD and 1080p, played and sought, sim and the
+default look) is byte-identical between the two (`--dump`).
+
+## What the rule cost (2026-11-12)
 
 RTX 5090, Release. The stage alone (`test_crt "CRT frame timings"`, `NTSCRT_CRT_TIMINGS=1`; one frame finished
 on the GPU, median of 100; sim from a 640x480 chain input), before -> after:
@@ -105,6 +160,9 @@ where the old one showed the previous frames' noise).
   for byte with the same frames after another frame, repeated (2nd, 3rd), backwards, forwards and interleaved
   between two instances. It writes every frame's hash; `test_crt_order_unshared` (second process,
   `NTSCRT_SHARED_CHAINS=0`) checks its own against them. Before the fix: 83 of 1168 checks failed, all sim.
+- `test_crt_order` "sim: one chain frame renders the two-frame reset's bytes": `crt/crtsim-single.slangp`
+  against crtsim's own preset with the two-frame rule (`NTSCRT_SIM_SINGLE=0`), byte for byte.
 - `tests/howlaround/test_howl_seek.cpp`: Screen Loop with sim renders the same with and without checkpoints.
+- Resolve: `run_resolve_tests.py --only order` has an `order:sim` case (sim frames out of order in a fresh tool).
 - Resolve: the parity suite's sim cases are in the `cpu2` session too (`tags: noise`), so `cpu2-vs-cpu` checks
   them across sessions; `--parity-groups crt` runs the CRT cases only.

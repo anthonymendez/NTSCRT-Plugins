@@ -42,6 +42,7 @@ Setting one for Resolve:
 | `NTSCRT_READBACK_BANDS` | a number | Bands of rows the result is read back in: the transfer of the next band overlaps the conversion of this one. Default one per ~16 MB, at most 8 (4 for a UHD float frame); `1` = no overlap. |
 | `NTSCRT_SHARED_DEVICE` | `0` | Each effect creates its own GPU device and compiled kernels instead of sharing one per process. |
 | `NTSCRT_SHARED_CHAINS` | `0` | Each effect compiles its own CRT shader chain instead of sharing one per GPU device and preset (Windows; on macOS chains are never shared). |
+| `NTSCRT_SIM_SINGLE` | `0` | The Sim CRT shader draws each frame twice as 0.5.3 did (crtsim's own preset, a reset frame then the frame) instead of once; same picture, for comparison ([docs/dev/CRT.md](dev/CRT.md)). |
 | `NTSCRT_LIBRASHADER` | a file path | librashader library to try before the one in the bundle. |
 | `NTSCRT_D3D11_WARP` | `1` | Windows: use Microsoft's software renderer (WARP) instead of the GPU. |
 | `NTSCRT_D3D11_NO_FENCE` | set (any value) | Windows: wait for the GPU with a query instead of a Direct3D 11.4 fence. |

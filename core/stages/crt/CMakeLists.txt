@@ -4,7 +4,8 @@
 # (default <build>/resources):
 #   librashader.dll | librashader.dylib   cargo-built from vendor/librashader
 #   shaders/...                           files of resources/shader-manifest.txt,
-#                                         copied from vendor/slang-shaders
+#                                         copied from vendor/slang-shaders, and
+#                                         this directory's slang/ (our own: crtsim-single)
 #   presets/...                           the bundled look presets
 # Host packaging (OFX bundle, FxPlug) copies that directory into the plugin's
 # resource dir; `install()` puts it under <prefix>/resources.
@@ -125,15 +126,18 @@ set(shader_srcs)
 foreach(f ${shader_files})
   list(APPEND shader_srcs ${NTSCRT_SLANG_SHADERS_DIR}/${f})
 endforeach()
+# Our own shader files (slang/, laid out like vendor/slang-shaders), next to them.
+file(GLOB_RECURSE own_shader_files CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/slang/*)
 # CONFIGURE_DEPENDS: a preset added by an upstream sync is picked up without a manual re-configure.
 file(GLOB_RECURSE preset_files CONFIGURE_DEPENDS ${NTSCRT_ROOT}/presets/*.json)
 set(stamp ${CMAKE_BINARY_DIR}/ntscrt_resources.stamp)
 add_custom_command(OUTPUT ${stamp}
   COMMAND ${CMAKE_COMMAND} -DMANIFEST=${manifest} -DSRC=${NTSCRT_SLANG_SHADERS_DIR} -DDST=${res}/shaders
+          -DEXTRA=${CMAKE_CURRENT_SOURCE_DIR}/slang
           -DPRESETS=${NTSCRT_ROOT}/presets -DPRESETS_DST=${res}/presets
           -P ${CMAKE_CURRENT_SOURCE_DIR}/copy_resources.cmake
   COMMAND ${CMAKE_COMMAND} -E touch ${stamp}
-  DEPENDS ${manifest} ${shader_srcs} ${preset_files} ${CMAKE_CURRENT_SOURCE_DIR}/copy_resources.cmake
+  DEPENDS ${manifest} ${shader_srcs} ${own_shader_files} ${preset_files} ${CMAKE_CURRENT_SOURCE_DIR}/copy_resources.cmake
   COMMENT "Assembling ${res} (CRT shader subset, presets)"
   VERBATIM)
 

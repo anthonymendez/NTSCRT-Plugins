@@ -75,8 +75,9 @@ const std::map<std::string, std::map<std::string, float>> &house_defaults() {
 }
 
 // Does any pass read the previous frame (PassFeedbackN / OriginalHistoryN /
-// <alias>Feedback)? Those presets are temporal (of the 7 bundled: crtsim, whose
-// feedback shade() resets every frame: feedback_resets below).
+// <alias>Feedback)? Those presets are temporal (of the 7 bundled: crtsim's own
+// .slangp, whose feedback shade() resets every frame: feedback_resets below;
+// by default crtsim loads crt/crtsim-single.slangp, which isn't: chain_file).
 bool uses_history(const fs::path &slangp) {
     std::ifstream f(slangp);
     std::string line;
@@ -94,7 +95,8 @@ bool uses_history(const fs::path &slangp) {
 }
 
 // Temporal presets whose passes can be told to ignore what they read from the
-// previous frame, and the parameter values that do it. A frame rendered with
+// previous frame, and the parameter values that do it (crtsim: only with
+// NTSCRT_SIM_SINGLE=0; crt/crtsim-single.slangp's pass 0 does the same in-frame). A frame rendered with
 // these values leaves the chain's feedback holding a picture that depends on
 // that frame's input alone, exactly the picture a zeroed feedback gives
 // (librashader's clear_history clears OriginalHistory only, never the
@@ -108,6 +110,19 @@ const std::map<std::string, std::map<std::string, float>> &feedback_resets() {
         {"crt/crtsim.slangp", {{"Tuning_Persistence_R", 0.f}, {"Tuning_Persistence_G", 0.f}, {"Tuning_Persistence_B", 0.f}}},
     };
     return m;
+}
+
+// The .slangp a preset's chain loads. crtsim's own preset needs two chain
+// frames per frame (the reset frame, then the frame: shade()); our
+// crt/crtsim-single.slangp (core/stages/crt/slang/) renders the same bytes in
+// one, reading no earlier frame (docs/dev/CRT.md, "One chain frame").
+// NTSCRT_SIM_SINGLE=0 (read when a chain is made): crtsim's own, two frames.
+std::string chain_file(const std::string &rel) {
+    if (rel == "crt/crtsim.slangp") {
+        const char *e = std::getenv("NTSCRT_SIM_SINGLE");
+        if (!(e && *e == '0')) return "crt/crtsim-single.slangp";
+    }
+    return rel;
 }
 
 // One librashader chain and the parameter values it holds now.
@@ -184,7 +199,7 @@ struct CrtStage::Impl {
         std::string err;
         crt::Library *lib = crt::Library::load(resource_dir, err);
         if (!lib) throw MissingResource(err);
-        fs::path p = fs::u8path(resource_dir) / "shaders" / fs::u8path(rel);
+        fs::path p = fs::u8path(resource_dir) / "shaders" / fs::u8path(chain_file(rel));
         std::error_code ec;
         if (!fs::exists(p, ec)) throw MissingResource("shader preset missing: " + u8str(p));
         CachedChain c;

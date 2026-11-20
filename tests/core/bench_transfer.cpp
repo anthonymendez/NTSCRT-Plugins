@@ -325,6 +325,7 @@ int main(int argc, char **argv) {
                 std::vector<ntscrt::testing::PhaseTimes> ph;
                 int failures = 0, gpu_route = 0, digital_gpu = 0;
                 std::vector<double> tables_ms;
+                std::vector<double> crt_ms;  // the timings note's crt= (with NTSCRT_PROFILE=1: GPU time too)
                 std::map<std::string, std::vector<double>> stage_ms, digital_ms;
                 std::string err;
                 const int64_t first = next_frame;
@@ -355,6 +356,7 @@ int main(int argc, char **argv) {
                         // GPU NTSC: the CPU time of its plan + tables, and (NTSCRT_PROFILE=1)
                         // the GPU time per pass, summed per stage name.
                         if (const char *q = std::strstr(tm, " ntsc_tables_ms=")) tables_ms.push_back(std::atof(q + 16));
+                        if (const char *q = std::strstr(tm, " crt=")) crt_ms.push_back(std::atof(q + 5));
                         if (const char *q = std::strstr(tm, " ntsc_gpu=")) {
                             std::string list(q + 10);
                             list = list.substr(0, list.find(' '));
@@ -431,6 +433,7 @@ int main(int argc, char **argv) {
                 pj["ntsc"] = std::round(r.ntsc * 1000) / 1000;
                 j["phases_median_ms"] = pj;
                 j["ntsc_gpu_frames"] = gpu_route;
+                if (!crt_ms.empty()) j["crt_median_ms"] = std::round(pct(crt_ms, 0.5) * 1000) / 1000;
                 if (!tables_ms.empty()) j["ntsc_tables_median_ms"] = std::round(pct(tables_ms, 0.5) * 1000) / 1000;
                 if (!stage_ms.empty()) {
                     json sj = json::object();

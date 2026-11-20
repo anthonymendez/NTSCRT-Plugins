@@ -1,8 +1,9 @@
 # Script mode (cmake -P) starts with old policies: use modern ones (IN_LIST etc.).
 cmake_policy(VERSION 3.24)
-# cmake -DMANIFEST= -DSRC= -DDST= -DPRESETS= -DPRESETS_DST= -P copy_resources.cmake
-# Copies the manifest's files from SRC to DST keeping relative paths (and
-# removes files no longer listed), then mirrors PRESETS into PRESETS_DST.
+# cmake -DMANIFEST= -DSRC= -DDST= [-DEXTRA=] -DPRESETS= -DPRESETS_DST= -P copy_resources.cmake
+# Copies the manifest's files from SRC to DST keeping relative paths, then every
+# file under EXTRA (this project's own shader files, e.g. crt/crtsim-single.slangp)
+# likewise (and removes files no longer listed), then mirrors PRESETS into PRESETS_DST.
 file(STRINGS ${MANIFEST} files REGEX "^[^#]")
 set(keep)
 foreach(f ${files})
@@ -14,6 +15,15 @@ foreach(f ${files})
   file(COPY_FILE ${SRC}/${f} ${DST}/${f} ONLY_IF_DIFFERENT)
   list(APPEND keep ${DST}/${f})
 endforeach()
+if(EXTRA)
+  file(GLOB_RECURSE extra RELATIVE ${EXTRA} ${EXTRA}/*)
+  foreach(f ${extra})
+    get_filename_component(d ${DST}/${f} DIRECTORY)
+    file(MAKE_DIRECTORY ${d})
+    file(COPY_FILE ${EXTRA}/${f} ${DST}/${f} ONLY_IF_DIFFERENT)
+    list(APPEND keep ${DST}/${f})
+  endforeach()
+endif()
 file(GLOB_RECURSE existing ${DST}/*)
 foreach(e ${existing})
   if(NOT e IN_LIST keep)

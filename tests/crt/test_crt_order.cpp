@@ -34,7 +34,7 @@ const int kFrames[] = {0, 75, 1850};  // the first frame, one in, one past a Gli
 const char *kPresetIds[] = {"aperture", "easymode", "glow_gauss", "glow_lanczos", "hyllian", "royale", "sim"};
 
 // RGBA32F, top row first; content moves with the frame so frames differ.
-std::vector<float> source(int frame) {
+std::vector<float> source(int frame, int W = ::W, int H = ::H) {
     std::vector<float> px(size_t(W) * H * 4);
     for (int y = 0; y < H; ++y)
         for (int x = 0; x < W; ++x) {
@@ -72,8 +72,8 @@ struct Instance {
     Instance(const Instance &) = delete;
     Instance &operator=(const Instance &) = delete;
 
-    std::vector<float> render(const std::string &look, int frame) {
-        std::vector<float> src = source(frame), out(size_t(W) * H * 4, -1.f);
+    std::vector<float> render(const std::string &look, int frame, int W = ::W, int H = ::H) {
+        std::vector<float> src = source(frame, W, H), out(size_t(W) * H * 4, -1.f);
         ntscrt_render_args ra{};
         ra.frame_index = frame;
         ra.fps = kFps;
@@ -234,4 +234,57 @@ TEST_CASE("a frame's CRT picture doesn't depend on the render order") {
             if (theirs.count(k)) CHECK_MESSAGE(theirs[k] == h, "differs from the other process (shared chains)");
         }
     }
+}
+
+namespace {
+void set_env(const char *k, const char *v) {
+#ifdef _WIN32
+    _putenv_s(k, v ? v : "");
+#else
+    if (v) setenv(k, v, 1);
+    else unsetenv(k);
+#endif
+}
+}  // namespace
+
+// crtsim in one chain frame (crt/crtsim-single.slangp, the default) gives the
+// bytes of crtsim's own preset in two (the reset frame, then the frame;
+// NTSCRT_SIM_SINGLE=0): docs/dev/CRT.md, "One chain frame". Even and odd frame
+// counts (the NTSC artifacts alternate), and a size that supersamples.
+TEST_CASE("sim: one chain frame renders the two-frame reset's bytes") {
+    std::vector<Look> sims;
+    for (const Look &l : looks())
+        if (l.name.rfind("sim ", 0) == 0) sims.push_back(l);
+    if (sims.empty()) return;  // macOS CI runner
+    const char *was = std::getenv("NTSCRT_SIM_SINGLE");
+    const std::string saved = was ? was : "";
+    struct Size {
+        int w, h;
+    };
+    const Size sizes[] = {{W, H}, {1280, 720}};
+    const int frames[] = {0, 1, 2, 75, 1850};
+    size_t checked = 0;
+    for (const Look &lk : sims)
+        for (const Size &sz : sizes) {
+            CAPTURE(lk.name);
+            CAPTURE(sz.w);
+            std::map<int, std::vector<float>> two;
+            set_env("NTSCRT_SIM_SINGLE", "0");
+            {
+                Instance a;
+                for (int f : frames) two[f] = a.render(lk.json, f, sz.w, sz.h);
+            }
+            set_env("NTSCRT_SIM_SINGLE", "1");
+            Instance b;  // played in another order, as a host would
+            for (int i = int(std::size(frames)) - 1; i >= 0; --i) {
+                const int f = frames[i];
+                const std::vector<float> one = b.render(lk.json, f, sz.w, sz.h);
+                CAPTURE(f);
+                CHECK_MESSAGE(values_off(two[f], one) == 0, values_off(two[f], one) << " of " << one.size()
+                                                                                   << " values differ");
+                ++checked;
+            }
+        }
+    set_env("NTSCRT_SIM_SINGLE", was ? saved.c_str() : nullptr);
+    MESSAGE(checked << " sim frames compared");
 }
