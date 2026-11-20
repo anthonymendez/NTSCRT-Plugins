@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -44,16 +45,31 @@ std::string u8str(const fs::path &p) {
     return std::string(s.begin(), s.end());
 }
 
-// "<size> <write time>" of a file, "?" if unknown.
+// "<size> <hash of the contents>" of a file, "?" if unreadable. The contents, not the
+// file time: a reinstall or a copied bundle (the Resolve tests copy it) is the same
+// library. Once per process, ~16 MB in all (librashader, d3dcompiler_47): ~10 ms.
 std::string file_stamp(const fs::path &p) {
-    std::error_code ec, ec2;
-    auto size = fs::file_size(p, ec);
-    auto time = fs::last_write_time(p, ec2);
-    if (ec || ec2) return "?";
-    // As nanoseconds: libc++'s file_time_type counts in __int128.
-    const long long ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
-    return std::to_string(size) + " " + std::to_string(ns);
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return "?";
+    uint64_t h = 1469598103934665603ull, size = 0;
+    std::vector<char> buf(1 << 20);
+    while (f) {
+        f.read(buf.data(), std::streamsize(buf.size()));
+        const size_t n = size_t(f.gcount());
+        size_t i = 0;
+        for (; i + 8 <= n; i += 8) {
+            uint64_t w;
+            std::memcpy(&w, buf.data() + i, 8);
+            h = (h ^ w) * 1099511628211ull;
+            h ^= h >> 29;
+        }
+        for (; i < n; ++i) h = (h ^ static_cast<unsigned char>(buf[i])) * 1099511628211ull;
+        size += n;
+    }
+    char out[48];
+    std::snprintf(out, sizeof out, "%llu %016llx", static_cast<unsigned long long>(size),
+                  static_cast<unsigned long long>(h));
+    return out;
 }
 
 uint64_t fnv1a64(std::string_view s) {

@@ -6,7 +6,7 @@
 //   Windows %LOCALAPPDATA%\NTSCRT\cache, macOS ~/Library/Caches/NTSCRT,
 //   else $XDG_CACHE_HOME/ntscrt (~/.cache/ntscrt).
 // Inside it, one sub-folder per key, "shaders-<hash>", the hash of: the plug-in
-// version, the librashader library (ABI / API version, file size and time) and, on
+// version, the librashader library (ABI / API version, file size and contents) and, on
 // Windows, d3dcompiler_47.dll and the GPU and its driver version; macOS: the OS
 // release (the cached SPIR-V doesn't depend on the GPU there). Any of them changing
 // starts an empty folder; folders not used for 7 days are removed, and the files
