@@ -2267,6 +2267,31 @@ TEST_CASE("old projects: opening the panel keeps the saved values and stays boun
     CHECK(ui_sets() == ui1);
 }
 
+TEST_CASE("Screen Loop: an animated preset's look (no keyframes) through re-runs and the source store") {
+    // The look of earlier frames comes from the preset's animation (host_animation), not from
+    // keyframes: the loop's history frames use their own frame's look; an edit re-runs the window
+    // (from the store of source frames when it is on: test_ofx_screenloop_store); every picture is
+    // a clean instance's.
+    LoopEditFixture f(128, 72);
+    const double T = 600;
+    f.shot(0);
+    f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
+    f.choose("host_preset", "Glitch pop", T);
+    REQUIRE_FALSE(f.param("host_animation")->str.empty());
+    const auto first = f.shot(T);
+    CHECK(first.fetches == int(T) - 240);
+    CHECK(first.px == f.clean(T));
+    f.param("screenloop_zoom")->v[0] = 0.5;
+    f.user_edit("screenloop_zoom", T);
+    const auto edited = f.shot(T);
+    CHECK(edited.fetches == (loop_store_on() ? 0 : int(T) - 240));
+    CHECK(edited.px == f.clean(T));
+    const auto next = f.shot(T + 1);
+    CHECK(next.fetches == 0);
+    CHECK(next.px == f.clean(T + 1));
+    CHECK(f.shot(T - 45).px == f.clean(T - 45));  // back: from a checkpoint
+}
+
 TEST_CASE("Screen Loop: a render the host aborts drops only the loop it was running") {
     // Resolve aborts a render it no longer needs (a newer edit): the loop that render was re-running
     // stood in pictures for the frames it skipped and must go, but the loops of the settings before
