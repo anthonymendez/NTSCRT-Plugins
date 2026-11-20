@@ -13,6 +13,7 @@
 // so a value from an earlier frame never leaks into this one.
 #include <ntscrt/ntscrt.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <cstdlib>
@@ -21,11 +22,13 @@
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 #include "../downscale/downscale_kernels.h"
 #include "../stages.h"
 #include "crt_libra.h"
 #include "crt_sizing.h"
+#include "shader_cache.h"
 
 namespace fs = std::filesystem;
 
@@ -184,6 +187,7 @@ struct CrtStage::Impl {
     int fb_status = 0;
     std::string fb_reason;
     size_t attempts = 0;
+    std::string compile_note;  // a chain was built: how long it took (take_compile_note)
 
     std::shared_ptr<gpu::Texture> &tex(std::shared_ptr<gpu::Texture> &slot, int w, int h, gpu::Format f) {
         if (!slot || slot->desc().width != w || slot->desc().height != h || slot->desc().format != f)
@@ -205,8 +209,19 @@ struct CrtStage::Impl {
         CachedChain c;
         c.history = uses_history(p);
         auto make = [&] {
+            uint64_t h0, m0, w0, h1, m1, w1;
+            lib->shader_cache_stats(h0, m0, w0);
+            const auto t0 = std::chrono::steady_clock::now();
             auto b = std::make_shared<ChainBox>();
             b->chain = lib->create_chain(*dev, u8str(p));
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            lib->shader_cache_stats(h1, m1, w1);  // process-wide counters: other chains built meanwhile count too
+            const crt::ShaderCacheState &cache = crt::configure_shader_cache(*lib, *dev);
+            std::ostringstream n;
+            n << "crt_compile=" << u8str(fs::u8path(rel).stem()) << ":" << long(ms + 0.5) << "ms";
+            if (cache.on) n << "(cache found " << (h1 - h0) << " compiled " << (m1 - m0) << ")";
+            else n << "(cache off: " << cache.why << ")";
+            compile_note += (compile_note.empty() ? "" : " ") + n.str();
             return b;
         };
         // D3D11 only: librashader's D3D11 runtime writes each pass's uniforms
@@ -420,6 +435,7 @@ void CrtStage::flush() {
 int CrtStage::fallback_status() const { return impl_->fb_status; }
 const std::string &CrtStage::fallback_reason() const { return impl_->fb_reason; }
 size_t CrtStage::chain_load_attempts() const { return impl_->attempts; }
+std::string CrtStage::take_compile_note() { return std::exchange(impl_->compile_note, std::string()); }
 bool CrtStage::ran_temporal_preset() const { return impl_->ran_temporal; }
 
 }  // namespace ntscrt

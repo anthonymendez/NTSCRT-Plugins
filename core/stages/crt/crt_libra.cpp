@@ -15,6 +15,8 @@
 
 #include <librashader.h>  // core types only; runtime functions live in the backend files
 
+#include "shader_cache.h"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -179,7 +181,14 @@ void Library::free_preset(void *preset) {
     if (f && p) f(&p);
 }
 
+void Library::shader_cache_stats(uint64_t &hits, uint64_t &misses, uint64_t &writes) const {
+    hits = misses = writes = 0;
+    if (auto f = reinterpret_cast<void (*)(uint64_t *, uint64_t *, uint64_t *)>(sym("ntscrt_libra_cache_stats")))
+        f(&hits, &misses, &writes);
+}
+
 std::unique_ptr<Chain> Library::create_chain(gpu::Device &dev, const std::string &preset_path) {
+    shader_cache_on = configure_shader_cache(*this, dev).on;
     if (dev.backend() == gpu::Backend::D3D11) return create_d3d11_chain(*this, dev, preset_path);
     return create_metal_chain(*this, dev, preset_path);
 }

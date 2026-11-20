@@ -58,9 +58,13 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ## librashader (the CRT shader runtime)
 
-- **What:** `librashader.dll` (Windows) / `librashader.dylib` (macOS), built unmodified from
+- **What:** `librashader.dll` (Windows) / `librashader.dylib` (macOS), built from
   SnowflakePowered/librashader at commit `76462c030b75c4f2d56e5386c3d4d7d1128318b8` (the
-  `vendor/librashader` submodule) with
+  `vendor/librashader` submodule), with the changes of `rust/librashader-patch/` (applied to a copy
+  at build time: its shader cache keeps compiled shaders as checked files in a folder the plug-in
+  chooses, in the new file `librashader-cache/src/store.rs`, instead of its database; and the Metal
+  runtime uses that cache too; changed files: `librashader-cache/src/{lib,cache,compilation}.rs`,
+  `librashader-runtime-mtl/src/filter_chain.rs`, `librashader-runtime-mtl/Cargo.toml`, `Cargo.lock`), with
   `cargo build --release --locked -p librashader-capi --no-default-features --features stable,runtime-d3d11`
   on Windows and `--features stable,runtime-metal` on macOS (see `core/stages/crt/CMakeLists.txt`).
   The plug-ins also compile against its C API headers (`include/librashader.h`,
@@ -70,7 +74,9 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
   librashader's files only, not the plug-ins' code. The C API headers are MIT, Copyright 2022
   chyyran, with the notice kept in the files.
 - **Source Code Form:** https://github.com/SnowflakePowered/librashader/tree/76462c030b75c4f2d56e5386c3d4d7d1128318b8
-  (also in this repository as the `vendor/librashader` submodule).
+  (also in this repository as the `vendor/librashader` submodule), plus this repository's
+  `rust/librashader-patch/` (`apply.cmake` makes the modified files from it; `store.rs` is under
+  librashader's licence, MPL-2.0 OR GPL-3.0-only, like the files it joins).
 
 ## Rust crates inside the two Rust builds
 

@@ -2391,3 +2391,65 @@ TEST_CASE("Digital video: an animated preset that moves Digital values keeps jum
         CHECK(f.shot(t).px == f.clean(t));
     }
 }
+
+// First frames at 1920x1080, by hand (NTSCRT_FIRSTFRAME_TIMINGS=1): a new effect's first
+// render with the CRT shader off (the GPU device, the plug-in's kernels), then the first
+// render after choosing each CRT shader (its build: librashader's compile or its cache).
+// Run it twice with one NTSCRT_SHADER_CACHE folder, empty the first time, for cold and
+// warm numbers; NTSCRT_SHADER_CACHE=0 NTSCRT_PRECOMPILED_KERNELS=0 for the old behaviour.
+TEST_CASE("first frames at 1080p (timings)" * doctest::skip(std::getenv("NTSCRT_FIRSTFRAME_TIMINGS") == nullptr)) {
+    Fixture f;
+    f.create();
+    const int w = 1920, h = 1080;
+    mock::Clip &src = *f.inst->clips[kOfxImageEffectSimpleSourceClipName];
+    mock::Clip &dst = *f.inst->clips[kOfxImageEffectOutputClipName];
+    src.width = dst.width = w;
+    src.height = dst.height = h;
+    src.any_frame.resize(size_t(w) * h * 4);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float *p = &src.any_frame[(size_t(y) * w + x) * 4];
+            p[0] = x / float(w - 1);
+            p[1] = y / float(h - 1);
+            p[2] = float((x / 16 + y / 16) % 2);
+            p[3] = 1.f;
+        }
+    dst.any_frame.assign(src.any_frame.size(), 0.f);
+    src.any_frame_last = dst.any_frame_last = 1000;
+    src.props.set(kOfxImageEffectPropFrameRange, {0.0, 1000.0});
+    auto render = [&](double t) {
+        mock::PropSet in;
+        in.set(kOfxPropTime, {t});
+        in.set(kOfxImageEffectPropFieldToRender, {std::string(kOfxImageFieldNone)});
+        in.set(kOfxImageEffectPropRenderWindow, {0, 0, w, h});
+        in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
+        in.set(kOfxImageEffectPropSequentialRenderStatus, {0});
+        in.set(kOfxImageEffectPropInteractiveRenderStatus, {1});
+        in.set(kOfxImageEffectPropRenderQualityDraft, {0});
+        auto t0 = std::chrono::steady_clock::now();
+        REQUIRE(f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in) == kOfxStatOK);
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+    f.param("crt_enabled")->v[0] = 0;
+    REQUIRE(f.changed("crt_enabled", 1) == kOfxStatOK);
+    std::ostringstream report;
+    report << "first render (CRT off) " << long(render(1)) << " ms, next " << long(render(2)) << " ms";
+    f.param("crt_enabled")->v[0] = 1;
+    REQUIRE(f.changed("crt_enabled", 3) == kOfxStatOK);
+    mock::Param *crt = f.param("crt_preset");
+    for (int i = 0; i < crt->props.dim(kOfxParamPropChoiceOption); ++i) {
+        crt->v[0] = i;
+        REQUIRE(f.changed("crt_preset", 10 + 2 * i) == kOfxStatOK);
+        const double first = render(10 + 2 * i), next = render(11 + 2 * i);
+        report << "; " << crt->props.s(kOfxParamPropChoiceOption, i) << " " << long(first) << " ms (next "
+               << long(next) << ")";
+    }
+    const char *cache = std::getenv("NTSCRT_SHADER_CACHE");
+    MESSAGE("NTSCRT_SHADER_CACHE=" << std::string(cache ? cache : "") << ": " << report.str());
+    const std::string log = read_log();
+    size_t at = 0;
+    while ((at = log.find("crt_compile=", at)) != std::string::npos) {
+        MESSAGE(log.substr(at, log.find(')', at) + 1 - at));
+        ++at;
+    }
+}

@@ -330,6 +330,10 @@ Details: [docs/RELEASING.md](docs/RELEASING.md#what-a-release-contains-and-how-t
 - **Let effect spill** shows the spill as light over the video underneath (like a Screen blend).
 - Screen Loop and the Digital-video codec depend on earlier frames, so the first render after jumping far into a
   clip can take a moment.
+- **First frames:** the plug-in's own GPU kernels come compiled with it (Windows), and the CRT shaders it compiles
+  the first time each is used are kept in a cache folder (`%LOCALAPPDATA%\NTSCRT\cache`,
+  `~/Library/Caches/NTSCRT`), so a new effect's first frame doesn't wait for a compile again in later sessions.
+  Safe to delete; `NTSCRT_SHADER_CACHE=0` turns it off ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)).
 
 ### Known issues and limitations
 

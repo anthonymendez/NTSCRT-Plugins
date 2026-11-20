@@ -1050,6 +1050,7 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         PhaseScope ps(pt, PhaseTimes::Crt, &dev);
         inst->crt->render(*chain, *out, ctx);
     }
+    if (std::string n = inst->crt->take_compile_note(); !n.empty()) pt.note += " " + n;
     chain.reset();
     // No finish() here: emit's download (or the Metal path's own finish) waits.
     {

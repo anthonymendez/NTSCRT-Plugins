@@ -2,8 +2,9 @@
 //
 // Own device by default (hardware, then WARP so it also runs headless / in
 // CI; NTSCRT_D3D11_WARP=1 forces WARP), or the host's ID3D11Device.
-// Kernels: embedded HLSL compiled on first use with D3DCompile, loaded from
-// d3dcompiler_47.dll at runtime (ships with Windows 10+).
+// Kernels: created on first use from the bytecode compiled at build time
+// (ShaderEntry::dxbc), else from the embedded HLSL compiled with D3DCompile,
+// loaded from d3dcompiler_47.dll at runtime (ships with Windows 10+).
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -378,15 +379,15 @@ public:
         auto k = std::make_unique<D3DKernel>();
         k->entry = e;
         k->file = file;
-        ComPtr<ID3DBlob> code, errors;
-        HRESULT hr = compile()(e->hlsl, std::strlen(e->hlsl), key.c_str(), nullptr, nullptr, e->name, "cs_5_0",
-                               D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
-        if (FAILED(hr)) {
-            std::string msg = "D3DCompile " + key + ": ";
-            msg += errors ? std::string(static_cast<const char *>(errors->GetBufferPointer()), errors->GetBufferSize())
-                          : hr_msg("D3DCompile", hr);
-            throw std::runtime_error(msg);
+        // The build-time bytecode: the same D3DCompile call (shaderc.cpp), without
+        // its cost here (up to 0.6 s per kernel on a first frame).
+        if (e->dxbc && e->dxbc_size && use_precompiled_kernels() &&
+            SUCCEEDED(dev_->CreateComputeShader(e->dxbc, e->dxbc_size, nullptr, &k->cs))) {
+            Kernel *raw = k.get();
+            kernels_[key] = std::move(k);
+            return raw;
         }
+        ComPtr<ID3DBlob> code = compile_hlsl(*e, key);
         check(dev_->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &k->cs),
               "CreateComputeShader");
         Kernel *raw = k.get();
@@ -707,6 +708,23 @@ private:
         staging_.emplace(s.key, std::move(s.tex));
     }
 
+public:
+    // What kernel() compiles when it has no build-time bytecode (and what the build
+    // compiled it with: tests compare the two).
+    static ComPtr<ID3DBlob> compile_hlsl(const ShaderEntry &e, const std::string &key) {
+        ComPtr<ID3DBlob> code, errors;
+        HRESULT hr = compile()(e.hlsl, std::strlen(e.hlsl), key.c_str(), nullptr, nullptr, e.name, "cs_5_0",
+                               D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+        if (FAILED(hr)) {
+            std::string msg = "D3DCompile " + key + ": ";
+            msg += errors ? std::string(static_cast<const char *>(errors->GetBufferPointer()), errors->GetBufferSize())
+                          : hr_msg("D3DCompile", hr);
+            throw std::runtime_error(msg);
+        }
+        return code;
+    }
+
+private:
     static pD3DCompile compile() {
         static pD3DCompile fn = [] {
             HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
@@ -791,6 +809,14 @@ std::unique_ptr<Device> create_d3d11_device(void *native_device, std::string &er
 }
 
 namespace d3d11 {
+std::vector<uint8_t> runtime_kernel_bytecode(std::string_view name) {
+    const ShaderEntry *e = find_shader(name);
+    if (!e) throw std::runtime_error("unknown kernel '" + std::string(name) + "'");
+    ComPtr<ID3DBlob> code = D3D11Device::compile_hlsl(*e, std::string(name));
+    const auto *p = static_cast<const uint8_t *>(code->GetBufferPointer());
+    return std::vector<uint8_t>(p, p + code->GetBufferSize());
+}
+
 ID3D11ShaderResourceView *srv(const Texture &t) {
     auto *p = dynamic_cast<const D3DTexture *>(&t);
     return p ? p->srv.Get() : nullptr;

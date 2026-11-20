@@ -50,6 +50,12 @@ public:
 
     void *sym(const char *name) const;
     std::string path;
+    // Chains use librashader's shader cache (configure_shader_cache, set by
+    // create_chain): the D3D11 runtime is told to skip it otherwise.
+    bool shader_cache_on = false;
+    // librashader's cache counters (shader_cache.h): objects found, looked up
+    // and not found, written. All 0 for a librashader without NTSCRT's cache.
+    void shader_cache_stats(uint64_t &hits, uint64_t &misses, uint64_t &writes) const;
 
     // Turns a libra_error_t into a message and frees it.
     std::string take_error(void *err) const;

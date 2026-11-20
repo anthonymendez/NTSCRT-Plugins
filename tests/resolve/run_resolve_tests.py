@@ -318,7 +318,11 @@ def start_headless(bundle, log_dir, only=None):
     # shell's NTSCRT_DEBUG_LOG doesn't turn detailed logging on behind the debug tests' back.
     env.setdefault("NTSCRT_SETTINGS_DIR", str(log_dir))
     env.pop("NTSCRT_DEBUG_LOG", None)
-    if "bench" in (only or ()) or "parity" in (only or ()):
+    # Compiled CRT shaders go to --out, not the user's cache (core/stages/crt/shader_cache.h); set
+    # NTSCRT_SHADER_CACHE yourself to keep one between runs (firstframe: cold, then warm).
+    env.setdefault("NTSCRT_SHADER_CACHE", str(Path(log_dir) / "shader-cache"))
+    os.environ.setdefault("NTSCRT_SHADER_CACHE", env["NTSCRT_SHADER_CACHE"])
+    if "bench" in (only or ()) or "parity" in (only or ()) or "firstframe" in (only or ()):
         env["NTSCRT_OFX_LOG_VERBOSE"] = "1"  # every render's ms and path (bench), every render's route (parity)
     # The "position" test's switch: while this file exists the dev copy applies the look it names to
     # new effects (scripts can't set OpenFX params on the Edit page).
@@ -1192,6 +1196,47 @@ class Suite:
         self.record("speed", "pass", m, "ms per 1920x1080 frame added by NTSCRT; seek/edit/screenloop: the "
                     "plug-in's own time for one frame (informational)")
 
+    def t_firstframe(self):
+        """The first frame of a new effect and of each CRT shader, at 1920x1080, in this Resolve
+        session (start it fresh for a first frame: --headless). From the plug-in's log: each render's
+        time (ms=) and, when it built a CRT shader, how long that took and what the shader cache had
+        (crt_compile=<shader>:<ms>ms(cache found N compiled M)). Run it twice with the same
+        NTSCRT_SHADER_CACHE folder, the first time empty, for cold and warm numbers. Informational."""
+        log = self.plugin_log()
+        fu, _ = self.new_comp("firstframe")
+        src = self.scene(fu, 1920, 1080)
+        mark = self.log_size(log)
+        fx = self.ntscrt(fu, src, crt_enabled=0)  # the effect's first frame without a CRT shader
+        fu.render({"fx": fx}, [0], "firstframe-nocrt")
+
+        def renders(text):
+            return [int(x) for x in re.findall(r" render #\d+ .*? ms=(\d+)", text)]
+
+        first = renders(self.log_since(log, mark))
+        m = {"shader_cache": os.environ.get("NTSCRT_SHADER_CACHE", ""),
+             "precompiled_kernels": os.environ.get("NTSCRT_PRECOMPILED_KERNELS", ""),
+             "first_render_ms": first[0] if first else None, "presets": {}}
+        fx.SetInput("crt_enabled", 1)
+        problems = []
+        for i, preset in enumerate(self.crt_presets()):
+            mark = self.log_size(log)
+            fx.SetInput("crt_preset", i)
+            fu.render({"fx": fx}, [i + 1], f"firstframe-{preset}")
+            text = self.log_since(log, mark)
+            c = re.search(r"crt_compile=[^:\s]+:(\d+)ms\((?:cache found (\d+) compiled (\d+)|cache off: ([^)]*))\)", text)
+            r = renders(text)
+            e = {"render_ms": max(r) if r else None}
+            if c:
+                e["compile_ms"] = int(c.group(1))
+                if c.group(4) is not None:
+                    e["cache"] = "off: " + c.group(4)
+                else:
+                    e["found"], e["compiled"] = int(c.group(2)), int(c.group(3))
+            else:
+                problems.append(f"{preset}: no crt_compile in the log")
+            m["presets"][preset] = e
+        self.record("firstframe", "pass" if not problems else "fail", m, "; ".join(problems))
+
     def t_gpupath(self):
         """Frames for the GPU-path A/B (--gpu-ab runs this test once with NTSCRT_OFX_GPU=0 and once
         with the GPU path, then compares): Fusion comps at 1920x1080 (the default look: NTSC on the GPU
@@ -1656,6 +1701,8 @@ class Suite:
                 self.run(name, fn)
             if "bench" in self.a.only:  # long: only when asked for
                 self.run("bench", self.t_bench)
+            if "firstframe" in self.a.only:  # first-frame times (cold / warm shader cache)
+                self.run("firstframe", self.t_firstframe)
             if "gpupath" in self.a.only:  # --gpu-ab
                 self.run("gpupath", self.t_gpupath)
             if "parity" in self.a.only:  # --parity: one session's frames
@@ -1684,7 +1731,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", help="CMake build dir (finds ntscrt-cli and the bundle's resources)")
     ap.add_argument("--out", default=None, help="output folder (default: a new temp folder)")
-    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,animated,depth,precision,sizes,speed,debug,debugall,position)")
+    ap.add_argument("--only", default="", help="comma-separated test names (version,alpha,edit,order,cli,animated,depth,precision,sizes,speed,debug,debugall,position; only when named: bench,firstframe)")
     ap.add_argument("--quick", action="store_true", help="fewer frames")
     ap.add_argument("--keep-project", action="store_true", help="stay in the test project afterwards")
     ap.add_argument("--headless", action="store_true",
