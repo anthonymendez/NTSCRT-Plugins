@@ -386,3 +386,14 @@ rate) makes the animation loop for the whole effect.
 
 **Reason.** Keyframes made choosing a preset slow, made the Inspector heavy (0.5.1's old-project lock-up), arrived
 in Resolve in pieces during the first render, and didn't follow clip-length / frame-rate changes.
+
+## 2026-11-20 — agent J2 — timings text (Digital video), `digital::Renderer` (not a contract file)
+
+**Change.** `ntscrt_last_timings`: after ` digital_captures=N` now ` digital_from=C digital_checkpoints=n:MB+t:MB`
+(the capture the run went on from, -1 from a keyframe; checkpoints and the re-run trail kept). `digital::Renderer`:
+`CheckpointConfig`, `code()` takes a defaulted `Size source` (the frames' size: part of the stream key),
+`lastResumedFrom()`, `checkpointCount()` / `checkpointBytes()`, `trailCount()` / `trailBytes()`. `stages.h` and the
+C ABI unchanged. The OpenFX plug-in no longer flushes `NTSCRT_CACHE_DIGITAL` when the host aborts a render (the
+core drops the stream that met a missing frame itself).
+
+**Reason.** Checkpoints of the codec state (docs/dev/DIGITAL-CHECKPOINTS.md).
