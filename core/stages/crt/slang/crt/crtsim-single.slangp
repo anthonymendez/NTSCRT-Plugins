@@ -1,0 +1,31 @@
+# NTSCRT-Plugins: vendor/slang-shaders crt/crtsim.slangp in one chain frame
+# (docs/dev/CRT.md, "One chain frame"). Pass 0 renders what the reset frame
+# left in composite's previous-frame buffer (persistence 0, frame count - 1),
+# pass 1 is composite reading it as its previous frame; the rest is crtsim's,
+# unchanged. No pass reads an earlier frame.
+shaders = 6
+
+shader0 = shaders/crtsim-single/prime.slang
+filter_linear0 = false
+
+shader1 = shaders/crtsim-single/composite.slang
+filter_linear1 = false
+
+shader2 = shaders/crtsim/screen.slang
+alias2 = CRTPASS
+
+shader3 = shaders/crtsim/post-downsample.slang
+filter_linear3 = true
+
+shader4 = shaders/crtsim/post-upsample.slang
+filter_linear4 = true
+
+shader5 = shaders/crtsim/present.slang
+filter_linear5 = true
+scale_type5 = viewport
+
+textures = "NTSCArtifactSampler;shadowMaskSampler"
+NTSCArtifactSampler = "shaders/crtsim/artifacts.png"
+NTSCArtifactSampler_linear = true
+shadowMaskSampler = "shaders/crtsim/mask.png"
+shadowMaskSampler_linear = true

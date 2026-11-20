@@ -319,3 +319,15 @@ selected and the Effects tab opened. Every instanceChanged re-set all ~480 enabl
 (306 `enabled_if`, 178 `visible_if`). Not reproduced in Resolve's own Inspector (the headless runs were blocked
 by an open Resolve session); `NTSCRT_OFX_LOG_VERBOSE=1` now logs beginInstanceEdit / endInstanceEdit next to every
 instanceChanged, so the user's log shows what Resolve does when the tab opens.
+
+## 2026-11-20 — agent I2 — CRT resources: `shaders/crt/crtsim-single.slangp` (ours), `NTSCRT_SIM_SINGLE`
+
+**Change.** No signature or ABI change. The resources gain `shaders/crt/crtsim-single.slangp` and
+`shaders/crt/shaders/crtsim-single/{prime,composite}.slang` (from `core/stages/crt/slang/`, copied by
+`copy_resources.cmake` next to the vendored files). The CRT stage loads it for the `sim` preset (and the path
+`crt/crtsim.slangp`): one librashader frame per frame instead of two, same bytes (docs/dev/CRT.md, "One chain
+frame"). sim's chain no longer reads earlier frames, so on D3D11 it is shared between instances like the other
+presets. `NTSCRT_SIM_SINGLE=0` (read when a chain is made) restores crtsim's own preset and the two-frame rule.
+
+**Reason.** The two chain frames gave one picture twice: half of sim's CRT time.
+

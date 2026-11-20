@@ -14,6 +14,11 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Changed
+- **The Sim CRT shader is a little faster:** each frame used to be drawn twice behind the scenes (to keep its
+  picture the same whatever order frames are rendered in); now it is drawn once, with the very same picture,
+  byte for byte. About 0.07-0.1 ms less per frame on an RTX 5090 at 1080p and UHD.
+
 ## [0.5.3] - 2026-11-20
 
 There is no 0.5.2: its tag was pushed before the version was set and never became a release.
