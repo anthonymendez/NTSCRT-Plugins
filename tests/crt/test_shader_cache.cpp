@@ -28,7 +28,20 @@ namespace fs = std::filesystem;
 
 namespace {
 
-const char *kPresetIds[] = {"aperture", "easymode", "glow_gauss", "glow_lanczos", "hyllian", "royale", "sim"};
+// GitHub's macOS runners are VMs whose paravirtualized GPU hangs on the heaviest shaders
+// (test_crt.cpp): there the test leaves Royale and Sim out, and a hang is only a warning.
+bool gha_macos() {
+#ifdef __APPLE__
+    const char *gha = std::getenv("GITHUB_ACTIONS");
+    return gha && std::string(gha) == "true";
+#else
+    return false;
+#endif
+}
+std::vector<const char *> preset_ids() {
+    if (gha_macos()) return {"aperture", "easymode", "glow_gauss", "glow_lanczos", "hyllian"};
+    return {"aperture", "easymode", "glow_gauss", "glow_lanczos", "hyllian", "royale", "sim"};
+}
 
 struct Counters {
     uint64_t hits = 0, misses = 0, writes = 0;
@@ -203,10 +216,26 @@ std::vector<uint8_t> render_quiet(gpu::Device &d, const gpu::Texture &in, const 
 }  // namespace
 
 // One body, in order (the process's cache folder is chosen once, at its first chain).
+void cache_case(gpu::Device &dev);
+
 TEST_CASE("shader cache: cached shaders give the same pictures" *
           doctest::skip(std::getenv("NTSCRT_TEST_SHADER_CACHE_OFF") != nullptr)) {
     auto d = device();
     if (!d) return;
+    try {
+        cache_case(*d);
+    } catch (const std::exception &e) {
+        if (gha_macos() && std::string(e.what()).find("Hang") != std::string::npos) {
+            MESSAGE("WARNING: the CI runner's virtual GPU hung: " << std::string(e.what()));
+            return;
+        }
+        throw;
+    }
+}
+
+void cache_case(gpu::Device &dev) {
+    gpu::Device *d = &dev;
+    const std::vector<const char *> presets = preset_ids();
     // Our own empty folder, before the process's first chain (configure_shader_cache).
     const fs::path root =
         fs::temp_directory_path() /
@@ -218,7 +247,7 @@ TEST_CASE("shader cache: cached shaders give the same pictures" *
     // Cold: everything compiled (and written); the reference pictures.
     std::map<std::string, std::vector<uint8_t>> ref;
     const Counters c0 = counters();
-    for (const char *id : kPresetIds) ref[id] = render(*d, *in, id);
+    for (const char *id : presets) ref[id] = render(*d, *in, id);
     const Counters c1 = counters();
     std::string err;
     crt::Library *lib = crt::Library::load(NTSCRT_RESOURCES_DIR, err);
@@ -235,7 +264,7 @@ TEST_CASE("shader cache: cached shaders give the same pictures" *
 
     {
         INFO("warm: every object from the cache, same pictures");
-        for (const char *id : kPresetIds) {
+        for (const char *id : presets) {
             CAPTURE(id);
             CHECK(render(*d, *in, id) == ref[id]);
         }
@@ -263,14 +292,14 @@ TEST_CASE("shader cache: cached shaders give the same pictures" *
             }
             std::ofstream(f, std::ios::binary | std::ios::trunc) << data;
         }
-        for (const char *id : kPresetIds) {
+        for (const char *id : presets) {
             CAPTURE(id);
             CHECK(render(*d, *in, id) == ref[id]);
         }
         const Counters c2 = counters();
         CHECK(c2.misses - c1b.misses >= files.size());
         CHECK(c2.writes - c1b.writes >= files.size());
-        for (const char *id : kPresetIds) CHECK(render(*d, *in, id) == ref[id]);  // rewritten whole
+        for (const char *id : presets) CHECK(render(*d, *in, id) == ref[id]);  // rewritten whole
         CHECK(counters().misses == c2.misses);
     }
 
@@ -279,13 +308,13 @@ TEST_CASE("shader cache: cached shaders give the same pictures" *
         // Several effects (threads) building the same presets from an empty folder at
         // once write the same files; renames over each other are fine.
         for (const fs::path &f : cache_files(root)) fs::remove(f);
-        const char *order[] = {"royale", "glow_gauss", "sim", "aperture", "hyllian"};
+        const std::vector<const char *> order = presets;
         std::atomic<int> bad{0};
         std::vector<std::thread> th;
         for (int t = 0; t < 4; ++t)
             th.emplace_back([&, t] {
-                for (int k = 0; k < 5; ++k) {
-                    const char *id = order[(k + t) % 5];  // some threads compile while others read
+                for (size_t k = 0; k < order.size(); ++k) {
+                    const char *id = order[(k + size_t(t)) % order.size()];  // some threads compile while others read
                     if (render_quiet(*d, *in, id) != ref[id]) ++bad;
                 }
             });
