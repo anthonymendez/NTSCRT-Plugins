@@ -14,6 +14,10 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-20
+
+There is no 0.5.2: its tag was pushed before the version was set and never became a release.
+
 ### Fixed
 - **Going back to the Screen Loop preset you just left is now really quick in Resolve:** 0.5.1 kept the earlier
   presets' loops, but in Resolve they were thrown away almost every time: when Resolve cancels a render it no
@@ -554,7 +558,8 @@ The macOS installer skips Final Cut Pro until a release includes it.
   `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log` / `~/Library/Logs/NTSCRT/ntscrt-ofx.log`, rotated at 1 MB.
   `NTSCRT_OFX_LOG=<file|off>` moves or disables it, `NTSCRT_OFX_LOG_VERBOSE=1` logs every frame.
 
-[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.2...v0.5.3
 [0.5.1]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.3.0...v0.4.0
