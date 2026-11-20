@@ -76,7 +76,10 @@ default look and alone, with data loss and deblocking (`tests/digital/test_digit
 cold seeks, jumps back and forth, stepping back across a keyframe, renders at render scale 0.5 in between, other
 settings in between and back, an aborted render; each compared with frames played in order on another instance,
 or with a fresh instance's cold render); `test_digital` (the renderer's own jumped-to = played checks, unchanged);
-`test_ofx` "Digital video: after a jump into a clip ..." (the mock host, compared with a fresh effect's render).
+`test_ofx` "Digital video: after a jump into a clip ..." (the mock host, compared with a fresh effect's render). The
+headless-Resolve parity suite's Digital video cases (`run_resolve_tests.py --headless --parity --parity-digital`,
+2026-11-20, every config: 182 images per pair) pass: the CPU / GPU routes equal byte for byte, host GPU frames
+within the usual rule, the CPU reference again 0 different.
 
 What it can't change: **the first render of a frame whose stream was never coded** still re-runs it from the
 keyframe: exact pictures need every capture since then, and the checkpoints only exist for captures already coded.
