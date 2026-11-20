@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <set>
 #include <fstream>
 #include <stdexcept>
 
@@ -501,29 +502,35 @@ bool within_key_tolerance(const Schema &s, const json &a, const json &b, std::st
     return false;
 }
 
-PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available, int64_t at,
+namespace {
+// One pass of an animated look's per-frame curves at `fps` (shared by the host keyframes,
+// preset_keys, and the procedural animation, Animation, so both give the same values).
+struct Moving {
+    size_t index;
+    std::vector<json> v;    // the value on each frame of a pass
+    std::vector<char> want; // numbers: frames of a pass with a key
+    bool stepped;
+};
+struct PassCurves {
+    int64_t pass = 0;
+    std::map<size_t, json> still;  // params that hold still (or can't be keyed): the timeline's first value
+    std::vector<Moving> moving;
+    int64_t per_pass = 0;  // keys one pass takes as host keyframes
+};
+// up: an upgraded look (ntscrt::digital::migrate::upgraded) with timeline keys `t`.
+PassCurves pass_curves(const Schema &s, const json &up, const ntscrt::timeline::Timeline &t, double fps,
                        bool guards) {
     namespace tl = ntscrt::timeline;
-    PresetKeys out;
-    if (is_feedback_preset(preset)) return out;
-    const json up = ntscrt::digital::migrate::upgraded(preset);
-    const tl::Timeline t = tl::parse(up);
-    if (!t.animated()) return out;
+    PassCurves out;
     const int64_t P = tl::pass_frames(t, fps);
     out.pass = P;
-
     // One pass of looks: later passes repeat it. Per param, the frames of a pass that get a key.
+    // (Built from the look without its timeline: look_at copies the look for every frame.)
+    json base = up;
+    if (base.is_object()) base.erase("timeline");
     std::vector<json> looks;
     looks.reserve(size_t(P));
-    for (int64_t i = 0; i < P; ++i) looks.push_back(tl::look_at(up, t, s.timeline, tl::time_of_frame(i, P)));
-    struct Moving {
-        size_t index;
-        std::vector<json> v;    // the value on each frame of a pass
-        std::vector<char> want; // numbers: frames of a pass with a key
-        bool stepped;
-    };
-    std::vector<Moving> moving;
-    int64_t per_pass = 0;  // keys one pass takes
+    for (int64_t i = 0; i < P; ++i) looks.push_back(tl::look_at(base, t, s.timeline, tl::time_of_frame(i, P)));
     for (size_t pi = 0; pi < s.params.size(); ++pi) {
         const ParamDef &p = s.params[pi];
         if (p.feedback || !p.in_presets) continue;
@@ -535,13 +542,13 @@ PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t 
             if (still && !same_value(v.back(), v.front())) still = false;
         }
         if (still || !p.animatable) {  // a param the host can't key: the timeline's first value
-            out.keys[pi].emplace_back(0, v.front());
+            out.still[pi] = v.front();
             continue;
         }
         Moving m{pi, std::move(v), {}, p.type == PType::Bool || p.type == PType::Choice};
         if (m.stepped) {
             for (int64_t n = 0; n < P; ++n)  // two keys per change, the wrap back to frame 0 included
-                if (!same_value(m.v[size_t(n)], m.v[size_t((n + 1) % P)])) per_pass += 2;
+                if (!same_value(m.v[size_t(n)], m.v[size_t((n + 1) % P)])) out.per_pass += 2;
         } else {
             // Numbers: the frames of a pass where the curve bends.
             std::vector<std::vector<double>> c;
@@ -565,14 +572,19 @@ PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t 
             for (int64_t b : bends(c, tol, p.type == PType::Int))
                 for (int64_t d = guards ? -1 : 0; d <= (guards ? 1 : 0); ++d)
                     if (b + d >= 0 && b + d < P) m.want[size_t(b + d)] = 1;
-            for (char w : m.want) per_pass += w;
+            for (char w : m.want) out.per_pass += w;
         }
-        moving.push_back(std::move(m));
+        out.moving.push_back(std::move(m));
     }
+    return out;
+}
+}  // namespace
 
-    // The keyed stretch: whole passes from the origin, as many as kMaxPresetKeys allows (at
-    // least one, at most kMaxKeyedFrames), covering `at` with a quarter of it before `at` when
-    // the effect is longer, inside the effect when its length is known.
+namespace {
+// The keyed stretch: whole passes from the origin, as many as kMaxPresetKeys allows (at
+// least one, at most kMaxKeyedFrames), covering `at` with a quarter of it before `at` when
+// the effect is longer, inside the effect when its length is known. (first, frames).
+std::pair<int64_t, int64_t> keyed_stretch(int64_t P, int64_t per_pass, int64_t available, int64_t at) {
     const int64_t passes = std::max<int64_t>(1, kMaxPresetKeys / std::max<int64_t>(1, per_pass));
     const int64_t cap = std::max(P, std::min(kMaxKeyedFrames, passes * P));
     const int64_t hi = available > 0 ? available - 1 : INT64_MAX / 4;
@@ -582,8 +594,28 @@ PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t 
     int64_t first = down(at - cap / 4);
     if (first + cap <= at) first = down(at);
     if (hi < INT64_MAX / 4 && first + cap - 1 > hi) first = std::min(first, ceil_pass(hi - cap + 1));
+    return {first, std::min(hi, first + cap - 1) - first + 1};
+}
+}  // namespace
+
+PresetKeys preset_keys(const Schema &s, const json &preset, double fps, int64_t available, int64_t at,
+                       bool guards) {
+    namespace tl = ntscrt::timeline;
+    PresetKeys out;
+    if (is_feedback_preset(preset)) return out;
+    const json up = ntscrt::digital::migrate::upgraded(preset);
+    const tl::Timeline t = tl::parse(up);
+    if (!t.animated()) return out;
+    PassCurves pc = pass_curves(s, up, t, fps, guards);
+    const int64_t P = pc.pass;
+    out.pass = P;
+    for (auto &[pi, v] : pc.still) out.keys[pi].emplace_back(0, v);
+    const std::vector<Moving> &moving = pc.moving;
+    const int64_t per_pass = pc.per_pass;
+
+    const auto [first, frames] = keyed_stretch(P, per_pass, available, at);
     out.first = first;
-    out.frames = std::min(hi, first + cap - 1) - first + 1;
+    out.frames = frames;
     const int64_t last = first + out.frames - 1;
 
     for (const Moving &m : moving) {
@@ -628,6 +660,332 @@ PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t 
     // Our preset files carry the Screen Loop settings too (saved_preset).
     if (preset.is_object() && preset.contains("screen_loop") && is_feedback_preset(preset["screen_loop"]))
         loop_values(preset["screen_loop"]);
+    return plan;
+}
+
+// ---- procedural animation ----------------------------------------------------------------
+namespace {
+const char kAnimationKind[] = "ntscrt_animation";
+
+// The value as a host control stores and returns it (a choice as its option's value, a colour
+// through its components), so a computed value builds the same look a keyframe would.
+json host_round_trip(const ParamDef &p, const json &v) {
+    switch (p.type) {
+    case PType::Bool: return json(truthy(v));
+    case PType::Int: return v.is_number() ? json(int64_t(int(v.get<int64_t>()))) : v;
+    case PType::Float: return v.is_number() ? json(v.get<double>()) : v;
+    case PType::Choice: {
+        const int k = choice_index(p, v);
+        return k >= 0 ? p.options[size_t(k)].value : v;
+    }
+    case PType::Color: return color_value(p, color_components(p, v));
+    }
+    return v;
+}
+
+// Values every key of an object section gives alike (numbers only when `numbers`).
+std::map<std::string, json> alike(const json &keys, const char *section, bool numbers) {
+    std::map<std::string, json> same;
+    bool first = true;
+    for (const auto &k : keys) {
+        std::map<std::string, json> here;
+        if (k.is_object()) {
+            auto o = k.find(section);
+            if (o != k.end() && o->is_object())
+                for (auto &[name, v] : o->items())
+                    if (!numbers || v.is_number()) here[name] = v;
+        }
+        if (first) {
+            same = std::move(here);
+            first = false;
+            continue;
+        }
+        for (auto it = same.begin(); it != same.end();) {
+            auto h = here.find(it->first);
+            if (h == here.end() || h->second != it->second) it = same.erase(it);
+            else ++it;
+        }
+    }
+    return same;
+}
+
+// The upgraded look with the timeline values that can't change any frame left out of its keys
+// (stored with every effect that plays it, so kept small): values every key gives alike.
+// Glitch and Digital video numbers then live in the look itself (a key without a value takes
+// the look's: the same number on every frame). ntsc-rs settings, which a key replaces as a
+// whole (a setting it leaves out takes its default), are only dropped when every key has
+// settings, and one stays in each key so that no key's settings become empty: the dropped ones
+// then read as defaults, which never matters, as only params the full look moves are animated
+// ("moving") and the others are written as still values. CRT values only go when the value
+// between keys (snapped to the step grid) is the keys' value.
+json reduced_look(const Schema &s, const json &up) {
+    json out = up;
+    auto tl = out.find("timeline");
+    if (tl == out.end() || !tl->is_object()) return out;
+    auto keys = tl->find("keys");
+    if (keys == tl->end() || !keys->is_array() || keys->empty()) return out;
+    // Digital video's structure controls never key (the look's value always counts): out of the keys.
+    for (auto &k : *keys)
+        if (k.is_object() && k.contains("digital") && k["digital"].is_object())
+            for (const auto &id : s.timeline.digital_structure) k["digital"].erase(id);
+    for (const char *section : {"glitch", "digital"}) {
+        const auto same = alike(*keys, section, true);
+        if (same.empty()) continue;
+        json &sec = out[section];
+        if (!sec.is_object()) sec = json::object();
+        json &vals = sec["values"];
+        if (!vals.is_object()) vals = json::object();
+        for (auto &[name, v] : same) vals[name] = v;
+        for (auto &k : *keys)
+            if (k.is_object() && k.contains(section) && k[section].is_object())
+                for (auto &[name, v] : same) k[section].erase(name);
+    }
+    // CRT values every key gives alike, where the value between two keys (Float arithmetic,
+    // snapped to the step grid, timeline.h values_at) is that value exactly: into the look.
+    {
+        std::string preset;
+        if (out.contains("shader") && out["shader"].is_object() && out["shader"].contains("preset") &&
+            out["shader"]["preset"].is_string())
+            preset = out["shader"]["preset"].get<std::string>();
+        auto pm = s.timeline.shader.find(preset);
+        std::map<std::string, json> same = alike(*keys, "shader", true);
+        for (auto it = same.begin(); it != same.end();) {
+            const double c = it->second.get<double>();
+            float v = float(c);
+            if (pm != s.timeline.shader.end()) {
+                auto m = pm->second.find(it->first);
+                if (m != pm->second.end()) {
+                    if (m->second.step > 0)
+                        v = m->second.min + std::round((v - m->second.min) / m->second.step) * m->second.step;
+                    v = std::min(m->second.max, std::max(m->second.min, v));
+                }
+            }
+            if (double(v) == c) ++it;
+            else it = same.erase(it);
+        }
+        if (!same.empty()) {
+            json &sec = out["shader"];
+            if (!sec.is_object()) sec = json::object();
+            json &vals = sec["params"];
+            if (!vals.is_object()) vals = json::object();
+            for (auto &[name, v] : same) vals[name] = v;
+            for (auto &k : *keys)
+                if (k.is_object() && k.contains("shader") && k["shader"].is_object())
+                    for (auto &[name, v] : same) k["shader"].erase(name);
+        }
+    }
+    bool all_settings = true;
+    for (const auto &k : *keys) {
+        auto o = k.is_object() ? k.find("ntsc") : k.end();
+        if (!k.is_object() || o == k.end() || !o->is_object() || o->empty()) all_settings = false;
+    }
+    if (all_settings) {
+        // Every frame's settings come from a key: the look's own are never read.
+        if (out.contains("ntsc") && out["ntsc"].is_object() && out["ntsc"].contains("settings"))
+            out["ntsc"]["settings"] = json::object();
+        const auto same = alike(*keys, "ntsc", false);
+        for (auto &k : *keys) {
+            json &o = k["ntsc"];
+            std::string keep;
+            for (auto &[name, v] : o.items())
+                if (!same.count(name)) {
+                    keep = name;
+                    break;
+                }
+            if (keep.empty()) keep = o.begin().key();
+            for (auto &[name, v] : same)
+                if (name != keep) o.erase(name);
+        }
+    }
+    return out;
+}
+}  // namespace
+
+std::string animation_text(const Schema &s, const json &preset) {
+    namespace tl = ntscrt::timeline;
+    if (is_feedback_preset(preset) || !preset.is_object()) return std::string();
+    const json up = ntscrt::digital::migrate::upgraded(preset);
+    const tl::Timeline t = tl::parse(up);
+    if (!t.animated()) return std::string();
+    // The params that can move: a value differs between frames only if the keys' own values
+    // differ (a lerp of equal values is that value), except CRT values, which snap to their
+    // step grid between keys. Which of them do move at a frame rate: Animation (pass_curves).
+    json base = up;
+    base.erase("timeline");
+    std::vector<json> looks;
+    for (const auto &k : t.keys) {
+        tl::Timeline one = t;
+        one.keys = {k};
+        looks.push_back(tl::look_at(base, one, s.timeline, 0));
+    }
+    std::vector<std::string> moving;
+    for (const ParamDef &p : s.params) {
+        if (p.feedback || !p.in_presets || !p.animatable) continue;
+        bool moves = p.path.rfind("/shader/params/", 0) == 0;
+        const json first = *preset_value_raw(p, looks.front(), false);
+        for (size_t k = 1; k < looks.size() && !moves; ++k)
+            moves = !same_value(*preset_value_raw(p, looks[k], false), first);
+        if (moves) moving.push_back(p.id);
+    }
+    if (moving.empty()) return std::string();
+    const json out = {{"kind", kAnimationKind}, {"version", 1},      {"look", reduced_look(s, up)},
+                      {"moving", moving},       {"off", json::array()}};
+    return out.dump();
+}
+
+std::string animation_without(const std::string &text, const std::vector<std::string> &ids) {
+    json j = json::parse(text, nullptr, false);
+    if (!j.is_object() || j.value("kind", std::string()) != kAnimationKind) return text;
+    json &off = j["off"];
+    if (!off.is_array()) off = json::array();
+    bool changed = false;
+    for (const auto &id : ids) {
+        if (std::find(off.begin(), off.end(), json(id)) != off.end()) continue;
+        off.push_back(id);
+        changed = true;
+    }
+    return changed ? j.dump() : text;
+}
+
+Animation::Animation(const Schema &s, const std::string &text, double fps) {
+    namespace tl = ntscrt::timeline;
+    if (text.empty()) return;
+    const json j = json::parse(text, nullptr, false);
+    if (!j.is_object() || j.value("kind", std::string()) != kAnimationKind || !j.contains("look")) return;
+    const json &look = j["look"];
+    const tl::Timeline t = tl::parse(look);
+    if (!t.animated()) return;
+    std::set<std::string> moving, off;
+    for (const auto &x : j.value("moving", json::array()))
+        if (x.is_string()) moving.insert(x.get<std::string>());
+    for (const auto &x : j.value("off", json::array()))
+        if (x.is_string()) off.insert(x.get<std::string>());
+    PassCurves pc = pass_curves(s, look, t, fps, false);
+    // The stretch host keyframes covered (frames at the rate the preset was applied at; at
+    // another rate, the same time span in whole passes).
+    if (auto k = j.find("keyed"); k != j.end() && k->is_object()) {
+        const double kf = k->value("fps", 0.0);
+        int64_t first = k->value("first", int64_t(0)), frames = k->value("frames", int64_t(0));
+        if (kf > 0 && frames > 0 && pc.pass > 0) {
+            if (std::fabs(kf - fps) > 1e-6) {
+                const double r = fps / kf;
+                first = std::llround(double(first) * r / double(pc.pass)) * pc.pass;
+                frames = std::max<int64_t>(pc.pass, std::llround(double(frames) * r));
+            }
+            held_ = true;
+            first_ = std::max<int64_t>(0, first);
+            last_ = first_ + frames - 1;
+        }
+    }
+    slot_.assign(s.params.size(), -1);
+    for (Moving &m : pc.moving) {
+        const ParamDef &p = s.params[m.index];
+        if (!moving.count(p.id)) continue;
+        if (off.count(p.id)) {
+            ++taken_over_;
+            continue;
+        }
+        Curve c;
+        c.index = m.index;
+        c.def = &p;
+        c.stepped = m.stepped;
+        for (auto &x : m.v) x = host_round_trip(p, x);
+        if (!m.stepped) {
+            // The keys host keyframes held within one pass, then the next pass's first frame.
+            for (int64_t n = 0; n < pc.pass; ++n)
+                if (m.want[size_t(n)]) c.keys.emplace_back(n, m.v[size_t(n)]);
+            c.keys.emplace_back(pc.pass, m.v.front());
+        }
+        c.v = std::move(m.v);
+        slot_[m.index] = int(curves_.size());
+        curves_.push_back(std::move(c));
+    }
+    pass_ = pc.pass;
+}
+
+std::vector<size_t> Animation::moving() const {
+    std::vector<size_t> out;
+    out.reserve(curves_.size());
+    for (const Curve &c : curves_) out.push_back(c.index);
+    return out;
+}
+
+bool Animation::moves_under(const std::string &path_prefix) const {
+    for (const Curve &c : curves_)
+        if (c.def->path.rfind(path_prefix, 0) == 0) return true;
+    return false;
+}
+
+json Animation::value(size_t i, double n) const {
+    const Curve &c = curves_[size_t(slot_[i])];
+    if (!(n >= 0)) n = 0;  // before the effect's first frame (or NaN): its first frame's value
+    // The keyframes' stretch: their first value before it, their last one after it.
+    if (held_) n = std::clamp(n, double(first_), double(last_));
+    const double P = double(pass_);
+    const double base = std::floor(n / P) * P;
+    const double x = n - base;  // within the pass, [0, P)
+    if (c.stepped) {
+        const int64_t k = std::clamp<int64_t>(int64_t(std::floor(x)), 0, pass_ - 1);
+        return c.v[size_t(k)];
+    }
+    if (held_) {
+        // The stretch's last frame had a key of its own (the value on that frame): the segment
+        // up to it runs from the key before it.
+        const double last_x = double(last_) - base;
+        auto hi = std::lower_bound(c.keys.begin(), c.keys.end(), x,
+                                   [](const auto &k, double v) { return double(k.first) < v; });
+        if (hi != c.keys.end() && double(hi->first) > last_x && hi != c.keys.begin() && double(hi->first) != x) {
+            const int64_t li = int64_t(last_x);
+            const std::vector<std::pair<int64_t, json>> seg = {*std::prev(hi), {li, c.v[size_t(li % pass_)]}};
+            return interpolated_key_value(*c.def, seg, x);
+        }
+    }
+    return interpolated_key_value(*c.def, c.keys, x);
+}
+
+size_t Animation::keys_per_pass() const {
+    size_t n = 0;
+    for (const Curve &c : curves_) {
+        if (!c.stepped) {
+            n += c.keys.size() - 1;
+            continue;
+        }
+        for (size_t k = 0; k < c.v.size(); ++k)
+            if (!same_value(c.v[k], c.v[(k + 1) % c.v.size()])) n += 2;
+    }
+    return n;
+}
+
+PresetPlan plan_preset_procedural(const Schema &s, const json &preset, double fps, int64_t available, int64_t at) {
+    namespace tl = ntscrt::timeline;
+    if (is_feedback_preset(preset)) return plan_preset(s, preset, 30, 0);
+    PresetPlan plan;
+    plan.replaces_look = true;
+    // Every look param presets set: the timeline's first frame (plan_preset's keys at frame 0).
+    const json up = ntscrt::digital::migrate::upgraded(preset);
+    const tl::Timeline t = tl::parse(up);
+    json first = up;
+    if (first.is_object()) first.erase("timeline");
+    if (t.animated()) first = tl::look_at(first, t, s.timeline, 0.0);
+    for (size_t i = 0; i < s.params.size(); ++i)
+        if (auto v = preset_value_raw(s.params[i], first, false)) plan.look.keys[i] = {{0, *v}};
+    plan.animation = animation_text(s, preset);
+    if (!plan.animation.empty() && fps > 0) {
+        // The stretch the host keyframes would have covered (preset_keys): the animation holds
+        // outside it as they did, so the pictures are the keyframed version's.
+        const PassCurves pc = pass_curves(s, up, t, fps, false);
+        const auto [kfirst, kframes] = keyed_stretch(pc.pass, pc.per_pass, available, at);
+        json j = json::parse(plan.animation);
+        j["keyed"] = {{"fps", fps}, {"first", kfirst}, {"frames", kframes}};
+        plan.animation = j.dump();
+        plan.look.pass = pc.pass;
+        plan.look.first = kfirst;
+        plan.look.frames = kframes;
+    }
+    if (preset.is_object() && preset.contains("screen_loop") && is_feedback_preset(preset["screen_loop"])) {
+        for (size_t i = 0; i < s.params.size(); ++i)
+            if (auto v = preset_value(s.params[i], preset["screen_loop"], true)) plan.feedback.emplace_back(i, *v);
+    }
     return plan;
 }
 

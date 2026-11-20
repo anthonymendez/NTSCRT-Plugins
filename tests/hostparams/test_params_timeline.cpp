@@ -421,3 +421,181 @@ TEST_CASE("bundled presets round-trip through the params") {
         }
     }
 }
+
+// ---- procedural animation (0.6.0): the values the host keyframes gave, without keyframes ----
+namespace {
+// Every param's value at frame n with the procedural animation: the plan's plain values, the
+// animation's for the params it moves.
+json procedural_look(const PresetPlan &plan, const Animation &a, double n) {
+    const Schema &s = schema();
+    json look, fb;
+    build_look(s, [&](size_t i) {
+        if (a.moves(i)) return a.value(i, n);
+        auto it = plan.look.keys.find(i);
+        if (it != plan.look.keys.end() && !it->second.empty()) return it->second.front().second;
+        return s.params[i].def;
+    }, look, fb);
+    return look;
+}
+// The (look-typed) value a host control returns for v: choices as the option's value, colours via components.
+json host_stored(size_t i, const json &v) {
+    const ParamDef &p = schema().params[i];
+    switch (p.type) {
+    case PType::Choice: return p.options[size_t(choice_index(p, v))].value;
+    case PType::Color: return color_value(p, color_components(p, v));
+    case PType::Bool: return json(truthy(v));
+    default: return v;
+    }
+}
+}  // namespace
+
+TEST_CASE("procedural animation: every bundled animated preset gives the host keyframes' values, frame for frame") {
+    const Schema &s = schema();
+    size_t presets = 0;
+    for (const std::string &name : animated_presets()) {
+        CAPTURE(name);
+        const json preset = read_preset(name);
+        const PresetPlan plan = plan_preset_procedural(s, preset);
+        REQUIRE(plan.replaces_look);
+        REQUIRE_FALSE(plan.animation.empty());
+        // no keyframes: one plain value per look param, the same params plan_preset sets
+        const PresetPlan keyed = plan_preset(s, preset, 30, 0);
+        CHECK(plan.look.keys.size() == keyed.look.keys.size());
+        for (auto &[i, e] : plan.look.keys) CHECK(e.size() == 1);
+        CHECK(plan.animation.size() < 32000);  // stored with every effect: the reduced look
+        MESSAGE(name << ": animation text " << plan.animation.size() << " bytes (preset " << preset.dump().size() << ")");
+        for (double fps : {23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0}) {
+            CAPTURE(fps);
+            const Animation a(s, plan.animation, fps);
+            REQUIRE(a.active());
+            // keyed at the start of a long effect, and an hour in (unknown length, Adjustment Clip)
+            for (int64_t at : {int64_t(0), int64_t(std::llround(3600 * fps)) + 79}) {
+                CAPTURE(at);
+                const PresetKeys pk = preset_keys(s, preset, fps, 0, at);
+                CHECK(a.pass() == pk.pass);
+                std::vector<size_t> moved;
+                for (auto &[i, e] : pk.keys) {
+                    if (e.size() > 1) {
+                        moved.push_back(i);
+                        CHECK_MESSAGE(a.moves(i), s.params[i].id);
+                    } else {
+                        CHECK_MESSAGE(!a.moves(i), s.params[i].id);
+                        CHECK(same_value(plan.look.keys.at(i).front().second, e.front().second));
+                    }
+                }
+                // frames across the keyed stretch: its first pass, pass boundaries, its last frames
+                std::vector<int64_t> frames;
+                for (int64_t k = 0; k < pk.pass + 3; ++k) frames.push_back(pk.first + k);
+                for (int64_t k = 1; k < 6; ++k) frames.push_back(pk.first + k * pk.pass - 1), frames.push_back(pk.first + k * pk.pass);
+                for (int64_t k = 1; k <= 3; ++k) frames.push_back(pk.first + pk.frames - k);
+                for (int64_t n : frames) {
+                    if (n < pk.first || n >= pk.first + pk.frames) continue;
+                    for (size_t i : moved) {
+                        const json want = host_stored(i, keyed_value(i, pk.keys.at(i), double(n)));
+                        const json got = a.value(i, double(n));
+                        if (got != want) FAIL_CHECK(s.params[i].id << " frame " << n << ": " << got << " vs keys " << want);
+                    }
+                }
+                // and between frames (a field render, t + 0.5)
+                for (size_t i : moved) {
+                    const double n = double(pk.first) + 10.5;
+                    const json want = host_stored(i, keyed_value(i, pk.keys.at(i), n));
+                    CHECK_MESSAGE(near(a.value(i, n), want), s.params[i].id);
+                }
+            }
+        }
+        // With the keyed stretch recorded (what the plug-ins write): the keyframes' values on
+        // every frame, before and after the stretch too (they held there), for a clip shorter
+        // than a stretch (its end cuts the last pass), a long one, and an hour into an
+        // Adjustment Clip of unknown length.
+        for (double fps : {24.0, 30000.0 / 1001.0, 60.0}) {
+            CAPTURE(fps);
+            struct Case { int64_t available, at; };
+            const int64_t hour = int64_t(std::llround(3600 * fps));
+            for (const Case &c : {Case{0, 0}, Case{0, hour + 79}, Case{100000, 40}, Case{100000, 99990}, Case{173, 150},
+                                  Case{1000, 500}}) {
+                CAPTURE(c.available);
+                CAPTURE(c.at);
+                const PresetPlan pp = plan_preset_procedural(s, preset, fps, c.available, c.at);
+                const PresetKeys pk = preset_keys(s, preset, fps, c.available, c.at);
+                CHECK(pp.look.first == pk.first);
+                CHECK(pp.look.frames == pk.frames);
+                const Animation a(s, pp.animation, fps);
+                const int64_t last = pk.first + pk.frames - 1;
+                std::vector<double> frames = {0, 1};
+                for (int64_t d = -3; d <= 3; ++d) frames.push_back(double(pk.first + d)), frames.push_back(double(last + d));
+                for (int64_t k = 0; k < pk.pass; k += 7) frames.push_back(double(pk.first + k)), frames.push_back(double(last - k));
+                frames.push_back(double(last + 5 * pk.pass + 11));
+                frames.push_back(double(pk.first) + 10.5);
+                frames.push_back(double(last) - 0.5);
+                frames.push_back(double(last) + 0.5);
+                for (auto &[i, e] : pk.keys) {
+                    if (e.size() < 2) continue;
+                    REQUIRE(a.moves(i));
+                    for (double n : frames) {
+                        if (n < 0) continue;
+                        const json want = host_stored(i, keyed_value(i, e, n));
+                        const json got = a.value(i, n);
+                        if (!near(got, want)) FAIL_CHECK(s.params[i].id << " frame " << n << ": " << got << " vs keys " << want);
+                        else if (n == std::floor(n) && got != want)
+                            FAIL_CHECK(s.params[i].id << " frame " << n << " not exact: " << got << " vs keys " << want);
+                    }
+                }
+            }
+        }
+        ++presets;
+    }
+    CHECK(presets >= 10);
+}
+
+TEST_CASE("procedural animation: loops for the whole effect, follows the frame rate, users take controls over") {
+    const Schema &s = schema();
+    const json gp = read_preset("Glitch pop");
+    const std::string text = animation_text(s, gp);
+    REQUIRE_FALSE(text.empty());
+    const Animation a30(s, text, 30), a24(s, text, 24);
+    CHECK(a30.pass() == 60);  // 2 s
+    CHECK(a24.pass() == 48);
+    const auto moving = a30.moving();
+    REQUIRE_FALSE(moving.empty());
+    // Every pass the same, however far in (the host keyframes stopped after their stretch).
+    for (size_t i : moving)
+        for (int64_t n : {int64_t(7), int64_t(31), int64_t(59)}) {
+            CAPTURE(s.params[i].id);
+            CHECK(a30.value(i, double(n)) == a30.value(i, double(n + 60 * 1800)));       // an hour on
+            CHECK(a30.value(i, double(n)) == a30.value(i, double(n + 60 * 1800 * 24)));  // a day on
+        }
+    // Same normalized times at another rate: frame 0 and the timeline's last frame agree.
+    for (size_t i : moving) {
+        CHECK(a30.value(i, 0) == a24.value(i, 0));
+        CHECK(near(a30.value(i, 59), a24.value(i, 47)));
+    }
+    // Before the effect's first frame: the first frame's value.
+    for (size_t i : moving) CHECK(a30.value(i, -5) == a30.value(i, 0));
+    // A control the user takes over leaves the animation; the others keep moving.
+    const std::string id = s.params[moving.front()].id;
+    const std::string off = animation_without(text, {id});
+    CHECK(off != text);
+    CHECK(animation_without(off, {id}) == off);  // already out
+    const Animation b(s, off, 30);
+    CHECK_FALSE(b.moves(moving.front()));
+    CHECK(b.taken_over() == 1);
+    CHECK(b.moving().size() == moving.size() - 1);
+    // Still looks, Screen Loop files, nonsense: not animated.
+    CHECK(animation_text(s, read_preset("Clean VHS")).empty());
+    CHECK(animation_text(s, read_preset("Wavy loop")).empty());  // timeline on, no keys
+    CHECK(animation_text(s, read_preset("Screen Loop/Bottom to top")).empty());
+    CHECK_FALSE(Animation(s, "", 30).active());
+    CHECK_FALSE(Animation(s, "{not json", 30).active());
+    CHECK_FALSE(Animation(s, R"({"kind": "something else"})", 30).active());
+    // A still look's procedural plan: the same values plan_preset writes.
+    const json cv = read_preset("Clean VHS");
+    const PresetPlan p = plan_preset_procedural(s, cv), q = plan_preset(s, cv, 30, 0);
+    CHECK(p.animation.empty());
+    REQUIRE(p.look.keys.size() == q.look.keys.size());
+    for (auto &[i, e] : q.look.keys) CHECK(same_value(p.look.keys.at(i).front().second, e.front().second));
+    // The procedural look at frame 0 is the timeline's first look.
+    const PresetPlan gpp = plan_preset_procedural(s, gp);
+    std::string where;
+    CHECK_MESSAGE(within_key_tolerance(s, procedural_look(gpp, a30, 0), as_host_look(preset_look_at_frame(s, gp, 0, 30)), &where), where);
+}

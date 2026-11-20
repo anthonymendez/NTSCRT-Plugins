@@ -204,9 +204,78 @@ struct PresetPlan {
     bool replaces_look = false;  // false for a Screen Loop file
     PresetKeys look;             // look.keys: every look param presets set (see above)
     std::vector<std::pair<size_t, json>> feedback;  // Screen Loop params: (index, value)
+    std::string animation;  // plan_preset_procedural: the animation text ("" = none / not planned that way)
 };
 PresetPlan plan_preset(const Schema &s, const json &preset, double fps, int64_t available, int64_t at = 0,
                        bool guards = false);
+
+// ---- procedural animation (animated presets without host keyframes) ----------
+// Since 0.6.0 an animated preset writes no keyframes: every look param presets set gets the
+// timeline's first-frame value as a plain value, and a hidden host param (OpenFX
+// "host_animation", FxPlug kAnimation) gets animation_text. Each frame the host computes the
+// moving params' values from it (Animation::value): exactly the values the host keyframes
+// preset_keys wrote gave (the same sparse keys within each pass, interpolated linearly the way
+// hosts interpolate them), from the effect's first frame, at the frame rate it renders with:
+// over the stretch the keyframes covered, holding outside it as they did ("keyed", see
+// plan_preset_procedural), or looping for as long as the effect runs (no "keyed").
+//
+// A param with host keyframes (an older project's preset keys, or the user's own) is not
+// animated: its keyframes win. A param the user edits (or a choice's "applies" writes) leaves
+// the animation (animation_without): the user's value then holds on every frame. Choosing
+// another preset, or (none), ends the animation. Old projects have no animation text and
+// render from their keyframes as before. docs/dev/CONTRACT-CHANGES.md (0.6.0).
+//
+// The text (JSON): {"kind": "ntscrt_animation", "version": 1, "look": the upgraded preset with
+// the timeline values every key gives alike left out of its keys, "moving": [param ids that can
+// move], "off": [param ids taken out of the animation], "keyed" (optional): {"fps", "first",
+// "frames"} the stretch to animate (frames from the effect's first frame at that rate)}.
+// Empty = not animated.
+std::string animation_text(const Schema &s, const json &preset);  // "" for a still look / a Screen Loop file
+// The text with params `ids` (schema ids) taken out of the animation (unchanged if already out).
+std::string animation_without(const std::string &text, const std::vector<std::string> &ids);
+
+class Animation {
+public:
+    Animation() = default;
+    // text: animation_text (empty / unreadable = nothing moves); fps: the host frame rate.
+    // Keeps pointers into s: s must outlive it (the hosts' schemas live for the process).
+    Animation(const Schema &s, const std::string &text, double fps);
+    bool active() const { return !curves_.empty(); }
+    int64_t pass() const { return pass_; }  // frames one timeline pass spans (0 = inactive)
+    bool moves(size_t i) const { return i < slot_.size() && slot_[i] >= 0; }
+    std::vector<size_t> moving() const;                     // the params it moves
+    bool moves_under(const std::string &path_prefix) const;  // moves a param below this look path
+    size_t taken_over() const { return taken_over_; }       // moving params the user took over
+    // Param i's (look-typed) value n frames after the effect's first frame (fractional: as a
+    // host interpolates between keyframes; before the first frame: the first frame's). moves(i) only.
+    json value(size_t i, double n) const;
+    size_t keys_per_pass() const;  // the keyframes one pass would have taken (diagnostics)
+
+private:
+    struct Curve {
+        size_t index = 0;
+        const ParamDef *def = nullptr;
+        bool stepped = false;
+        std::vector<json> v;                           // every frame of a pass
+        std::vector<std::pair<int64_t, json>> keys;    // numbers: the sparse keys of a pass, then (pass, v[0])
+    };
+    int64_t pass_ = 0;
+    size_t taken_over_ = 0;
+    bool held_ = false;              // "keyed": hold outside [first_, last_] as the keyframes did
+    int64_t first_ = 0, last_ = 0;
+    std::vector<int> slot_;  // param -> curves_ index, -1 = not moving
+    std::vector<Curve> curves_;
+};
+
+// What applying a preset writes with the procedural animation: plan_preset's values with every
+// look param a plain value (the timeline's first frame), and `animation` (empty for a still look).
+// fps / available / at as for preset_keys: with fps > 0 the animation records the stretch the
+// keyframes would have covered ("keyed": {fps, first, frames}) and, like them, holds its first
+// values before it and its last ones after it, so the pictures are the keyframed version's
+// frame for frame (look.pass / first / frames say which stretch; look.keys stay plain values).
+// Without "keyed" (fps 0) it loops for the whole effect.
+PresetPlan plan_preset_procedural(const Schema &s, const json &preset, double fps = 0, int64_t available = 0,
+                                  int64_t at = 0);
 
 // ---- choice "applies", Digital video formats -------------------------------
 // Values a Digital video format's (or an option's) "applies" map writes: (param, value).

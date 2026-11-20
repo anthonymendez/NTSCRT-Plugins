@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -196,6 +197,22 @@ struct InstanceState {
 
     std::mutex tile_m;  // held while a tiled render produces / copies a whole frame
     WholeFrame whole;
+
+    // The procedural animation (kAnimation's text at the timeline's rate), rebuilt when either changes.
+    std::mutex anim_m;
+    std::string anim_text;
+    double anim_fps = 0;
+    std::shared_ptr<const host::Animation> anim;
+    const void *look_anim = nullptr;  // under look_m: the animation `looks` were built with
+    std::shared_ptr<const host::Animation> animation(const std::string &text, double fps) {
+        std::lock_guard<std::mutex> l(anim_m);
+        if (!anim || text != anim_text || fps != anim_fps) {
+            anim = std::make_shared<const host::Animation>(GetShared().model.schema, text, fps);
+            anim_text = text;
+            anim_fps = fps;
+        }
+        return anim;
+    }
 
     Slot *acquire(id<MTLDevice> device) {
         {
@@ -461,6 +478,9 @@ NSError *MakeError(NSInteger code, NSString *msg) {
     const FxParameterFlags hidden = PF(uint32_t(kFxParameterFlag_HIDDEN) | uint32_t(kFxParameterFlag_NOT_ANIMATABLE));
     ok &= [api addStringParameterWithName:@"Base Look" parameterID:kBaseLook defaultValue:@"{}" parameterFlags:hidden];
     ok &= [api addStringParameterWithName:@"Base Screen Loop" parameterID:kBaseFeedback defaultValue:@"{}" parameterFlags:hidden];
+    // The animated preset's animation (host::animation_text): the moving values are computed per
+    // frame, no keyframes. Saved with the project, never shown.
+    ok &= [api addStringParameterWithName:@"Animation" parameterID:kAnimation defaultValue:@"" parameterFlags:hidden];
     if (!ok && error) *error = MakeError(kFxError_InvalidParameter, @"Unable to create NTSCRT parameters");
     return ok;
 }
@@ -511,10 +531,28 @@ static int GetInt(id<FxParameterRetrievalAPI_v6> api, UInt32 pid, CMTime t, int 
     return [api getIntValue:&v fromParameter:pid atTime:t] ? v : fallback;
 }
 
-// The look and feedback at time t (the shared model; Screen Loop off = "enabled": false).
-static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
+static std::string GetString(id<FxParameterRetrievalAPI_v6> api, UInt32 pid) {
+    NSString *v = nil;
+    if (![api getStringParameterValue:&v fromParameter:pid] || !v) return std::string();
+    const char *c = v.UTF8String;
+    return c ? std::string(c) : std::string();
+}
+
+// NTSCRT_PRESET_KEYFRAMES=1: animated presets as host keyframes, as before 0.6.0 (comparisons).
+static bool PresetKeyframes() {
+    const char *e = getenv("NTSCRT_PRESET_KEYFRAMES");
+    return e && *e && strcmp(e, "0") != 0;
+}
+
+// The look and feedback at time t (the shared model; Screen Loop off = "enabled": false). With an
+// animation: its values n frames from the effect's start for the params it moves, except those
+// in `keyed` (host ids with keyframes: they win).
+static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t, const host::Animation *anim = nullptr,
+                           double n = 0, const std::set<uint32_t> *keyed = nullptr) {
     const Model &m = GetShared().model;
-    return m.build([&](const Param &p) { return GetHostValue(api, m, p, t); });
+    HostGetter get = [&](const Param &p) { return GetHostValue(api, m, p, t); };
+    if (!anim || !anim->active()) return m.build(get);
+    return m.build(m.animated_getter(get, *anim, n, [&](const Param &p) { return keyed && keyed->count(p.host_id) > 0; }));
 }
 
 // Grey out / hide params per enabled_if / visible_if at time t.
@@ -558,9 +596,11 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
         *frames = int64_t(std::llround(CMTimeGetSeconds(dur) * *fps));
 }
 
-// Applies a preset (bundled or a loaded file) as the shared model plans it (Model::plan_preset,
+// Applies a preset (bundled or a loaded file) as the shared model plans it (Model::plan_preset_procedural,
 // the same plan the OpenFX plug-in follows): a look preset replaces the look, so every look
-// parameter presets set loses its keyframes; an animated one (upstream timeline keys) then gets
+// parameter presets set loses its keyframes and gets a plain value; an animated one (upstream
+// timeline keys) stores its animation in kAnimation (no keyframes; pluginState: computes the moving
+// values). With NTSCRT_PRESET_KEYFRAMES=1 (Model::plan_preset), as before 0.6.0, it gets
 // sparse host keyframes (linear segments), the timeline looping from the effect's first frame,
 // for a stretch of whole loops around the playhead (host::preset_keys: about kMaxPresetKeys keys,
 // at most kMaxKeyedFrames frames, the whole effect when it is shorter). A Screen Loop file (or a
@@ -585,7 +625,13 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     [self effectFps:&fps frame:&fd start:&start frames:&frames];
     // The keyed stretch covers the playhead (a long effect is keyed around it, not just from its start).
     const double at_s = CMTIME_IS_NUMERIC(t) && CMTIME_IS_NUMERIC(start) ? CMTimeGetSeconds(CMTimeSubtract(t, start)) : 0.0;
-    const HostPlan plan = m.plan_preset(preset, fps, frames, std::max<int64_t>(0, int64_t(std::llround(at_s * fps))));
+    const int64_t at_frame = std::max<int64_t>(0, int64_t(std::llround(at_s * fps)));
+    // Since 0.6.0 an animated preset writes plain values and the animation (kAnimation), no
+    // keyframes; the animation follows the stretch the keyframes would have covered, so the
+    // pictures are the keyframed version's (host::plan_preset_procedural).
+    const bool keyframes = PresetKeyframes();
+    const HostPlan plan = keyframes ? m.plan_preset(preset, fps, frames, at_frame)
+                                    : m.plan_preset_procedural(preset, fps, frames, at_frame);
     const BOOL was = _applying;
     _applying = YES;
     size_t keyed = 0;
@@ -613,8 +659,19 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     }
     for (const auto &[id, v] : plan.feedback)
         if (const Param *p = m.find_host(id)) SetHostValue(set, *p, v, t);
+    if (plan.replaces_look) {
+        id<FxParameterRetrievalAPI_v6> get = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
+        if (!get || GetString(get, kAnimation) != plan.animation)
+            [set setStringParameterValue:@(plan.animation.c_str()) toParameter:kAnimation];
+    }
     _applying = was;
-    if (plan.animated()) {
+    if (!plan.animation.empty()) {
+        std::ostringstream o;
+        o << "animated preset: " << plan.pass << " frames per pass, frames " << plan.first << ".."
+          << plan.first + plan.frames - 1 << " animated, 0 keyframes (" << plan.animation.size()
+          << " bytes of animation)";
+        LogLine(o.str(), false);
+    } else if (plan.animated()) {
         std::ostringstream o;
         o << "animated preset: " << plan.pass << " frames per pass, frames " << plan.first << ".."
           << plan.first + plan.frames - 1 << " keyed, " << keyed
@@ -629,6 +686,11 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
 // Writes host values (a Digital video format, a choice option's "applies") at time t.
 - (void)applyHostValues:(const std::map<uint32_t, json> &)vals atTime:(CMTime)t {
     if (vals.empty()) return;
+    {
+        std::vector<uint32_t> written;
+        for (const auto &[id, v] : vals) written.push_back(id);
+        [self takeOver:written];
+    }
     id<FxParameterSettingAPI_v5> set = [_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
     if (!set) return;
     const Model &m = GetShared().model;
@@ -651,6 +713,77 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     const Param *edited = m.find_host(pid);
     if (!edited) return;
     [self applyHostValues:m.edit_effects(*edited, [&](const Param &p) { return GetHostValue(get, m, p, t); }) atTime:t];
+}
+
+// The animation kAnimation holds, at the timeline's rate.
+- (std::shared_ptr<const host::Animation>)animationWith:(id<FxParameterRetrievalAPI_v6>)get fps:(double)fps {
+    return _state->animation(get ? GetString(get, kAnimation) : std::string(), fps);
+}
+
+// The params the animation moves that have keyframes (host ids): their keyframes win.
+- (std::set<uint32_t>)keyedAmong:(const host::Animation &)a {
+    std::set<uint32_t> out;
+    const Model &m = GetShared().model;
+    for (size_t i : a.moving())
+        if ([self parameterIsKeyed:m.params[i].host_id]) out.insert(m.params[i].host_id);
+    return out;
+}
+
+// Frames from the effect's start to time t (an input time, as render and action times are).
+- (int64_t)effectFrameAt:(CMTime)t frameDuration:(CMTime)frameDur {
+    id<FxTimingAPI_v4> timing = [_apiManager apiForProtocol:@protocol(FxTimingAPI_v4)];
+    if (!timing) return 0;
+    CMTime tl = kCMTimeZero, start = kCMTimeZero, startTL = kCMTimeZero;
+    [timing timelineTime:&tl fromInputTime:t];
+    [timing startTimeForEffect:&start];
+    [timing timelineTime:&startTL fromInputTime:start];
+    CMTime offset = CMTimeSubtract(tl, startTL);
+    return std::max<int64_t>(0, frame_from_offset(offset.value, offset.timescale, frameDur.value, frameDur.timescale));
+}
+
+// Controls the user set by hand (or a choice's "applies" wrote) leave the animation: their value
+// holds on every frame (host::animation_without).
+- (void)takeOver:(const std::vector<uint32_t> &)ids {
+    id<FxParameterRetrievalAPI_v6> get = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
+    id<FxParameterSettingAPI_v5> set = [_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
+    if (!get || !set) return;
+    const std::string text = GetString(get, kAnimation);
+    if (text.empty()) return;
+    double fps = 30;
+    CMTime fd = CMTimeMake(1, 30), start = kCMTimeZero;
+    int64_t frames = 0;
+    [self effectFps:&fps frame:&fd start:&start frames:&frames];
+    const auto anim = [self animationWith:get fps:fps];
+    const Model &m = GetShared().model;
+    std::vector<std::string> taken;
+    for (uint32_t id : ids)
+        if (const Param *p = m.find_host(id); p && anim->moves(p->index)) taken.push_back(p->id);
+    if (taken.empty()) return;
+    const std::string next = host::animation_without(text, taken);
+    if (next == text) return;
+    const BOOL was = _applying;
+    _applying = YES;
+    [set setStringParameterValue:@(next.c_str()) toParameter:kAnimation];
+    _applying = was;
+    _state->generation.fetch_add(1);
+    _state->flush(NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
+    std::string list;
+    for (const auto &id : taken) list += (list.empty() ? "" : ", ") + id;
+    LogLine("taken out of the animation (edited by hand): " + list, false);
+}
+
+// "(Custom)" chosen in the Preset menu: the animation stops (the controls keep their values).
+- (void)stopAnimation {
+    id<FxParameterRetrievalAPI_v6> get = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
+    id<FxParameterSettingAPI_v5> set = [_apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
+    if (!get || !set || GetString(get, kAnimation).empty()) return;
+    const BOOL was = _applying;
+    _applying = YES;
+    [set setStringParameterValue:@"" toParameter:kAnimation];
+    _applying = was;
+    _state->generation.fetch_add(1);
+    _state->flush(NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
+    LogLine("Preset (Custom): the animation stopped", false);
 }
 
 // Does host parameter `pid` have keyframes (FxKeyframeAPI_v3, channel 0)? Unknown = yes.
@@ -690,8 +823,25 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
         }
         return YES;
     }
-    // Drop only the caches this parameter can affect (the OpenFX plug-in does the same).
-    const uint32_t mask = GetShared().model.cache_mask(paramID, [self parameterIsKeyed:paramID]);
+    if (paramID == kAnimation) {  // the animation changed (a preset, a control taken over, an undo)
+        _state->generation.fetch_add(1);
+        _state->flush(NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
+        return YES;
+    }
+    // Drop only the caches this parameter can affect (the OpenFX plug-in does the same). A param
+    // the animation moves counts as keyed.
+    bool keyed = [self parameterIsKeyed:paramID];
+    if (!keyed) {
+        if (const Param *p = GetShared().model.find_host(paramID)) {
+            id<FxParameterRetrievalAPI_v6> g = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
+            double fps = 30;
+            CMTime fd = CMTimeMake(1, 30), start = kCMTimeZero;
+            int64_t frames = 0;
+            [self effectFps:&fps frame:&fd start:&start frames:&frames];
+            keyed = [self animationWith:g fps:fps]->moves(p->index);
+        }
+    }
+    const uint32_t mask = GetShared().model.cache_mask(paramID, keyed);
     if (mask) {
         _state->generation.fetch_add(1);
         _state->flush(mask);
@@ -705,6 +855,8 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
             const host::Preset &mp = sh.menu[size_t(idx - 1)];
             if (mp.format) [self applyHostValues:sh.model.applies_host_values(mp.data) atTime:time];  // the rest of the look stays
             else [self applyPreset:mp.data atTime:time];
+        } else if (idx == 0) {
+            [self stopAnimation];  // "(Custom)": the values stay, nothing moves by itself any more
         }
     } else if (get && paramID == kScreenLoopMenu) {
         // Off / (Custom) switch Screen Loop (the "Screen Loop" checkbox, schema screenloop.enabled);
@@ -715,6 +867,8 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
         else if (idx >= kFirstScreenLoopPreset && size_t(idx - kFirstScreenLoopPreset) < sh.loops.size())
             [self applyPreset:sh.loops[size_t(idx - kFirstScreenLoopPreset)].data atTime:time];
     } else if (sh.model.find_host(paramID)) {
+        // A hand edit (or the user's keyframe) of a control the animation moves: the user's from now on.
+        [self takeOver:std::vector<uint32_t>{uint32_t(paramID)}];
         [self applyChoiceEffectsOf:paramID atTime:time];
     }
     [self updateParameterStatesAtTime:time];
@@ -762,8 +916,16 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
     id<FxCustomParameterActionAPI_v4> action = [_apiManager apiForProtocol:@protocol(FxCustomParameterActionAPI_v4)];
     id<FxParameterRetrievalAPI_v6> get = [_apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
     if (!action || !get) return;
-    // Host called us: the parameter APIs are valid right now.
-    const host::Built b = BuildAt(get, [action currentTime]);
+    // Host called us: the parameter APIs are valid right now. The look this frame renders with
+    // (the animation's values included).
+    const CMTime now = [action currentTime];
+    double fps = 30;
+    CMTime fd = CMTimeMake(1, 30), start = kCMTimeZero;
+    int64_t frames = 0;
+    [self effectFps:&fps frame:&fd start:&start frames:&frames];
+    const auto anim = [self animationWith:get fps:fps];
+    const std::set<uint32_t> keyed = anim->active() ? [self keyedAmong:*anim] : std::set<uint32_t>();
+    const host::Built b = BuildAt(get, now, anim.get(), double([self effectFrameAt:now frameDuration:fd]), &keyed);
     // Upstream's look file with our "screen_loop" (Load applies it), and while the loop is on an
     // upstream Screen Loop file beside it: what the OpenFX plug-in saves.
     const std::string look = host::saved_preset(b.look, b.feedback).dump(2);
@@ -861,7 +1023,10 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
 
     InstanceState &S = *_state;
     const uint64_t gen = S.generation.load();
-    const host::Built now = BuildAt(get, renderTime);
+    // The animated preset's values for this frame (keyframes on a param win).
+    const auto anim = [self animationWith:get fps:st.fps];
+    const std::set<uint32_t> keyed_moving = anim->active() ? [self keyedAmong:*anim] : std::set<uint32_t>();
+    const host::Built now = BuildAt(get, renderTime, anim.get(), double(st.frame), &keyed_moving);
     st.look = now.look.dump();
     st.feedback = now.feedback.is_null() ? std::string() : now.feedback.dump();
     st.seed = host::render_seed(GetInt(get, kSeed, renderTime, 0));
@@ -906,13 +1071,14 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
             S.keys_sig = sig;
             S.keys_sig_gen = gen;
         }
-        if (sig != 0) {
+        if (sig != 0 || anim->active()) {
             auto key = [](CMTime t) { return std::make_pair(int64_t(t.value), int32_t(t.timescale)); };
             {
                 std::lock_guard<std::mutex> l(S.look_m);
-                if (S.look_gen != gen || S.keys_sig != sig || S.looks.size() > 1024) {
+                if (S.look_gen != gen || S.keys_sig != sig || S.looks.size() > 1024 || S.look_anim != anim.get()) {
                     S.looks.clear();
                     S.look_gen = gen;
+                    S.look_anim = anim.get();
                 }
                 S.looks[key(renderTime)] = st.look;
             }
@@ -925,7 +1091,7 @@ static host::Built BuildAt(id<FxParameterRetrievalAPI_v6> api, CMTime t) {
                     if (it != S.looks.end()) lk = it->second;
                 }
                 if (lk.empty()) {
-                    lk = BuildAt(get, tk).look.dump();
+                    lk = BuildAt(get, tk, anim.get(), double(st.frame - k), &keyed_moving).look.dump();
                     std::lock_guard<std::mutex> l(S.look_m);
                     if (S.look_gen == gen) S.looks[key(tk)] = lk;
                 }

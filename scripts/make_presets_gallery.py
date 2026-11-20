@@ -56,9 +56,9 @@ PROJECT = "NTSCRT Presets Gallery"
 GROUPS = [
     ("look", "Looks", "Bundled looks with fixed settings (the noise, waves and glitches still move every frame). "
                       "Choose them in **Presets → Preset**."),
-    ("animated", "Animated looks", "These looks carry timeline keys: choosing one in **Presets → Preset** writes "
-                                   "keyframes, one pass of the timeline from the effect's first frame, repeated until "
-                                   "the effect ends. Each GIF shows one pass."),
+    ("animated", "Animated looks", "These looks carry timeline keys: choosing one in **Presets → Preset** plays "
+                                   "one pass of the timeline from the effect's first frame, repeated (no keyframes). "
+                                   "Each GIF shows one pass."),
     ("format", "Digital video formats", "Entries named `Digital video/<format>` in **Presets → Preset**: they turn "
                                         "on the Digital video stage (a digital camera and codec instead of tape) and "
                                         "set its values and the width; the rest of the look stays as it was "

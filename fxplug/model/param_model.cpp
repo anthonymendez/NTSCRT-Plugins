@@ -200,6 +200,32 @@ HostPlan Model::plan_preset(const json &preset, double fps, int64_t available, i
     return out;
 }
 
+HostPlan Model::plan_preset_procedural(const json &preset, double fps, int64_t available, int64_t at) const {
+    const host::PresetPlan p = host::plan_preset_procedural(schema, preset, fps, available, at);
+    HostPlan out;
+    out.replaces_look = p.replaces_look;
+    out.pass = p.look.pass;
+    out.first = p.look.first;
+    out.frames = p.look.frames;
+    for (const auto &[i, entries] : p.look.keys) {
+        auto h = to_host_value(params[i], entries.front().second);
+        out.look[params[i].host_id].emplace_back(0, h ? *h : default_host_value(params[i]));
+    }
+    out.feedback = to_host_values(p.feedback);
+    out.animation = p.animation;
+    return out;
+}
+
+HostGetter Model::animated_getter(const HostGetter &get, const host::Animation &anim, double n,
+                                  const std::function<bool(const Param &)> &keyed) const {
+    return [this, get, &anim, n, keyed](const Param &p) -> json {
+        if (anim.moves(p.index) && !keyed(p)) {
+            if (auto h = to_host_value(p, anim.value(p.index, n))) return *h;
+        }
+        return get(p);
+    };
+}
+
 HostValues Model::applies_host_values(const json &applies) const {
     return to_host_values(host::applies_values(schema, applies));
 }
@@ -226,6 +252,7 @@ uint32_t Model::cache_mask(uint32_t pid, bool keyed) const {
     case kDebugLogging:
     case kOpenLogs:
     case kDebugAll:
+    case kAnimation:       // the plug-in flushes for it itself (it changes every moving param)
     case kTopGroup:
     case kExtrasGroup: return 0;
     default: break;

@@ -5,6 +5,7 @@
 #include <ntscrt/ntscrt.h>
 
 #include "mock_host.h"
+#include "ntscrt_host/params.h"
 #include "../../core/params/timeline.h"
 #include "../../core/stages/digital/migrate.h"
 
@@ -144,6 +145,32 @@ struct Fixture {
         return -1;
     }
 };
+
+// Animated presets as host keyframes (NTSCRT_PRESET_KEYFRAMES=1, how 0.5 applied them) while
+// one of these lives; the plug-in reads the variable on every preset it applies.
+struct PresetKeyframes {
+    explicit PresetKeyframes(bool on) { set(on ? "1" : ""); }
+    ~PresetKeyframes() { set(""); }
+    static void set(const char *v) {
+#ifdef _WIN32
+        _putenv_s("NTSCRT_PRESET_KEYFRAMES", v);
+#else
+        if (*v) setenv("NTSCRT_PRESET_KEYFRAMES", v, 1);
+        else unsetenv("NTSCRT_PRESET_KEYFRAMES");
+#endif
+    }
+};
+const ntscrt::host::Schema &host_schema() {
+    static const ntscrt::host::Schema s = ntscrt::host::Schema::parse(ntscrt_param_schema_json());
+    return s;
+}
+size_t schema_index(const std::string &host_param_name) {
+    const auto &ps = host_schema().params;
+    for (size_t i = 0; i < ps.size(); ++i)
+        if (ps[i].name == host_param_name) return i;
+    FAIL("no schema param " << host_param_name);
+    return 0;
+}
 
 // A keyed mock param's first component at time t, as the mock host interpolates it.
 double keyed_at(const mock::Param &p, double t) {
@@ -858,27 +885,23 @@ AnimatedTimings animated_preset_an_hour_in(bool adjustment_clip, const char *pre
     }
     r.play_ms = play / 10;
 
-    // The keys cover the playhead and the clip after it; the animation moves there.
-    size_t moving = 0;
-    for (auto &p : f.inst->params.params) {
-        if (p->keys.size() < 2) continue;
-        ++moving;
-        CAPTURE(p->name);
-        CHECK(p->keys.begin()->first <= T);
-        CHECK(p->keys.rbegin()->first >= T + 299);  // at least a pass after the playhead
-        if (!adjustment_clip) CHECK(p->keys.begin()->first >= 216000);  // nothing before the clip
-    }
-    CHECK(moving > 5);
+    // No keyframes (0.5: ~3,000 around the playhead): the effect's animation moves the values
+    // by itself, here an hour in as anywhere.
+    const std::string anim_text = f.param("host_animation")->str;
+    REQUIRE_FALSE(anim_text.empty());
+    const ntscrt::host::Animation anim(host_schema(), anim_text, fps);
+    CHECK(anim.moving().size() > 5);
+    const double n0 = adjustment_clip ? T : T - 216000;  // frames from the effect's first frame
     bool varies = false;
-    for (auto &p : f.inst->params.params)
-        if (p->keys.size() > 1 && p->type == kOfxParamTypeDouble)
-            for (int k = 1; k < 300 && !varies; k += 7) varies = keyed_at(*p, T + k) != keyed_at(*p, T);
+    for (size_t i : anim.moving())
+        for (int k = 1; k < 300 && !varies; k += 7) varies = anim.value(i, n0 + k) != anim.value(i, n0);
     CHECK(varies);
 
-    // A Glitch edit (a value the preset doesn't key): the receiver re-runs, from its segment's start.
+    // A Glitch edit (a value the preset doesn't animate): the receiver re-runs, from its segment's start.
     mock::Param *edit = nullptr;
     for (auto &p : f.inst->params.params)
-        if (p->name.rfind("glitch_", 0) == 0 && p->type == kOfxParamTypeDouble && p->keys.empty()) {
+        if (p->name.rfind("glitch_", 0) == 0 && p->type == kOfxParamTypeDouble && p->keys.empty() &&
+            !anim.moves(schema_index(p->name))) {
             edit = p.get();
             break;
         }
@@ -914,8 +937,8 @@ TEST_CASE("high frame number: an animated preset an hour in is applied and rende
         MESSAGE(o.str());
         std::printf("[timing] %s\n", o.str().c_str());
         // 0.5.0-rc.2: 97,200 keys (every frame of 3,600, an hour before the clip); the first
-        // render after it built 216,000 looks.
-        CHECK(r.keys <= 3100);
+        // render after it built 216,000 looks. 0.5.0-rc.3 to 0.5.3: ~3,000 sparse keys. 0.6.0: none.
+        CHECK(r.keys == 0);
         CHECK(r.apply_ms < 1000);
         CHECK(r.first_ms < 1000);
         CHECK(r.glitch_ms < 1000);
@@ -948,41 +971,63 @@ TEST_CASE("presets: timeline keyframes, menus with applies, save/load round trip
         return out;
     };
 
-    SUBCASE("an animated preset keys every moving param from the effect's first frame") {
-        // mock clip: frames 10..60 at 25 fps; "Glitch pop" lasts 2 s = 50 frames, then loops.
+    SUBCASE("an animated preset animates by itself, without keyframes") {
+        // An older project's keyframes on a param the preset sets: removed, as before.
+        mock::Param *noise = f.param("ntsc_composite_preemphasis");
+        noise->keys[12.0] = {0.2};
+        noise->keys[30.0] = {0.9};
         choose("host_preset", "Glitch pop");
         const json preset = ntscrt::digital::migrate::upgraded(read_preset("Glitch pop"));
         const auto tl = ntscrt::timeline::parse(preset);
         const auto rules = ntscrt::timeline::Rules::from_schema(s);
-        mock::Param *noise = f.param("ntsc_composite_preemphasis");
-        // sparse keys (where the curve bends, with a guard key either side), from the first frame to the last
-        CHECK(noise->keys.size() > 3);
-        CHECK(noise->keys.size() < 51);
-        CHECK(noise->keys.begin()->first == 10.0);
-        CHECK(noise->keys.rbegin()->first == 60.0);
-        for (int n = 0; 10 + n <= 60; ++n) {
-            CAPTURE(n);
-            const json look = ntscrt::timeline::look_at_frame(preset, tl, rules, n, 25.0);
-            // Glitch pop's keys are all Linear: the host's linear interpolation is exact
-            CHECK(keyed_at(*noise, 10.0 + n) ==
-                  doctest::Approx(look["ntsc"]["settings"]["composite_preemphasis"].get<double>()));
-        }
-        // a param the preset holds still: its value, no keys
-        CHECK(f.param("downscale_width")->keys.empty());
+        CHECK(keyed().empty());  // no keyframes anywhere
+        CHECK(noise->key_clears > 0);
+        // every param holds the timeline's first frame
+        const json first = ntscrt::timeline::look_at_frame(preset, tl, rules, 0, 25.0);
+        CHECK(noise->v[0] == doctest::Approx(first["ntsc"]["settings"]["composite_preemphasis"].get<double>()));
         CHECK(f.param("downscale_width")->v[0] == 256);
-        // stepped params: a key where the value changes only
-        for (const auto &sp : s["params"]) {
-            if (sp["type"] != "bool" && sp["type"] != "choice") continue;
-            CAPTURE(sp["id"]);
-            CHECK(f.param(host_name(sp["id"]))->keys.size() < 51);
+        // the animation: in the hidden param, moving what the keyframes moved
+        mock::Param *anim = f.param("host_animation");
+        REQUIRE_FALSE(anim->str.empty());
+        const ntscrt::host::Animation a(host_schema(), anim->str, 25.0);
+        const size_t ni = schema_index("ntsc_composite_preemphasis");
+        CHECK(a.moves(ni));
+        CHECK(a.moving().size() > 5);
+        const auto pk = ntscrt::host::preset_keys(host_schema(), read_preset("Glitch pop"), 25.0, 51, 10);
+        for (int n = 0; n <= 50; ++n) {
+            CAPTURE(n);
+            CHECK(a.value(ni, n) == ntscrt::host::interpolated_key_value(host_schema().params[ni], pk.keys.at(ni), n));
         }
-        const auto moving = keyed();
-        MESSAGE(moving.size() << " params keyed");
-        CHECK(moving.size() > 5);
-        // another preset replaces the animation
+        // a hand edit of a moving control takes it out of the animation; the others keep moving
+        noise->v[0] = 0.5;
+        REQUIRE(f.changed("ntsc_composite_preemphasis") == kOfxStatOK);
+        const ntscrt::host::Animation b(host_schema(), anim->str, 25.0);
+        CHECK_FALSE(b.moves(ni));
+        CHECK(b.taken_over() == 1);
+        CHECK(b.moving().size() == a.moving().size() - 1);
+        // "(none)" stops the animation, the values stay
+        choose("host_preset", "(none)");
+        CHECK(anim->str.empty());
+        CHECK(noise->v[0] == doctest::Approx(0.5));
+        // another animated preset starts its own; a still one ends it
+        choose("host_preset", "V Hold glitch");
+        CHECK_FALSE(anim->str.empty());
         choose("host_preset", "Clean VHS");
+        CHECK(anim->str.empty());
         CHECK(keyed().empty());
-        CHECK(f.param("ntsc_composite_preemphasis")->key_clears > 0);
+        // NTSCRT_PRESET_KEYFRAMES=1: keyframes as in 0.5 (and no animation)
+        {
+            PresetKeyframes legacy(true);
+            choose("host_preset", "Glitch pop");
+            CHECK(anim->str.empty());
+            CHECK(noise->keys.size() > 3);
+            CHECK(noise->keys.begin()->first == 10.0);
+            CHECK(noise->keys.rbegin()->first == 60.0);
+        }
+        // ... and the procedural preset over those keys removes them
+        choose("host_preset", "Glitch pop");
+        CHECK(keyed().empty());
+        CHECK_FALSE(anim->str.empty());
     }
 
     SUBCASE("Horizontal resolution sets the width; editing the width makes it Custom") {
@@ -1066,6 +1111,7 @@ TEST_CASE("presets: timeline keyframes, menus with applies, save/load round trip
 // (the reference), and the same frames are rendered again. Glitch included: its receiver
 // reads every earlier frame's settings.
 TEST_CASE("presets: sparse keyframes render like a key on every frame") {
+    PresetKeyframes legacy(true);  // the keyframes 0.5 wrote (the procedural animation gives their values)
     const int w = 320, h = 180, last = 400;
     const double fps = 30;
     const json schema = json::parse(ntscrt_param_schema_json());
@@ -1169,6 +1215,213 @@ TEST_CASE("presets: sparse keyframes render like a key on every frame") {
         }
     }
     MESSAGE("worst mean diff, sparse vs per-frame keys: " << worst << " of 255");
+}
+
+// The procedural animation (0.6.0) renders exactly what the keyframes 0.5.0-rc.3 to 0.5.3 wrote
+// rendered (NTSCRT_PRESET_KEYFRAMES=1 writes them still): the same pixels on frames across the
+// keyed stretch and before / after it (the keyframes held their first / last values there; Glitch's
+// receiver replays earlier frames), at the start of a clip and an hour into an Adjustment Clip,
+// at 60, 24 and 29.97 fps.
+namespace {
+struct PictureFixture : Fixture {
+    int w = 96, h = 54;  // small: CI renders on the CPU (WARP); equality holds at any size
+    std::vector<float> out;
+    PictureFixture(double fps, bool adjustment) {
+        create();
+        mock::Clip &src = *inst->clips[kOfxImageEffectSimpleSourceClipName];
+        mock::Clip &dst = *inst->clips[kOfxImageEffectOutputClipName];
+        src.width = dst.width = w;
+        src.height = dst.height = h;
+        src.any_frame.resize(size_t(w) * h * 4);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                float *p = &src.any_frame[(size_t(y) * w + x) * 4];
+                p[0] = x / float(w - 1);
+                p[1] = y / float(h - 1);
+                p[2] = float((x / 16 + y / 16) % 2);
+                p[3] = 1.f;
+            }
+        dst.any_frame.assign(src.any_frame.size(), 0.f);
+        src.any_frame_last = dst.any_frame_last = 1000000;
+        for (mock::Clip *c : {&src, &dst}) {
+            c->props.set(kOfxImageEffectPropFrameRange, {0.0, adjustment ? 1999.0 : 20000.0});
+            c->props.set(kOfxImageEffectPropFrameRate, {fps});
+        }
+        inst->props.set(kOfxImageEffectPropFrameRate, {fps});
+        inst->props.set(kOfxImageEffectInstancePropEffectDuration, {adjustment ? 2000.0 : 20001.0});
+        host.on_release = [this](const mock::Image &im) {
+            if (im.props.s(kOfxImagePropUniqueIdentifier).rfind(kOfxImageEffectOutputClipName, 0) == 0) out = im.px;
+        };
+    }
+    std::vector<float> render(double t) {
+        mock::PropSet in;
+        in.set(kOfxPropTime, {t});
+        in.set(kOfxImageEffectPropFieldToRender, {std::string(kOfxImageFieldNone)});
+        in.set(kOfxImageEffectPropRenderWindow, {0, 0, w, h});
+        in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
+        in.set(kOfxImageEffectPropSequentialRenderStatus, {0});
+        in.set(kOfxImageEffectPropInteractiveRenderStatus, {0});
+        in.set(kOfxImageEffectPropRenderQualityDraft, {0});
+        REQUIRE(host.action(plug, kOfxImageEffectActionRender, inst.get(), &in) == kOfxStatOK);
+        return out;
+    }
+    void choose(const std::string &preset, double t) {
+        mock::Param *pp = param("host_preset");
+        pp->v[0] = choice_index(*pp, preset);
+        REQUIRE(pp->v[0] > 0);
+        REQUIRE(changed("host_preset", t) == kOfxStatOK);
+    }
+};
+std::string read_bundled(const std::string &name) {
+    std::ifstream in(std::string(NTSCRT_SOURCE_DIR) + "/presets/" + name + ".json", std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+}  // namespace
+
+TEST_CASE("presets: the procedural animation renders exactly like the keyframes it replaces") {
+    size_t compared = 0, keyframes = 0;
+    double keyed_ms = 0, procedural_ms = 0;
+    auto timed = [](auto fn) {
+        const auto t0 = std::chrono::steady_clock::now();
+        fn();
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+    for (double fps : {60.0, 24.0, 30000.0 / 1001.0}) {
+        std::vector<const char *> names = {"Glitch pop", "V Hold glitch", "5 second blips"};
+        if (fps == 60.0) names.insert(names.end(), {"15 second glitches", "Tracking Noise up", "Two blips loop"});
+        for (const char *name : names) {
+            for (bool adjustment : {false, true}) {
+                CAPTURE(fps);
+                CAPTURE(std::string(name));
+                CAPTURE(adjustment);
+                // The playhead when the preset is chosen: 40 frames into a clip starting at 0, or an
+                // hour (+79 frames) into the timeline on an Adjustment Clip (frame numbers = host times).
+                const double at = adjustment ? std::round(3600 * fps) + 79 : 40;
+                const auto pk = ntscrt::host::preset_keys(host_schema(), json::parse(read_bundled(name)), fps,
+                                                          adjustment ? 0 : 20001, int64_t(at));
+                REQUIRE(pk.animated());
+                const int64_t first = pk.first, last = pk.first + pk.frames - 1, P = pk.pass;
+                std::vector<double> frames = {double(first), at, at + 1, at + 17, double(first + P - 1),
+                                              double(std::min(last, first + P)), double(last - 1), double(last),
+                                              double(last + P / 3 + 1), double(last + 7 * P + 5)};  // after the stretch
+                if (first > 0) frames.push_back(double(first - P / 2));                            // before it
+                std::vector<std::vector<float>> keyed, procedural;
+                {
+                    PresetKeyframes legacy(true);
+                    PictureFixture f(fps, adjustment);
+                    keyed_ms += timed([&] { f.choose(name, at); });
+                    size_t keys = 0;
+                    for (auto &p : f.inst->params.params) keys += p->keys.size();
+                    REQUIRE(keys > 0);
+                    keyframes += keys;
+                    CHECK(f.param("host_animation")->str.empty());
+                    for (double t : frames) keyed.push_back(f.render(t));
+                }
+                {
+                    PictureFixture f(fps, adjustment);
+                    procedural_ms += timed([&] { f.choose(name, at); });
+                    for (auto &p : f.inst->params.params) CHECK_MESSAGE(p->keys.empty(), p->name);
+                    REQUIRE_FALSE(f.param("host_animation")->str.empty());
+                    for (double t : frames) procedural.push_back(f.render(t));
+                }
+                for (size_t k = 0; k < frames.size(); ++k) {
+                    CAPTURE(frames[k]);
+                    REQUIRE(keyed[k].size() == procedural[k].size());
+                    size_t differ = 0;
+                    for (size_t i = 0; i < keyed[k].size(); ++i) differ += keyed[k][i] != procedural[k][i];
+                    CHECK_MESSAGE(differ == 0, differ << " of " << keyed[k].size() << " values differ");
+                    ++compared;
+                }
+            }
+        }
+    }
+    MESSAGE(compared << " frames compared with the keyframed version");
+    std::printf("[procedural] %zu frames compared with the keyframed version; choosing the presets (24 times): "
+                "keyframes %.1f ms in all (%zu keyframes), procedural %.1f ms (0 keyframes)\n",
+                compared, keyed_ms, keyframes, procedural_ms);
+}
+
+// User keyframes win over the animation for their control; a hand edit takes the control out of
+// it (the same picture as a keyframed constant); an older project's keyframes (no animation in
+// the effect) render as they did and stay keyframes through unrelated edits.
+TEST_CASE("presets: user keyframes and edits on top of an animated preset; old projects' keyframes") {
+    const double fps = 60, at = 40;
+    const std::string name = "Glitch pop";
+    const char *x = "ntsc_composite_preemphasis";
+    const size_t xi = schema_index(x);
+    std::vector<float> animated, keyed_const, edited;
+    double c = 0, frame_n = 0;
+    size_t moving_before = 0;
+    {
+        PictureFixture f(fps, false);
+        f.choose(name, at);
+        const ntscrt::host::Animation a(host_schema(), f.param("host_animation")->str, fps);
+        REQUIRE(a.moves(xi));
+        // a frame where the animation moves it away from frame 0's value
+        double n = 0;
+        for (int k = 1; k < a.pass() && n == 0; ++k)
+            if (std::fabs(a.value(xi, k).get<double>() - a.value(xi, 0).get<double>()) > 0.3) n = k;
+        REQUIRE(n > 0);
+        c = a.value(xi, n).get<double>() + 0.4;
+        animated = f.render(n);
+        // the user keys the control (a constant): keyframes win
+        mock::Param *p = f.param(x);
+        p->keys[10.0] = {c};
+        p->keys[200.0] = {c};
+        REQUIRE(f.changed(x, n) == kOfxStatOK);
+        keyed_const = f.render(n);
+        // other controls still move: the animation is otherwise on
+        CHECK_FALSE(f.param("host_animation")->str.empty());
+        frame_n = n;
+        moving_before = a.moving().size();
+    }
+    {
+        const double n = frame_n;
+        PictureFixture g(fps, false);
+        g.choose(name, at);
+        mock::Param *q = g.param(x);
+        q->v[0] = c;
+        REQUIRE(g.changed(x, n) == kOfxStatOK);  // a hand edit: out of the animation
+        const ntscrt::host::Animation b(host_schema(), g.param("host_animation")->str, fps);
+        CHECK_FALSE(b.moves(xi));
+        CHECK(b.moving().size() == moving_before - 1);
+        edited = g.render(n);
+        CHECK(edited == keyed_const);
+        CHECK(edited != animated);
+    }
+    {
+        // An effect from an older version: keyframes, no animation text.
+        PictureFixture f(fps, false);
+        {
+            PresetKeyframes legacy(true);
+            f.choose(name, at);
+        }
+        REQUIRE(f.param("host_animation")->str.empty());
+        size_t keys = 0;
+        for (auto &p : f.inst->params.params) keys += p->keys.size();
+        REQUIRE(keys > 0);
+        const std::vector<float> before = f.render(77);
+        mock::Param *seed = f.param("host_seed");
+        seed->v[0] = 3;
+        REQUIRE(f.changed("host_seed", 77) == kOfxStatOK);
+        seed->v[0] = 0;
+        REQUIRE(f.changed("host_seed", 77) == kOfxStatOK);
+        mock::Param *p = f.param(x);  // a hand edit of a keyed control: a key, as before
+        const auto key_sets = p->key_sets;
+        p->v[0] = 0.5;
+        REQUIRE(f.changed(x, 77) == kOfxStatOK);
+        CHECK(f.param("host_animation")->str.empty());
+        size_t now = 0;
+        for (auto &q : f.inst->params.params) now += q->keys.size();
+        CHECK(now == keys);
+        CHECK(p->key_sets == key_sets);
+        // undo the edit (the host restores the param): the old picture
+        p->v[0] = 0;
+        REQUIRE(f.changed(x, 77) == kOfxStatOK);
+        CHECK(f.render(77) == before);
+    }
 }
 
 // ---- host protocol (getFramesNeeded, isIdentity, fields, abort, clip prefs) --------
