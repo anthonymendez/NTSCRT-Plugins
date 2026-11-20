@@ -76,7 +76,12 @@ default look and alone, with data loss and deblocking (`tests/digital/test_digit
 cold seeks, jumps back and forth, stepping back across a keyframe, renders at render scale 0.5 in between, other
 settings in between and back, an aborted render; each compared with frames played in order on another instance,
 or with a fresh instance's cold render); `test_digital` (the renderer's own jumped-to = played checks, unchanged);
-`test_ofx` "Digital video: after a jump into a clip ..." (the mock host, compared with a fresh effect's render). The
+`test_ofx` "Digital video: after a jump into a clip ..." (the mock host, compared with a fresh effect's render), and
+"... an animated preset that moves Digital values ..." (0.6.0's procedural animation, no keyframes: each earlier
+frame's look comes from `host_animation` through `look_at`, so the settings fingerprints the checkpoints are checked
+against are the animated values; a Datamosh stream whose quality and data loss move, jumps, steps back, the
+viewer's scale, an abort, then a control taken over from the animation: every frame equal to a fresh effect's. The
+plug-in also flushes the stage whenever the animation text changes, `cache_mask(host_animation)`). The
 headless-Resolve parity suite's Digital video cases (`run_resolve_tests.py --headless --parity --parity-digital`,
 2026-11-20, every config: 182 images per pair) pass: the CPU / GPU routes equal byte for byte, host GPU frames
 within the usual rule, the CPU reference again 0 different.
