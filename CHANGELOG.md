@@ -21,6 +21,11 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   set aside (UHD projects), and after a render of another frame in between (a Fusion comp's current frame).
   Now a cancelled render drops only the loop it was running, the loop of the setting just left is always kept,
   and it resumes from its last checkpoint, at most 30 frames back. Pictures are unchanged.
+- **Confirmed: 0.5.1 fixes older projects locking up when their clip's Effects tab is opened.** Reproduced in
+  the Resolve window: a 0.5.0-rc.2 project whose effect had an animated preset (rc.1 and rc.2 wrote tens of
+  thousands of keyframes, 57,840 here) made Resolve send one notification per keyframed control when the
+  Effects tab opened; 0.5.0 took 2–4 s on each (a 49 s freeze for 18 controls, minutes for longer clips or
+  more effects), 0.5.1 takes 14 ms for all of them. Nothing to do in your projects: install 0.5.1 or newer.
 
 ### Changed
 - Docs: **the README is rewritten for video editors:** what the effect does, what you need, how to install,
