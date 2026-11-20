@@ -613,13 +613,17 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
     ctx.look_at = [&](int64_t f) -> const json & { return *look_ptr(f); };
 
     int raw_w = 0, raw_h = 0;  // this frame's source size (host frames of a clip share it)
+    bool missed_earlier = false;  // the host gave no picture for an earlier frame (an abort, missing media)
     ctx.source_at = [&](int64_t f) -> std::shared_ptr<const ImageBGRA8> {
         std::shared_ptr<const json> lf = look_ptr(f);
         const SourceKey key{f, ctx.render_scale, raw_w, raw_h, int(mode), int(premult), crop_hash(*lf)};
         if (auto p = inst->sources.get(key)) return p;
         if (!args->fetch_source) return nullptr;
         const ntscrt_image *im = args->fetch_source(args->user, f);
-        if (!im) return nullptr;
+        if (!im) {
+            if (f >= 0 && f < args->frame_index) missed_earlier = true;
+            return nullptr;
+        }
         ImageBGRA8 raw, cropped;
         {
             PhaseScope ps(pt, PhaseTimes::In);
@@ -888,7 +892,12 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             // The loop's own uploads, readbacks and NTSC passes count as theirs.
             PhaseScope ps(pt, PhaseTimes::Loop, &dev);
             cam = inst->howl->camera(upload(img), feedback, ctx);
+            // A run that stood in other pictures for frames the host didn't give (it aborted the
+            // render, or the media is missing) must not be continued: that loop alone goes (the
+            // other sizes' and settings' loops are right; a host abort used to flush them all).
+            if (missed_earlier) inst->howl->drop_current();
         }
+        if (!inst->howl->note().empty()) pt.note += " loop_select=" + inst->howl->note();
         std::shared_ptr<gpu::Texture> up;
         if (ntsc_gpu) {
             PhaseScope ps(pt, PhaseTimes::Ntsc, &dev);

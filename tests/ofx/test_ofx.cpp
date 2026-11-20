@@ -1803,6 +1803,18 @@ std::vector<LoopEditStep> loop_edit_steps(LoopEditFixture &f, double T, bool che
     after("Screen Loop preset B", f.choose("host_screenloop_preset", "Screen Loop/12 copies luma key", T));
     after("Screen Loop preset B again (same values)", f.choose("host_screenloop_preset", "Screen Loop/12 copies luma key", T));
     after("back to Screen Loop preset A", f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T));
+    // As Resolve does with a Fusion comp: a render of another frame (the comp's current one) after each
+    // change, before the playhead's. Going back still continues from the kept loop's last checkpoint.
+    f.choose("host_screenloop_preset", "Screen Loop/12 copies luma key", T);
+    f.shot(T);
+    f.shot(T, 0.25);
+    const double other = T >= 480 ? 100 : 0;
+    f.shot(other);
+    f.shot(other, 0.25);
+    const int back_echoes = f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
+    f.shot(other);
+    f.shot(other, 0.25);
+    after("back to preset A after a render of another frame", back_echoes);
     f.param("screenloop_zoom")->v[0] = 0.5;
     after("Screen Loop zoom edit", f.user_edit("screenloop_zoom", T));
     f.param("digital_quality2")->v[0] = 0.2;  // Digital video is off while Screen Loop is on
@@ -1853,6 +1865,7 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
                                                  {"Screen Loop preset B", 2},
                                                  {"Screen Loop preset B again (same values)", 0},
                                                  {"back to Screen Loop preset A", 0},
+                                                 {"back to preset A after a render of another frame", -1},
                                                  {"Screen Loop zoom edit", 2},
                                                  {"Digital video edit (off under Screen Loop)", 0},
                                                  {"debug logging checkbox", 0},
@@ -1869,6 +1882,11 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
         for (const auto &st : steps) {
             CAPTURE(T);
             CAPTURE(st.what);
+            if (want.at(st.what) < 0) {
+                // from the kept checkpoint (one every 30 frames): at most 30 frames per render scale
+                CHECK(st.fetches <= 2 * 30);
+                continue;
+            }
             CHECK(st.replays == want.at(st.what));
             CHECK(st.fetches == st.replays * int(T - (T < 480 ? 0 : (int64_t(T) / 240 - 1) * 240)));
         }
@@ -1966,4 +1984,29 @@ TEST_CASE("old projects: opening the panel keeps the saved values and stays boun
     for (const auto &p : f.inst->params.params)
         if (p->type != kOfxParamTypeGroup && p->type != kOfxParamTypePage) REQUIRE(f.changed(p->name, 1000, kOfxChangePluginEdited) == kOfxStatOK);
     CHECK(ui_sets() == ui1);
+}
+
+TEST_CASE("Screen Loop: a render the host aborts drops only the loop it was running") {
+    // Resolve aborts a render it no longer needs (a newer edit): the loop that render was re-running
+    // stood in pictures for the frames it skipped and must go, but the loops of the settings before
+    // (kept to come back to) stay.
+    LoopEditFixture f(128, 72);
+    const double T = 600;
+    f.shot(0);
+    f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
+    CHECK(f.shot(T).fetches > 0);
+    f.choose("host_screenloop_preset", "Screen Loop/12 copies luma key", T);
+    long asked = 0;
+    f.host.on_abort = [&] { return ++asked > 5 ? 1 : 0; };
+    REQUIRE(f.render_at(T, 1.0) == kOfxStatOK);
+    f.host.on_abort = nullptr;
+    CHECK(read_log().find("aborted by the host") != std::string::npos);
+    f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
+    const auto back = f.shot(T);
+    CHECK(back.fetches == 0);
+    CHECK(back.px == f.clean(T));
+    f.choose("host_screenloop_preset", "Screen Loop/12 copies luma key", T);
+    const auto again = f.shot(T);
+    CHECK(again.fetches > 0);  // the aborted run was dropped: re-run in full
+    CHECK(again.px == f.clean(T));
 }

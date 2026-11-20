@@ -234,9 +234,15 @@ struct Howlaround::Impl {
     }
 
     // The slot's loop for `key`: the current one, a parked one taken back, or none (made by the caller).
+    std::string note;  // how the last camera() call found its loop (the core's timings line)
+    std::string reset_note;  // why loops were dropped since (said once, on the next note)
     void select(Slot &sl, const std::string &key) {
-        if (sl.engine && sl.key == key) return;
-        if (sl.engine) {
+        if (sl.engine && sl.key == key) {
+            note = "same";
+            return;
+        }
+        note = sl.engine ? "new" : "new (none current)";
+        if (sl.engine && parked_budget > 0) {  // NTSCRT_SCREENLOOP_KEEP_MB=0: none kept
             sl.engine->park();
             sl.parked.push_back({std::move(sl.engine), sl.key, ++tick});
         }
@@ -247,11 +253,19 @@ struct Howlaround::Impl {
                 sl.engine = std::move(it->engine);
                 sl.key = key;
                 sl.parked.erase(it);
+                note = "taken back";
                 break;
             }
         trim_parked();
+        size_t n = 0, bytes = 0;
+        for (auto &s : slots)
+            for (auto &p : s->parked) ++n, bytes += p.engine->held_bytes();
+        note += ", " + std::to_string(n) + " kept (" + std::to_string(bytes >> 20) + " MB)" + reset_note;
+        reset_note.clear();
     }
-    // At most kParkedPerSlot per slot and parked_budget bytes in all: the least recently parked go.
+    // At most kParkedPerSlot per slot and parked_budget bytes in all: the least recently parked go,
+    // except each slot's most recently parked one (the setting just left, the likeliest to come
+    // back: at UHD one loop's TV pictures alone pass the budget).
     void trim_parked() {
         for (;;) {
             size_t bytes = 0;
@@ -261,6 +275,7 @@ struct Howlaround::Impl {
             for (auto &s : slots) {
                 for (size_t i = 0; i < s->parked.size(); ++i) {
                     bytes += s->parked[i].engine->held_bytes();
+                    if (i + 1 == s->parked.size()) continue;  // the newest of the slot stays
                     if (!worst || s->parked[i].used < worst->parked[worst_i].used) worst = s.get(), worst_i = i;
                 }
                 if (s->parked.size() > kParkedPerSlot) over_count = true;
@@ -345,6 +360,7 @@ bool Howlaround::active(const json *fb) const {
 std::shared_ptr<gpu::Texture> Howlaround::camera(const std::shared_ptr<gpu::Texture> &scene, const json &feedback,
                                                  const FrameContext &ctx) {
     Impl &m = *impl_;
+    m.note.clear();
     howl::Feedback fb = howl::parse_feedback(feedback);
     const howl::Settings &s = fb.settings;
     // Zero zoom without the counter: the camera sees the room only — exactly the scene.
@@ -358,6 +374,7 @@ std::shared_ptr<gpu::Texture> Howlaround::camera(const std::shared_ptr<gpu::Text
         if (!m.last_feedback.empty() && m.tv_keeps_state()) {
             if (m.hooks.tv_reset) m.hooks.tv_reset();
             m.clear();
+            m.reset_note = " (all dropped: the loop's CRT keeps state)";
         }
         m.last_feedback = std::move(fb_text);
     }
@@ -431,6 +448,7 @@ void Howlaround::after_frame(const gpu::Texture &chain_input, const json &, cons
             sl.chain_w = d.width;
             sl.chain_h = d.height;
             sl.engine.reset();
+            m.reset_note = " (dropped: the chain size changed)";
             return;
         }
         TexPtr tv = m.ops.render_tv(chain_input, engine.normal_pass(ctx.frame));
@@ -441,6 +459,24 @@ void Howlaround::after_frame(const gpu::Texture &chain_input, const json &, cons
         // as every recomputed history frame (so results don't depend on order).
         engine.store_tv(ctx.frame, m.ops.tv_pass(m.last_camera, engine.normal_pass(ctx.frame)));
     }
+}
+
+const std::string &Howlaround::note() const { return impl_->note; }
+
+void Howlaround::drop_current() {
+    Impl &m = *impl_;
+    if (m.tv_keeps_state()) {  // the loop's CRT went through those frames too: everything starts over
+        if (m.hooks.tv_reset) m.hooks.tv_reset();
+        flush();
+        return;
+    }
+    if (m.cur) {
+        m.cur->engine.reset();
+        m.cur->key.clear();
+    }
+    m.cur = nullptr;
+    m.last_camera.reset();
+    m.last_frame = -1;
 }
 
 void Howlaround::flush() {
