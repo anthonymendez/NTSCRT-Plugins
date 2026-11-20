@@ -1224,7 +1224,7 @@ TEST_CASE("presets: sparse keyframes render like a key on every frame") {
 // at 60, 24 and 29.97 fps.
 namespace {
 struct PictureFixture : Fixture {
-    int w = 256, h = 144;
+    int w = 96, h = 54;  // small: CI renders on the CPU (WARP); equality holds at any size
     std::vector<float> out;
     PictureFixture(double fps, bool adjustment) {
         create();
