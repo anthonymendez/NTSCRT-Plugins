@@ -594,9 +594,13 @@ public:
         return true;
     }
 
+    // Also the only word from the host that what feeds the effect may have changed (a Fusion comp
+    // calls it whenever an input or a tool upstream changes): everything goes, the source frames and
+    // every history (Screen Loop's kept loops too).
     void purgeCaches() override {
         std::lock_guard<std::mutex> lk(mu_);
         if (inst_) ntscrt_flush_caches(inst_);
+        if (dlog::verbose()) dlog::write("instance #" + std::to_string(id_) + " purge caches: every cache dropped");
     }
 
     // The panel was opened: show the global switch's current state.
@@ -1654,9 +1658,10 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         log_route("digital_route", "Digital video", digital_route_said_);
     }
     if (ctx.aborted) {
-        // Frames were skipped: the Digital stream / Screen Loop history built
-        // on stand-ins must not be reused. The host discards this frame.
-        ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_DIGITAL | NTSCRT_CACHE_SCREENLOOP);
+        // Frames were skipped: the Digital stream built on stand-ins must not be
+        // reused (the core drops the Screen Loop run that stood in pictures by
+        // itself, keeping the others). The host discards this frame.
+        ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_DIGITAL);
         dlog::write("instance #" + std::to_string(id_) + " render t=" + std::to_string(args.time) +
                     " aborted by the host after " + std::to_string(ctx.fetches) + " earlier frames");
         return;

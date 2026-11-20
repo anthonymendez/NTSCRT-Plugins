@@ -15,9 +15,12 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 ## [Unreleased]
 
 ### Fixed
-- **Going back to a Screen Loop preset is quick even after Resolve rendered another frame in between** (as it
-  does with a Fusion comp's current frame): the kept loop now resumes from its last checkpoint, at most 30
-  frames back, instead of re-running up to 479 frames. Pictures are unchanged.
+- **Going back to the Screen Loop preset you just left is now really quick in Resolve:** 0.5.1 kept the earlier
+  presets' loops, but in Resolve they were thrown away almost every time: when Resolve cancels a render it no
+  longer needs (which it does right after a preset change), when their pictures were bigger than the memory
+  set aside (UHD projects), and after a render of another frame in between (a Fusion comp's current frame).
+  Now a cancelled render drops only the loop it was running, the loop of the setting just left is always kept,
+  and it resumes from its last checkpoint, at most 30 frames back. Pictures are unchanged.
 
 ### Changed
 - Docs: **the README is rewritten for video editors:** what the effect does, what you need, how to install,

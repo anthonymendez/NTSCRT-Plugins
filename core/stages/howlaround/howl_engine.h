@@ -233,6 +233,12 @@ public:
             it = ckpts_.erase(it);
         }
         ahead_.drop();
+        // Of the history, what continuing at next() or rendering next() - 1 again needs (the
+        // frames further back are only for re-rendering those, which a checkpoint does as well).
+        if (valid_) {
+            tv_.erase(tv_.begin(), tv_.lower_bound(next_ - 1 - cfg_.settings.delay()));
+            expo_.erase(expo_.begin(), expo_.lower_bound(next_ - 1));
+        }
     }
     // Bytes of the pictures this loop holds (its history, the run ahead's, checkpoints).
     size_t held_bytes() const {

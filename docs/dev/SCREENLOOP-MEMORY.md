@@ -150,12 +150,18 @@ Now:
   The Screen Loop settings themselves are in the core's key for each loop (the feedback JSON), so their changes need
   no flush. With keyframes anywhere (before or now) it is dropped as before: earlier frames' looks could differ.
 - **The core keeps the loops of the last few settings** (`Howlaround::Impl::Slot::parked`, four per render size,
-  256 MB in all, `NTSCRT_SCREENLOOP_KEEP_MB`): a loop put aside keeps only its state at its last frame
+  256 MB in all, `NTSCRT_SCREENLOOP_KEEP_MB` (0: none); the newest of each size is kept whatever its size: at UHD,
+  where the TV pictures are scene-sized without Downscale, one loop alone passes the budget, which 0.5.1 threw
+  away at once): a loop put aside keeps only its state at its last frame
   (`Engine::park`: its last checkpoint, no run ahead), so going back to a setting at the same playhead continues it,
   and after a render of another frame in between (Resolve renders a Fusion comp's current frame with each job)
   resumes from that checkpoint, at most 30 frames back.
   A temporal CRT preset in the loop (none of the bundled ones) keeps nothing across a settings change and resets
   the loop's CRT, as the flush did (`HowlHooks::tv_reset`).
+- **A render the host aborts drops only the loop it was running** (`Howlaround::drop_current`, called by the core when
+  a render's run met a source frame the host didn't give): 0.5.1 flushed all of Screen Loop on an abort
+  (`NtscrtEffect::render_frame`), and headless Resolve aborts the render it started right after each preset change
+  (log: "aborted by the host after 1-8 earlier frames"), so the kept loops were gone before they were needed.
 - No picture changes: each kept loop is the same deterministic run (`test_howl_seek` "other settings in between,
   then back", `test_ofx` "Screen Loop: preset changes and Inspector edits ..." compares every step with a fresh
   instance's render).
@@ -176,3 +182,41 @@ for the timings):
 
 (*before* = this test against the 0.5.0 plug-in, `NTSCRT_TEST_OFX_BINARY`; ms = the two renders after the edit; the
 re-runs left are the ones the edit needs.)
+
+Headless Resolve 21.1.2 (2026-11-19, `C:/ntb/w18e-res/slpreset.py`): a Fusion comp on a clip timeline (the 640x360
+parity clip resized to the project's 3840x2160 in the comp: new projects here are UHD), MediaIn -> BetterResize ->
+NTSCRT -> MediaOut; each step sets inputs by script (a preset menu's SetInput runs the preset apply), then the render
+queue renders the playhead frame P. Per step: earlier frames fetched and the plug-in's seconds for the renders of P
+(Resolve also renders the comp's current frame with each job), from the verbose log. *0.5.0* = before, *0.5.1* = the
+first fix, *now* = with the three fixes below (`bundle-fix5`).
+
+| step | P = 100: 0.5.0 | 0.5.1 | now | P = 1850: 0.5.0 | 0.5.1 | now |
+|---|---|---|---|---|---|---|
+| Screen Loop preset B | 99 f, 6.5 s | 99 f, 4.8 s | 99 f, 6.5 s | 409 f, 21.9 s | 410 f, 21.8 s | 409 f, 24.0 s |
+| the same preset again | 99 f, 6.5 s | 0, 0.1 s | 0, 0.2 s | 409 f, 22.1 s | 20 f, 1.0 s | 20 f, 1.1 s |
+| back to preset A | 99 f, 6.5 s | 99 f, 4.8 s | **0, 0.2 s** | 429 f, 22.6 s | 410 f, 21.9 s | **20 f, 1.1 s** |
+| zoom edit | 94 f, 6.4 s | 92 f, 4.5 s | 92 f, 4.6 s | 403 f, 21.3 s | 410 f, 21.1 s | 403 f, 21.3 s |
+| CRT edit (in the loop) | 94 f, 6.2 s | 92 f, 4.5 s | 92 f, 4.8 s | 404 f, 21.4 s | 423 f, 21.2 s | 403 f, 21.4 s |
+| look preset | 96 f, 5.5 s | 94 f, 5.2 s | 94 f, 5.3 s | 425 f, 23.9 s | 424 f, 22.8 s | 424 f, 23.5 s |
+| the same look preset again | 94 f, 5.4 s | 0, 0.2 s | 0, 0.2 s | 424 f, 24.0 s | 20 f, 1.1 s | 20 f, 1.1 s |
+| look preset, Screen Loop off | 0, 0.0 s | 0, 0.0 s | 0, 0.0 s | 0, 0.0 s | 0, 0.0 s | 0, 0.0 s |
+
+(20 f at 1850: Resolve rendered the comp's current frame in between, so the loop comes back from its checkpoint at
+1830.) What the log shows besides:
+
+- Every write of a preset is echoed back during the apply itself (25 for a Screen Loop preset, 288 for a look,
+  all "during our own edit"), so they cost nothing; the apply takes 14 ms (Screen Loop) / 165 ms (look).
+- **Resolve aborts the render it starts right after each preset change** (with the newer setting it then renders
+  again), after 1-8 earlier frames. 0.5.0 and 0.5.1 flushed all of Screen Loop on an abort, which in 0.5.1 also
+  threw away the loops kept to come back to: why "back to preset A" still re-ran in 0.5.1. Fix: the core drops only
+  the run that stood in pictures (`Howlaround::drop_current`; `test_ofx` "a render the host aborts drops only the
+  loop it was running").
+- **At UHD one loop's TV pictures pass the 256 MB set aside for kept loops** (without Downscale the TV picture is
+  scene-sized: 33 MB each), so 0.5.1 dropped the kept loop at once. Fix: the newest of each size is always kept, and
+  a kept loop holds only the frames it needs to go on (`Engine::park`).
+- **A render of another frame in between moved a taken-back loop away from the playhead**, and 0.5.1 kept no
+  checkpoint with it: fix, its last checkpoint stays (at most 30 frames re-run).
+- The Digital video edit is not in the table: Resolve ignores a script's SetInput on a control its switch greys out.
+- Resolve's memory: 8.4-8.6 GB at P = 100 and 11.7-12.0 GB at P = 1850 in all three builds (the fetched frames are
+  the small clip resized; no change from these fixes). Resolve suite (15 tests) and parity for the screenloop and
+  sizeloop groups (82 images per pair, all pairs equal) pass with these fixes; `--parity-quick` passes on 0.5.1.

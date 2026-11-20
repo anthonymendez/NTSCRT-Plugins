@@ -1985,3 +1985,28 @@ TEST_CASE("old projects: opening the panel keeps the saved values and stays boun
         if (p->type != kOfxParamTypeGroup && p->type != kOfxParamTypePage) REQUIRE(f.changed(p->name, 1000, kOfxChangePluginEdited) == kOfxStatOK);
     CHECK(ui_sets() == ui1);
 }
+
+TEST_CASE("Screen Loop: a render the host aborts drops only the loop it was running") {
+    // Resolve aborts a render it no longer needs (a newer edit): the loop that render was re-running
+    // stood in pictures for the frames it skipped and must go, but the loops of the settings before
+    // (kept to come back to) stay.
+    LoopEditFixture f(128, 72);
+    const double T = 600;
+    f.shot(0);
+    f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
+    CHECK(f.shot(T).fetches > 0);
+    f.choose("host_screenloop_preset", "Screen Loop/12 copies luma key", T);
+    long asked = 0;
+    f.host.on_abort = [&] { return ++asked > 5 ? 1 : 0; };
+    REQUIRE(f.render_at(T, 1.0) == kOfxStatOK);
+    f.host.on_abort = nullptr;
+    CHECK(read_log().find("aborted by the host") != std::string::npos);
+    f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
+    const auto back = f.shot(T);
+    CHECK(back.fetches == 0);
+    CHECK(back.px == f.clean(T));
+    f.choose("host_screenloop_preset", "Screen Loop/12 copies luma key", T);
+    const auto again = f.shot(T);
+    CHECK(again.fetches > 0);  // the aborted run was dropped: re-run in full
+    CHECK(again.px == f.clean(T));
+}

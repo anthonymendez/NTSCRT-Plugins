@@ -158,6 +158,10 @@ public:
     // draws through its own CRT copy (hooks.render_tv) as the TV's picture.
     void after_frame(const gpu::Texture &chain_input, const json &feedback, const FrameContext &ctx);
     void flush();
+    // Drops the loop the last camera() call ran (it stood in pictures for missing source frames).
+    void drop_current();
+    // How the last camera() call found its loop: "same", "taken back" (a kept one) or "new", and what is kept.
+    const std::string &note() const;
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };
