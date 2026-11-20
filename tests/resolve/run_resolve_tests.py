@@ -700,6 +700,7 @@ class Suite:
 
     def t_order(self):
         self.order_case("default", {})
+        self.order_case("sim", {"crt_preset": self.crt_presets().index("sim")})  # docs/dev/CRT.md
         self.order_case("digital", {"digital_enabled": 1})
         self.order_case("screenloop", {"screenloop_enabled": 1})
 

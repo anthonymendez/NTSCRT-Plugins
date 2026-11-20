@@ -105,7 +105,10 @@ alpha), but as above no output byte reads composite's alpha. Nothing reads an ea
 for comparison; `test_crt_order` "sim: one chain frame renders the two-frame reset's bytes" compares the two
 (4 sim looks x 5 frames, 0, 1, 2, 75, 1850: both artifact phases, x 200x150 and 1280x720, the second supersampled;
 the single-frame instance renders them backwards). Changing pass 0's frame count to n makes it fail (7,000-8,000
-of 120,000 values per frame), so it does see the difference.
+of 120,000 values per frame), so it does see the difference. In Resolve (headless, `--parity --parity-groups crt
+--parity-configs cpu,gpu`, run once as is and once with `NTSCRT_SIM_SINGLE=0`) all 134 frames of the two runs,
+the 18 sim ones included, decode to the same pixels; `--only order` (now with an `order:sim` case: 16 frames
+in order, then 6 of them out of order in a fresh tool) gives the same pixels for every sim frame.
 
 What it saves (RTX 5090, Release, the GPU shared with other work at ~90% load, so medians swung 2-4x;
 the minimum of 8 interleaved runs' medians is the steady figure). The stage alone (`test_crt "CRT frame timings"`,
@@ -160,5 +163,6 @@ where the old one showed the previous frames' noise).
 - `test_crt_order` "sim: one chain frame renders the two-frame reset's bytes": `crt/crtsim-single.slangp`
   against crtsim's own preset with the two-frame rule (`NTSCRT_SIM_SINGLE=0`), byte for byte.
 - `tests/howlaround/test_howl_seek.cpp`: Screen Loop with sim renders the same with and without checkpoints.
+- Resolve: `run_resolve_tests.py --only order` has an `order:sim` case (sim frames out of order in a fresh tool).
 - Resolve: the parity suite's sim cases are in the `cpu2` session too (`tags: noise`), so `cpu2-vs-cpu` checks
   them across sessions; `--parity-groups crt` runs the CRT cases only.
