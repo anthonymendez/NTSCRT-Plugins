@@ -519,25 +519,39 @@ TEST_CASE("playing across window starts: the run ahead takes over, no source re-
         CHECK(e.ahead_passes() > 0);
     }
     {
-        AsyncCpuOps ops;
-        ops.source = counted;
-        ops.limit = 2;
-        Engine<AsyncCpuOps> e(config(busy(), 64, 48, 10, 2.3, window));
-        fetched = 0;
-        Pic cam = e.camera(ops, 13, moving(13));  // cold: anchor 5; the run of window start 10 begins at 10
-        CHECK(*cam == *cold[13]);
-        CHECK(fetched == 9);  // 5 (its run-up) and 5..12
-        if (e.wants_tv(13)) e.store_tv(13, ops.tv_pass(cam, e.normal_pass(13)));
-        for (int64_t f = 14; f < frames; ++f) {
-            CAPTURE(f);
+        // After a cold seek: with AheadMode::Always (the default) the run of window start 10
+        // begins inside the re-run, at 10; Deferred (NTSCRT_SCREENLOOP_AHEAD=defer) takes no
+        // step of it in the re-run, and the frame played after it catches it up, fetching 10..13 again.
+        for (AheadMode mode : {AheadMode::Deferred, AheadMode::Always}) {
+            CAPTURE(int(mode));
+            AsyncCpuOps ops;
+            ops.source = counted;
+            ops.limit = 2;
+            EngineConfig c = config(busy(), 64, 48, 10, 2.3, window);
+            c.ahead = mode;
+            Engine<AsyncCpuOps> e(c);
             fetched = 0;
-            cam = e.camera(ops, f, moving(f));
-            if (e.wants_tv(f)) e.store_tv(f, ops.tv_pass(cam, e.normal_pass(f)));
-            CHECK(*cam == *cold[size_t(f)]);
-            CHECK(fetched == 0);
+            Pic cam = e.camera(ops, 13, moving(13));  // cold: anchor 5
+            CHECK(*cam == *cold[13]);
+            CHECK(fetched == 9);  // 5 (its run-up) and 5..12
+            CHECK(e.ahead_valid() == (mode == AheadMode::Always));
+            if (e.wants_tv(13)) e.store_tv(13, ops.tv_pass(cam, e.normal_pass(13)));
+            int again = 0;
+            for (int64_t f = 14; f < frames; ++f) {
+                CAPTURE(f);
+                fetched = 0;
+                cam = e.camera(ops, f, moving(f));
+                if (e.wants_tv(f)) e.store_tv(f, ops.tv_pass(cam, e.normal_pass(f)));
+                CHECK(*cam == *cold[size_t(f)]);
+                again += fetched;
+                if (f > 14 || mode == AheadMode::Always) CHECK(fetched == 0);
+            }
+            CHECK(again == (mode == AheadMode::Always ? 0 : 4));  // 10..13, on frame 14
+            CHECK(e.catch_up_fetches() == again);
+            CHECK(e.resets() == 1);  // no window start re-ran
+            CHECK(ops.in_order);
+            CHECK(ops.begun == ops.ended);
         }
-        CHECK(ops.in_order);
-        CHECK(ops.begun == ops.ended);
     }
     {
         CpuOps ops;

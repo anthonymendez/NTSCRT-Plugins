@@ -12,6 +12,7 @@
 //   unmap: CUDA work issued in the stream before it completes before later graphics work.
 // Registration needs the D3D11 device on the CUDA device's adapter (same LUID).
 #include "host_gpu.h"
+#include "facade.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -274,9 +275,16 @@ public:
         m.Height = size_t(img.height);
         cu_check(cu.Memcpy2DAsync(&m, stream_), "cuMemcpy2DAsync (host frame -> CPU)");
         cu_check(cu.StreamSynchronize(stream_), "cuStreamSynchronize");
-        for (int y = 0; y < img.height; ++y) {
+        // On the thread pool (fast_transfer): a UHD float frame is 133 MB, which one thread copies in
+        // tens of ms (Screen Loop's re-runs read hundreds of host frames this way).
+        auto row = [&](int y) {
             const int my = img.bottom_up ? img.height - 1 - y : y;
             std::memcpy(static_cast<uint8_t *>(cpu) + ptrdiff_t(y) * row_bytes, stage + tight * size_t(my), tight);
+        };
+        if (facade::fast_transfer()) {
+            facade::for_row_blocks(img.height, tight, row);
+        } else {
+            for (int y = 0; y < img.height; ++y) row(y);
         }
     }
 

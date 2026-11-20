@@ -11,6 +11,8 @@
 //   Pic tv_pass(const Pic &camera, const HowlPass &pass);   // camera -> TV picture
 // Optional:
 //   static size_t bytes(const Pic &);           // memory a picture holds (checkpoint budget)
+//   Pic scene_ahead(int64_t f);                 // source frame f for catching up the run ahead:
+//                                               //   a miss there needn't drop the history (default: scene)
 //   using Pending = <movable>;                  // with the three below: pipelined TV passes
 //   int max_inflight();                         // passes that may be begun and not finished (0 = none)
 //   Pending tv_begin(const Pic &camera, const HowlPass &pass);
@@ -47,6 +49,18 @@
 // frame; at W + B it takes over. It is the run a re-run would make, step for
 // step, so the pictures are the same. Off with checkpoints (a temporal TV
 // pass), and it never takes over from a history with stand-ins.
+// Deferred (NTSCRT_SCREENLOOP_AHEAD=defer; not the default: in DaVinci Resolve it
+// saved 3-5% of a re-run and cost 8 s of fetches when playing on after one,
+// docs/dev/SCREENLOOP-MEMORY.md): a call that re-runs history (a cold seek, a
+// re-run after an edit, a resume from a checkpoint) takes no step of the run
+// ahead, a third of its TV passes (the frames from the next window start on,
+// plus its run-up); a host asking for one frame after an edit never needs it.
+// The frames played after such a call catch it up instead, a few steps each,
+// paced to reach the frame being played by the window start where it takes
+// over: it reads the source frames it missed again (Screen Loop's store of
+// source frames, else the host). A catch-up that can't get a source frame (the
+// host aborted) drops the run ahead only; the window start then re-runs, as
+// without a run ahead.
 //
 // Pipelining. With max_inflight() > 0 a TV pass can still be running while
 // the next frame's camera is exposed: the camera reads the TV `delay` frames
@@ -54,6 +68,7 @@
 // Passes begin and end in frame order, so the pictures are the same.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -74,6 +89,7 @@ namespace ntscrt::howl {
 constexpr int64_t kDefaultWindow = 240;
 constexpr int64_t kRetain = 4;  // extra frames kept so recent frames re-render without a re-run
 constexpr int64_t kDefaultCheckpointEvery = 30;
+constexpr int64_t kCatchUpSteps = 4;  // the least the run ahead catches up per frame played (Deferred)
 
 inline int64_t anchor_for(int64_t n, int64_t window) {
     if (window <= 0 || n < 2 * window) return 0;
@@ -91,11 +107,18 @@ inline size_t default_checkpoint_budget() {
     return size_t(256) << 20;
 }
 
-// NTSCRT_SCREENLOOP_AHEAD=0: no run ahead (each window start crossed re-runs its window,
-// as 0.5.0-rc.5 did; the pictures are the same either way). For A/B timing.
-inline bool default_run_ahead() {
+// The run ahead (see "Running ahead"): off, stepped during re-runs too (the default, as in
+// 0.5.0-0.5.3), or deferred past re-runs. The pictures are the same in all three.
+enum class AheadMode { Off, Always, Deferred };
+// NTSCRT_SCREENLOOP_AHEAD=0: off (each window start crossed re-runs its window, as 0.5.0-rc.5
+// did); =defer: deferred past re-runs; anything else / unset: always. For A/B timing.
+inline AheadMode default_ahead() {
     const char *e = std::getenv("NTSCRT_SCREENLOOP_AHEAD");
-    return !(e && std::string(e) == "0");
+    if (!e) return AheadMode::Always;
+    const std::string v = e;
+    if (v == "0") return AheadMode::Off;
+    if (v == "defer") return AheadMode::Deferred;
+    return AheadMode::Always;
 }
 
 struct EngineConfig {
@@ -107,7 +130,7 @@ struct EngineConfig {
     int64_t window = kDefaultWindow;
     int64_t checkpoint_every = kDefaultCheckpointEvery;  // <= 0: none
     size_t checkpoint_budget = default_checkpoint_budget();
-    bool run_ahead = default_run_ahead();
+    AheadMode ahead = default_ahead();
 };
 
 namespace detail {
@@ -148,6 +171,10 @@ public:
         // the frame asked for. Resumed from a checkpoint at c, the call goes
         // on as the run from the window start would: holding frame c - 1.
         int64_t hold_frame = start(ops, anchor_for(n, cfg_.window), n, scene_n);
+        // A call that re-runs history: the run ahead waits (Deferred) for the frames played after it.
+        const bool rerun = next_ < n;
+        const bool defer = rerun && cfg_.ahead == AheadMode::Deferred;
+        const bool played = !rerun && next_ == n;  // continues the history by one frame
         Pic hold;
         while (next_ < n) {
             const int64_t f = next_;
@@ -165,11 +192,12 @@ public:
             Pic cam = camera_step(ops, f, sc, cfg_.settings.delay());
             if (cfg_.settings.tv_in_view()) push_tv(ops, f, cam, normal_pass(f));
             else store(f, Pic());
-            step_ahead(ops, f, sc, got);
+            if (!defer) step_ahead(ops, f, sc, got);
         }
         drain(ops);
         Pic cam = camera_step(ops, n, scene_n, cfg_.settings.delay());
-        step_ahead(ops, n, scene_n, true);
+        if (played && cfg_.ahead == AheadMode::Deferred) catch_up(ops, n, scene_n);
+        else if (!defer) step_ahead(ops, n, scene_n, true);
         guard.ok = true;
         return cam;
     }
@@ -257,6 +285,7 @@ public:
     int64_t restores() const { return restores_; }
     int64_t ahead_passes() const { return ahead_passes_; }  // TV passes of the run ahead (not in tv_passes)
     int64_t takeovers() const { return takeovers_; }        // window starts crossed without a re-run
+    int64_t catch_up_fetches() const { return catch_up_fetches_; }  // source frames fetched again to catch it up
     bool ahead_valid() const { return ahead_.valid; }
     int64_t ahead_anchor() const { return ahead_.anchor; }
     int64_t ahead_next() const { return ahead_.next; }
@@ -319,7 +348,7 @@ private:
     };
     Run ahead_;
     bool in_ahead_ = false;  // the run ahead is swapped in: TV passes synchronous
-    int64_t ahead_passes_ = 0, takeovers_ = 0;
+    int64_t ahead_passes_ = 0, takeovers_ = 0, catch_up_fetches_ = 0;
 
     void swap_run() {
         std::swap(valid_, ahead_.valid);
@@ -336,7 +365,7 @@ private:
     // too, or starts there (its run-up stands on sc, so it fetches nothing).
     void step_ahead(Ops &ops, int64_t f, const Pic &sc, bool got) {
         const int64_t b = cfg_.window;
-        if (b <= 0 || !cfg_.run_ahead || !ckpt_on_ || !sc) return;
+        if (b <= 0 || cfg_.ahead == AheadMode::Off || !ckpt_on_ || !sc) return;
         const int64_t a2 = f / b * b;  // the anchor of frames a2 + b .. a2 + 2b - 1
         if (a2 < b || a2 <= anchor_) return;
         const bool cont = ahead_.valid && ahead_.anchor == a2 && ahead_.next == f;
@@ -363,6 +392,42 @@ private:
         if (cfg_.settings.tv_in_view()) store(f, tv_pass(ops, cam, normal_pass(f)));
         else store(f, Pic());
         back.ok = true;
+    }
+
+    // Frame n was played (the history continued by one frame), Deferred mode: the run ahead
+    // takes its step, or, behind (a re-run before skipped its steps), catches up a few steps
+    // more, fetching the source frames it missed, so that it reaches the frame played by the
+    // window start where it takes over (a2 + window). Same steps as step_ahead, so the same pictures.
+    void catch_up(Ops &ops, int64_t n, const Pic &scene_n) {
+        const int64_t b = cfg_.window;
+        if (b <= 0 || !ckpt_on_ || !scene_n) return;
+        const int64_t a2 = n / b * b;
+        if (a2 < b || a2 <= anchor_) return;
+        const bool same = ahead_.valid && ahead_.anchor == a2;
+        if (same && !ahead_.complete) return;  // it can't take over anyway
+        if (n == a2 || (same && ahead_.next >= n)) {  // in step, starting here, or ahead (after a scrub back)
+            step_ahead(ops, n, scene_n, true);
+            return;
+        }
+        int64_t f = same ? ahead_.next : a2;  // the first step it owes
+        const int64_t owed = n + 1 - f, left = a2 + b - n;  // steps, and frames to take them in (this one too)
+        // At least kCatchUpSteps a frame: the sooner it reaches the frame played, the fewer frames
+        // it fetches again (each frame played while it is behind is one more).
+        const int64_t stop = f + std::min(owed, std::max(kCatchUpSteps, (owed + left - 1) / left));
+        for (; f < stop; ++f) {
+            Pic sc = f == n ? scene_n : scene_ahead(ops, f);
+            if (!sc) {  // the host didn't give it (aborted): no run ahead; the window start re-runs
+                ahead_.drop();
+                return;
+            }
+            if (f != n) ++catch_up_fetches_;
+            step_ahead(ops, f, sc, true);
+            if (!ahead_.valid || ahead_.next != f + 1) return;  // failed: dropped
+        }
+    }
+    Pic scene_ahead(Ops &ops, int64_t f) {
+        if constexpr (requires { ops.scene_ahead(f); }) return ops.scene_ahead(f);
+        else return ops.scene(f);
     }
 
     static size_t pic_bytes(const Pic &p) {

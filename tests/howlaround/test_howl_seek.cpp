@@ -7,6 +7,7 @@
 
 #include <ntscrt/ntscrt.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -151,9 +152,11 @@ TEST_CASE("Screen Loop: seeks and scrubbing render what playing from frame 0 ren
             CAPTURE(mb);
             set_env("NTSCRT_SCREENLOOP_CHECKPOINT_MB", mb);
             set_env("NTSCRT_SOURCE_CACHE_MB", "0");  // 8 frames kept: re-runs fetch again
+            set_env("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
             Inst b("{}", fb);
             set_env("NTSCRT_SCREENLOOP_CHECKPOINT_MB", nullptr);
             set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+            set_env("NTSCRT_SCREENLOOP_SOURCE_MB", nullptr);
             // Cold seek far in, play on; back inside the window; across window
             // starts both ways; inside the first window; the very start.
             const int64_t order[] = {37, 38, 39, 33, 34, 30, 25, 26, 17, 16, 15, 31, 5, 6, 2, 0, 1, 24, 23, 39};
@@ -192,13 +195,18 @@ TEST_CASE("Screen Loop: a far cold seek has a bounded cost and holds one host fr
     // A(N) = (floor(N / 240) - 1) * 240, so it fetches at most 2 * 240 - 1 earlier source frames,
     // never one before A(N), and gives each host image back before asking for the next one (a
     // host's UHD float frame is ~133 MB; Resolve keeps every frame fetched: docs/dev/SCREENLOOP-MEMORY.md).
-    // The frames after it continue: no fetch at all, window starts included.
+    // The frames after it continue: no fetch at all, window starts included (with the run ahead
+    // deferred, NTSCRT_SCREENLOOP_AHEAD=defer, a few fetched again on each, none from the window start on).
     const std::string fb = feedback("Bottom to top", 240);
     for (int64_t n : {int64_t(1850), int64_t(2159)}) {
         CAPTURE(n);
         set_env("NTSCRT_SOURCE_CACHE_MB", "0");  // nothing served from the cache: every history frame is fetched
+        set_env("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
+        set_env("NTSCRT_SCREENLOOP_AHEAD", "defer");
         Inst a("{}", fb);
         set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+        set_env("NTSCRT_SCREENLOOP_SOURCE_MB", nullptr);
+        set_env("NTSCRT_SCREENLOOP_AHEAD", nullptr);
         if (!a.ok) return;
         a.render(n);
         const int64_t anchor = (n / 240 - 1) * 240;
@@ -217,17 +225,104 @@ TEST_CASE("Screen Loop: a far cold seek has a bounded cost and holds one host fr
         int64_t first = -1;
         CHECK(ntscrt_source_frames_needed(&ra, &first) == NTSCRT_OK);
         CHECK(first == anchor);
-        // Playing on across the next window start (1920, 2160): its run went along with the
-        // one shown, so nothing is fetched again, and the frames are the cold seek's.
-        const int64_t last = (n / 240 + 1) * 240 + 5;
+        // Deferred: playing on across the next window start (1920, 2160): the run of window start
+        // W = floor(n / 240) * 240 was left out of the cold seek's re-run and catches
+        // up on the frames played, fetching W..n - 1 again, a few each, so that the window start
+        // re-runs nothing; the frames are the cold seek's.
+        const int64_t w = n / 240 * 240, next_start = w + 240, last = next_start + 5;
         std::vector<uint8_t> played;
+        int again = 0, most = 0;
         for (int64_t f = n + 1; f <= last; ++f) {
             CAPTURE(f);
             played = a.render(f);
-            CHECK(a.src.fetches == 0);
+            CHECK(a.src.held_max <= 1);
+            // (a seek to the frame before a window start: that window start re-runs, the frame
+            // after it catches up the run that starts there)
+            if (f > next_start + (n + 1 == next_start)) CHECK(a.src.fetches == 0);
+            if (f >= next_start) continue;
+            again += a.src.fetches;
+            most = std::max(most, a.src.fetches);
+        }
+        if (n + 1 < next_start) {
+            // W..n and the frames played until it reaches the one played (some still in the
+            // source cache), paced over the frames before the window start, which is taken
+            // over: no re-run.
+            CHECK(again < next_start - w);
+            CHECK(again >= n - w - 8);
+            const int64_t owed = n + 2 - w, left = next_start - n - 1;
+            CHECK(most <= int(std::max<int64_t>(4, (owed + left - 1) / left)) + 1);
+        } else {
+            // A seek to the frame before a window start: no frame to catch up on, the window
+            // start re-runs its window (as with NTSCRT_SCREENLOOP_AHEAD=0).
+            a.render(next_start + 100);
+            a.render(next_start + 99);  // back: continues from a checkpoint
         }
         Inst b("{}", fb);
         CHECK(b.render(last) == played);
+        // The default: the run ahead goes along with the re-run, so nothing is fetched again (a
+        // cold seek's TV passes are a third more).
+        set_env("NTSCRT_SOURCE_CACHE_MB", "0");
+        set_env("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
+        Inst c("{}", fb);
+        set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+        set_env("NTSCRT_SCREENLOOP_SOURCE_MB", nullptr);
+        c.render(n);
+        CHECK(c.src.fetches == n - anchor);
+        for (int64_t f = n + 1; f <= last; ++f) {
+            CAPTURE(f);
+            played = c.render(f);
+            CHECK(c.src.fetches == 0);
+        }
+        CHECK(b.render(last + 1) == c.render(last + 1));
+    }
+}
+
+TEST_CASE("Screen Loop: its window of source frames is kept: re-runs ask the host for them once") {
+    // An edit at the playhead (a Screen Loop setting: its own loop) re-runs the window; the
+    // source frames come from the store (NTSCRT_SCREENLOOP_SOURCE_MB), the same pictures.
+    // A store smaller than the window keeps the frames closest below the playhead (the run ahead
+    // catching up reads those) and keeps them through a re-run, so each re-run finds the same ones.
+    auto zoomed = [](double z) {
+        auto j = nlohmann::json::parse(feedback("Bottom to top", 240));
+        j["values"]["zoom"] = z;
+        return j.dump();
+    };
+    const int64_t n = 1850, anchor = (n / 240 - 1) * 240;
+    std::vector<std::vector<uint8_t>> want;
+    for (double z : {0.75, 0.6, 0.5}) {
+        Inst c("{}", zoomed(z));
+        if (!c.ok) return;
+        want.push_back(c.render(n));
+    }
+    set_env("NTSCRT_SOURCE_CACHE_MB", "0");
+    Inst a("{}", zoomed(0.75));  // the default store: the whole window at this size
+    set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    CHECK(a.render(n) == want[0]);
+    CHECK(a.src.fetches == n - anchor);
+    CHECK(a.timings.find("loop_sources=") != std::string::npos);
+    a.fb = zoomed(0.6);
+    CHECK(a.render(n) == want[1]);
+    CHECK(a.src.fetches == 0);
+    a.fb = zoomed(0.5);
+    CHECK(a.render(n) == want[2]);
+    CHECK(a.src.fetches == 0);
+
+    const size_t frame_bytes = size_t(W) * H * 4;
+    const std::string mb = std::to_string(double(100 * frame_bytes) / (1024.0 * 1024.0) + 0.0001);
+    set_env("NTSCRT_SOURCE_CACHE_MB", "0");
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", mb.c_str());  // 100 frames: the frame itself and 99 before it
+    Inst b("{}", zoomed(0.75));
+    set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", nullptr);
+    CHECK(b.render(n) == want[0]);
+    CHECK(b.src.fetches == n - anchor);
+    for (int k = 1; k <= 2; ++k) {
+        CAPTURE(k);
+        b.fb = zoomed(k == 1 ? 0.6 : 0.5);
+        CHECK(b.render(n) == want[size_t(k)]);
+        CHECK(b.src.fetches == n - anchor - 99);
+        CHECK(b.src.first == anchor);
+        CHECK(b.src.last == n - 100);  // 1751..1849 came from the store
     }
 }
 
@@ -243,8 +338,10 @@ TEST_CASE("Screen Loop: a render at another scale in between keeps the full-size
         for (int64_t f = 0; f <= 30; ++f) seq.push_back(a.render(f));
     }
     set_env("NTSCRT_SOURCE_CACHE_MB", "0");
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
     Inst b("{}", fb);
     set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", nullptr);
     for (int64_t f = 0; f <= 20; ++f) CHECK(b.render(f) == seq[size_t(f)]);
     b.render(20, 0.5);  // the viewer: its own loop, its own (smaller) fetches
     CHECK(b.src.fetches > 0);
@@ -275,8 +372,10 @@ TEST_CASE("Screen Loop: other settings in between, then back: the history goes o
         for (int64_t f = 0; f <= 30; ++f) seq_b.push_back(b.render(f));
     }
     set_env("NTSCRT_SOURCE_CACHE_MB", "0");  // 8 frames kept: a re-run fetches again
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
     Inst x("{}", fa);
     set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", nullptr);
     CHECK(x.render(20) == seq_a[20]);  // a cold seek
     CHECK(x.src.fetches > 0);
     x.render(20, 0.5);  // the viewer's size, its own loop
@@ -291,21 +390,23 @@ TEST_CASE("Screen Loop: other settings in between, then back: the history goes o
     x.render(20, 0.5);
     CHECK(x.src.fetches == 0);
     CHECK(x.render(21) == seq_a[21]);
-    CHECK(x.src.fetches == 0);
+    CHECK(x.src.fetches <= 3);  // no re-run (the run ahead catching up: a few)
     x.fb = fb;  // and B's
     CHECK(x.render(21) == seq_b[21]);
-    CHECK(x.src.fetches == 0);
+    CHECK(x.src.fetches <= 3);
     CHECK(x.render(22) == seq_b[22]);
-    CHECK(x.src.fetches == 0);
+    CHECK(x.src.fetches <= 3);
     // Seeking back after coming back: a parked loop kept only its last checkpoint (here the
     // window start's); the frame is still the one an undisturbed instance renders.
     CHECK(x.render(9) == seq_b[9]);
     // A budget smaller than one loop's pictures (UHD): the setting just left is still kept.
     set_env("NTSCRT_SCREENLOOP_KEEP_MB", "0.001");
     set_env("NTSCRT_SOURCE_CACHE_MB", "0");
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
     Inst z("{}", fa);
     set_env("NTSCRT_SCREENLOOP_KEEP_MB", nullptr);
     set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", nullptr);
     z.render(20);
     z.fb = fb;
     z.render(20);
@@ -315,9 +416,11 @@ TEST_CASE("Screen Loop: other settings in between, then back: the history goes o
     // NTSCRT_SCREENLOOP_KEEP_MB=0: nothing is kept, going back re-runs (the same frame).
     set_env("NTSCRT_SCREENLOOP_KEEP_MB", "0");
     set_env("NTSCRT_SOURCE_CACHE_MB", "0");
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
     Inst y("{}", fa);
     set_env("NTSCRT_SCREENLOOP_KEEP_MB", nullptr);
     set_env("NTSCRT_SOURCE_CACHE_MB", nullptr);
+    set_env("NTSCRT_SCREENLOOP_SOURCE_MB", nullptr);
     y.render(20);
     y.fb = fb;
     y.render(20);

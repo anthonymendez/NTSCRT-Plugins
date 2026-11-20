@@ -5,6 +5,10 @@
 #include <cstring>
 #include <stdexcept>
 
+#include <chrono>
+#include <cstdio>
+
+#include "../../src/phase_times.h"
 #include "../stages.h"
 #include "howl_engine.h"
 
@@ -24,6 +28,28 @@ struct GpuOps {
     const HowlHooks *hooks = nullptr;
     int scene_w = 0, scene_h = 0;
     gpu::Format scene_format = gpu::Format::BGRA8;
+
+    // NTSCRT_PROFILE=1: where a call's loop time went, the GPU waited for after each part
+    // (the core's timings line, loop_profile=): source frames from the host (fetch and
+    // conversion), their upload, camera exposures, TV passes (NTSC, Downscale, Glitch, CRT).
+    enum Part { kSource, kUpload, kCamera, kTv, kParts };
+    double prof[kParts] = {};
+    int prof_n[kParts] = {};
+    struct Prof {
+        GpuOps *o;
+        Part part;
+        std::chrono::steady_clock::time_point t0;
+        Prof(GpuOps *ops, Part p) : o(PhaseTimes::profiling() ? ops : nullptr), part(p), t0(std::chrono::steady_clock::now()) {}
+        ~Prof() {
+            if (!o) return;
+            try {
+                o->dev.finish();
+            } catch (...) {
+            }
+            o->prof[part] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            ++o->prof_n[part];
+        }
+    };
 
     TexPtr black, counter_tex;
     std::string counter_uploaded;
@@ -59,11 +85,20 @@ struct GpuOps {
         return t;
     }
 
-    Pic scene(int64_t f) {
-        if (!ctx || !ctx->source_at) return {};
-        auto im = ctx->source_at(f);
+    Pic scene(int64_t f) { return scene_from(f, ctx ? ctx->source_at : nullptr); }
+    Pic scene_ahead(int64_t f) {
+        return scene_from(f, ctx && ctx->source_optional ? ctx->source_optional : ctx ? ctx->source_at : nullptr);
+    }
+    Pic scene_from(int64_t f, const std::function<std::shared_ptr<const ImageBGRA8>(int64_t)> &get) {
+        if (!get) return {};
+        std::shared_ptr<const ImageBGRA8> im;
+        {
+            Prof pr(this, kSource);
+            im = get(f);
+        }
         if (!im || im->width != scene_w || im->height != scene_h) return {};
         if (scene_format != gpu::Format::BGRA8) return {};
+        Prof pr(this, kUpload);
         return upload_bgra8(*im);
     }
 
@@ -79,6 +114,7 @@ struct GpuOps {
 
     Pic camera(const Pic &scene_tex, const Pic &tv, const CameraUniforms &u, double sigma,
                const CounterBitmap *counter, bool measure, double &scene_luma, double &camera_luma) {
+        Prof pr(this, kCamera);
         if (!black) {
             black = dev.create_texture({1, 1, gpu::Format::RGBA8, false, false});
             const uint8_t px[4] = {0, 0, 0, 255};
@@ -145,6 +181,7 @@ struct GpuOps {
     }
 
     Pic tv_pass(const Pic &cam, const HowlPass &p) {
+        Prof pr(this, kTv);
         if (has_hooks()) {
             TexPtr chain = hooks->chain_input(cam, p);
             if (chain) return render_tv(*chain, p);
@@ -165,8 +202,12 @@ struct GpuOps {
         TexPtr cam;
     };
     int max_inflight() const { return has_hooks() && hooks->chain_input_begin ? 2 : 0; }
-    Pending tv_begin(const Pic &cam, const HowlPass &p) { return {hooks->chain_input_begin(cam, p), p, cam}; }
+    Pending tv_begin(const Pic &cam, const HowlPass &p) {
+        Prof pr(this, kTv);
+        return {hooks->chain_input_begin(cam, p), p, cam};
+    }
     Pic tv_end(Pending &&q) {
+        Prof pr(this, kTv);
         TexPtr chain = q.finish ? q.finish() : nullptr;
         return chain ? render_tv(*chain, q.pass) : direct_tv(q.cam);
     }
@@ -222,6 +263,9 @@ struct Howlaround::Impl {
     int64_t last_frame = -1;
     std::string last_feedback;  // the feedback JSON of the last camera() call
     size_t parked_budget = default_parked_budget();
+    // Read when the instance is made (as the budget above), not when each loop is.
+    size_t checkpoint_budget = howl::default_checkpoint_budget();
+    howl::AheadMode ahead = howl::default_ahead();
 
     // NTSCRT_SCREENLOOP_KEEP_MB: memory the parked loops may hold in all (0 = none kept), default 256 MB.
     static size_t default_parked_budget() {
@@ -418,11 +462,25 @@ std::shared_ptr<gpu::Texture> Howlaround::camera(const std::shared_ptr<gpu::Text
         cfg.chain_w = sl.chain_w;
         cfg.chain_h = sl.chain_h;
         cfg.window = window;
+        cfg.checkpoint_budget = m.checkpoint_budget;
+        cfg.ahead = m.ahead;
         sl.engine = std::make_unique<howl::Engine<GpuOps>>(cfg);
         sl.key = key;
     }
     m.sync_checkpoints();
+    const int64_t caught = sl.engine->catch_up_fetches();
+    for (int i = 0; i < GpuOps::kParts; ++i) m.ops.prof[i] = 0, m.ops.prof_n[i] = 0;
     TexPtr cam = sl.engine->camera(m.ops, ctx.frame, scene);
+    if (PhaseTimes::profiling()) {
+        char b[160];
+        const auto &o = m.ops;
+        std::snprintf(b, sizeof b, "profile source:%.0f/%d,upload:%.0f/%d,camera:%.0f/%d,tv:%.0f/%d ms",
+                      o.prof[0], o.prof_n[0], o.prof[1], o.prof_n[1], o.prof[2], o.prof_n[2], o.prof[3], o.prof_n[3]);
+        m.note += (m.note.empty() ? "" : ", ") + std::string(b);
+    }
+    if (sl.engine->catch_up_fetches() != caught)  // the run ahead caught up (deferred past a re-run)
+        m.note += (m.note.empty() ? "" : ", ") + std::string("run ahead caught up ") +
+                  std::to_string(sl.engine->catch_up_fetches() - caught) + " frames";
     m.sync_checkpoints();  // a temporal preset may first have run just now
     m.ops.ctx = nullptr;
     m.last_camera = cam;

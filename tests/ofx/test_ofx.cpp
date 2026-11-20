@@ -66,6 +66,20 @@ const fs::path kLogFile = [] {
     return p;
 }();
 const fs::path kSwitchFile = kSettingsDir / "debug-logging-all-effects.txt";
+// Screen Loop's store of source frames (NTSCRT_SCREENLOOP_SOURCE_MB): off unless the environment
+// sets it, so the Screen Loop tests count re-runs as the host's fetches. Set before the plug-in loads
+// (its static CRT reads the environment once).
+const bool kLoopStore = [] {
+    const char *e = std::getenv("NTSCRT_SCREENLOOP_SOURCE_MB");
+    if (e && *e) return std::string(e) != "0";
+#ifdef _WIN32
+    _putenv_s("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
+#else
+    setenv("NTSCRT_SCREENLOOP_SOURCE_MB", "0", 1);
+#endif
+    return false;
+}();
+bool loop_store_on() { return kLoopStore; }
 // This process's files go when it ends (best effort: the plug-in may still hold the log).
 struct RemoveTestFiles {
     ~RemoveTestFiles() {
@@ -2105,6 +2119,10 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
     }
     const bool bench = std::getenv("NTSCRT_BENCH_SL_SIZE") || std::getenv("NTSCRT_BENCH_SL_FRAMES");
     std::string report;
+    // Screen Loop's store of its window's source frames is off in this process (kLoopStore), so
+    // re-runs show as the host's fetches; ctest's test_ofx_screenloop_store runs this with it on:
+    // then only the first render fetches (its window once per render scale), the re-runs none.
+    const bool store = loop_store_on();
     for (double T : frames) {
         LoopEditFixture f(w, h);
         f.shot(0);  // warm-up: shaders
@@ -2130,6 +2148,16 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
             // the loop run again and some renders fetch its window twice (CI run 44478596023; not
             // understood without a Mac). The pictures are still checked above.
             MESSAGE("re-run counts not checked on the CI runner's virtual GPU");
+            continue;
+        }
+        if (store) {
+            CAPTURE(T);
+            const int64_t window = int64_t(T) - (T < 480 ? 0 : (int64_t(T) / 240 - 1) * 240);
+            CHECK(steps.front().fetches == 2 * window);
+            for (size_t i = 1; i < steps.size(); ++i) {
+                CAPTURE(steps[i].what);
+                CHECK(steps[i].fetches == 0);
+            }
             continue;
         }
         for (const auto &st : steps) {
@@ -2243,6 +2271,7 @@ TEST_CASE("Screen Loop: a render the host aborts drops only the loop it was runn
     // Resolve aborts a render it no longer needs (a newer edit): the loop that render was re-running
     // stood in pictures for the frames it skipped and must go, but the loops of the settings before
     // (kept to come back to) stay.
+    if (loop_store_on()) return;  // counts the host's fetches
     LoopEditFixture f(128, 72);
     const double T = 600;
     f.shot(0);
