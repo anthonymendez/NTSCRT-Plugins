@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 #include "../../src/sim_segment.h"
@@ -210,6 +211,17 @@ Size Renderer::captureSize(int width, int height, int captureWidth) {
     return {cw, std::max(16, 2 * int(std::round(double(cw) / aspect / 2)))};
 }
 
+CheckpointConfig CheckpointConfig::fromEnvironment() {
+    CheckpointConfig c;
+    c.budget = size_t(256) << 20;
+    if (const char *e = std::getenv("NTSCRT_DIGITAL_CHECKPOINT_MB"); e && *e) {
+        char *end = nullptr;
+        const double mb = std::strtod(e, &end);
+        if (end != e && mb >= 0) c.budget = size_t(mb * 1024 * 1024);
+    }
+    return c;
+}
+
 struct Renderer::Call {
     int n;
     Settings structure;
@@ -221,6 +233,7 @@ struct Renderer::Call {
     Size size;
     std::vector<uint8_t> current;
     std::map<int, Settings> memo;
+    bool missed = false;  // an earlier frame the host didn't give (a stand-in took its place)
 
     const Settings &settingsFor(int c) {
         if (!settingsAt) return structure;
@@ -239,8 +252,9 @@ void Renderer::flush() {
     run_ = {};
     shown_.clear();
     checkpoints_.clear();
-    checkpointOrder_.clear();
     checkpointBytes_ = 0;
+    trail_.clear();
+    trailBytes_ = 0;
 }
 
 void Renderer::process(int n, uint8_t *pixels, int width, int height, int rowBytes, Size capture,
@@ -252,7 +266,8 @@ void Renderer::process(int n, uint8_t *pixels, int width, int height, int rowByt
     // The current picture at the capture size, scaled once.
     std::vector<uint8_t> current = scale(pixels, width, height, rowBytes, capture, settings);
     lap(profile_.scale, t);
-    const std::vector<uint8_t> &shown = code(n, std::move(current), capture, sourceFPS, settings, settingsAt, earlier, seed);
+    const std::vector<uint8_t> &shown =
+        code(n, std::move(current), capture, sourceFPS, settings, settingsAt, earlier, seed, {width, height});
     t = ProfileClock::now();
     upscale(shown, capture, pixels, width, height, rowBytes);
     lap(profile_.upscale, t);
@@ -260,13 +275,16 @@ void Renderer::process(int n, uint8_t *pixels, int width, int height, int rowByt
 
 const std::vector<uint8_t> &Renderer::code(int n, std::vector<uint8_t> current, Size capture, double sourceFPS,
                                            const Settings &settings, const SettingsAt &settingsAt,
-                                           const EarlierFrames &earlier, uint64_t seed) {
+                                           const EarlierFrames &earlier, uint64_t seed, Size source) {
     n = std::max(0, n);
     const Settings &structure = settings;
     Timing timing(sourceFPS, structure);
     Geometry geometry{capture.width, capture.height, structure.chroma()};
-    StreamKey key{geometry, timing, seed_mix(seed), !earlier};
+    StreamKey key{geometry, timing, seed_mix(seed), !earlier, source.width, source.height};
     if (!stream_ || *stream_ != key) {
+        // Another stream (other structure settings, another render scale): the one
+        // being coded is kept as a checkpoint, so going back to it goes on from there.
+        park();
         stream_ = key;
         state_.reset();
         lastCapture_.reset();
@@ -275,6 +293,7 @@ const std::vector<uint8_t> &Renderer::code(int n, std::vector<uint8_t> current, 
     Call call{n, structure, timing, geometry, key, settingsAt, earlier, capture, std::move(current), {}};
     const int c = timing.captureOfFrame(n);
     lastRunLength_ = 0;
+    lastResumedFrom_ = -1;
 
     // The frame rendered again (an edit elsewhere on the timeline re-renders
     // the frame on screen): check every capture of the run. A repeat during
@@ -283,10 +302,12 @@ const std::vector<uint8_t> &Renderer::code(int n, std::vector<uint8_t> current, 
     lastFrame_ = n;
     if (lastCapture_ && state_ && *lastCapture_ == c && runHolds(call, run_, again ? run_.origin : c, c)) {
         // Same frame, same settings: what's shown already.
+        lastResumedFrom_ = c;
     } else if (lastCapture_ && state_ && c > *lastCapture_ &&
                c - *lastCapture_ <= std::max(2, 2 * timing.keyframeEvery) &&
                runHolds(call, run_, *lastCapture_, *lastCapture_)) {
         // Moving forward: carry on.
+        lastResumedFrom_ = *lastCapture_;
         bool ok = true;
         for (int k = *lastCapture_ + 1; k <= c; ++k) {
             std::optional<std::vector<uint8_t>> src;
@@ -296,15 +317,23 @@ const std::vector<uint8_t> &Renderer::code(int n, std::vector<uint8_t> current, 
                 ok = false;
                 break;
             }
-            advance(call, k, *src);
+            advance(call, k, *src, k == c, false);
         }
         if (!ok) rerun(call, c);
     } else {
         rerun(call, c);
     }
+    if (call.missed) {
+        // A stand-in took the place of a frame the host didn't give (an abort): never
+        // go on from this state; the next call re-runs (from a checkpoint made before).
+        state_.reset();
+        lastCapture_.reset();
+        run_ = {};
+    }
     profile_.captures = lastRunLength_;
     return shown_;
 }
+
 bool Renderer::runHolds(Call &call, const Run &run, int from, int upTo) {
     if (upTo < run.origin || size_t(upTo - run.origin) >= run.fps.size()) return false;
     for (int k = std::max(from, run.origin); k <= upTo; ++k)
@@ -314,59 +343,104 @@ bool Renderer::runHolds(Call &call, const Run &run, int from, int upTo) {
 
 void Renderer::rerun(Call &call, int c) {
     const Timing &timing = call.timing;
-    const int g = timing.keyframeEvery;
+    // Where a run from scratch starts: the last real keyframe at or before c
+    // (walking back over keyframes a datamosh drops), the capture before c when
+    // every frame is a keyframe (frames_needed.h mirrors this).
     int start;
-    const Checkpoint *restored = nullptr;
     if (timing.intraOnly()) {
         // Each frame stands alone; only the one before (for patching lost
         // blocks) matters.
         start = std::max(0, c - 1);
     } else {
+        const int g = timing.keyframeEvery;
         int b = (c / g) * g;
-        while (b > 0) {
-            FrameKind kind = timing.kind(b, call.settingsFor(b).effective(kDatamosh), call.key.seedMix);
-            if (kind == FrameKind::Key) break;
-            auto it = checkpoints_.find({call.key, b});
-            if (it != checkpoints_.end() && runHolds(call, it->second.run, it->second.run.origin, b)) {
-                restored = &it->second;
-                break;
-            }
+        while (b > 0 && timing.kind(b, call.settingsFor(b).effective(kDatamosh), call.key.seedMix) != FrameKind::Key)
             b -= g;
-        }
         start = b;
     }
-    if (restored) {
-        state_ = restored->state->copy();
-        run_ = restored->run;
-        lastCapture_ = start;
-    } else {
+    // What it can go on from instead: the stream's own state, or the latest
+    // checkpoint at or before c, when the settings of every capture since its
+    // keyframe still hold (a state from before `start` would cost more than it saves).
+    int from = start - 1;
+    bool live = false;
+    Checkpoint *cp = nullptr;
+    if (!timing.intraOnly()) {
+        if (state_ && state_->decoder && lastCapture_ && run_.complete && *lastCapture_ >= start &&
+            *lastCapture_ <= c && runHolds(call, run_, run_.origin, *lastCapture_)) {
+            from = *lastCapture_;
+            live = true;
+        }
+        // The checkpoints, then the last re-run's trail (only a later capture than
+        // the best checkpoint is worth it).
+        for (auto *map : {&checkpoints_, &trail_}) {
+            auto it = map->upper_bound({call.key, c});
+            while (it != map->begin()) {
+                --it;
+                if (it->first.first != call.key || it->first.second <= from || it->first.second < start) break;
+                if (runHolds(call, it->second.run, it->second.run.origin, it->first.second)) {
+                    cp = &it->second;
+                    from = it->first.second;
+                    live = false;
+                    break;
+                }
+            }
+        }
+    }
+    if (cp) {
+        state_ = std::make_shared<CodecState>(*cp->state);  // shares its pictures (never changed)
+        run_ = cp->run;
+        step_ = cp->step;
+        lastCapture_ = from;
+        cp->used = ++tick_;
+    } else if (!live) {
         state_ = std::make_shared<CodecState>(call.geometry);
-        run_ = Run{start, {}};
+        run_ = Run{start, {}, true};
         lastCapture_.reset();
     }
-    const int first = restored ? start + 1 : start;
-    if (first > c) {
-        // The checkpoint is the frame itself.
-        const Settings &s = call.settingsFor(c);
-        auto t = ProfileClock::now();
-        double deblock = 0;
-        shown_ = render(*state_->decoder, call.geometry, s, codec::Steps(s[kQuality], 1).inter, &deblock);
-        lap(profile_.upsample, t);
-        profile_.upsample -= deblock;
-        profile_.deblock += deblock;
-        lastCapture_ = c;
+    lastResumedFrom_ = cp || live ? from : -1;
+    if (from >= c) {
+        // The state is the frame's own.
+        showState(call, c);
         return;
     }
-    for (int k = first; k <= c; ++k) {
+    // The trail: the states of the captures just before c, so stepping back from
+    // here one frame at a time re-runs nothing (the frames since the checkpoint
+    // were coded anyway). It replaces the last re-run's.
+    std::vector<std::pair<int, Checkpoint>> trail;
+    const int trailFrom =
+        cfg_.budget > 0 && cfg_.every > 0 && !timing.intraOnly() ? std::max(from + 1, c - cfg_.every + 1) : c;
+    for (int k = from + 1; k <= c; ++k) {
         // The camera took capture k at its first frame; `current` is frame
         // n, which may be a later repeat of it.
         if (timing.frameOfCapture(k) == call.n) {
-            advance(call, k, call.current);
+            advance(call, k, call.current, k == c, false);
         } else {
             auto src = earlierCapture(call, k);
-            advance(call, k, src ? *src : call.current);
+            advance(call, k, src ? *src : call.current, k == c, !src);
+        }
+        if (k >= trailFrom && k < c && run_.complete) trail.emplace_back(k, snapshot());
+    }
+    if (from + 1 < c) {
+        trail_.clear();
+        trailBytes_ = 0;
+        // Newest first, within a quarter of the budget.
+        for (auto it = trail.rbegin(); it != trail.rend(); ++it) {
+            if (trailBytes_ + it->second.bytes > cfg_.budget / 4) break;
+            trailBytes_ += it->second.bytes;
+            trail_.emplace(std::make_pair(call.key, it->first), std::move(it->second));
         }
     }
+}
+
+void Renderer::showState(Call &call, int c) {
+    const Settings &s = call.settingsFor(c);
+    auto t = ProfileClock::now();
+    double deblock = 0;
+    shown_ = render(*state_->decoder, call.geometry, s, step_, &deblock);
+    lap(profile_.upsample, t);
+    profile_.upsample -= deblock;
+    profile_.deblock += deblock;
+    lastCapture_ = c;
 }
 
 std::optional<std::vector<uint8_t>> Renderer::earlierCapture(Call &call, int k) {
@@ -375,6 +449,7 @@ std::optional<std::vector<uint8_t>> Renderer::earlierCapture(Call &call, int k) 
     auto f = call.earlier(call.timing.frameOfCapture(k));
     if (!f || !f->data || f->width <= 0 || f->height <= 0) {
         lap(profile_.earlier, t);
+        call.missed = true;
         return std::nullopt;
     }
     auto out = scale(f->data, f->width, f->height, f->rowBytes, call.size, call.structure);
@@ -382,9 +457,9 @@ std::optional<std::vector<uint8_t>> Renderer::earlierCapture(Call &call, int k) 
     return out;
 }
 
-void Renderer::advance(Call &call, int k, const std::vector<uint8_t> &source) {
+void Renderer::advance(Call &call, int k, const std::vector<uint8_t> &source, bool show, bool standIn) {
     if (!state_) state_ = std::make_shared<CodecState>(call.geometry);
-    if (run_.fps.size() != size_t(k - run_.origin)) run_ = Run{k, {}};  // never: runs are contiguous
+    if (run_.fps.size() != size_t(k - run_.origin)) run_ = Run{k, {}, true};  // never: runs are contiguous
     const Settings &settings = call.settingsFor(k);
     auto t = ProfileClock::now();
     PicturePtr picture = capture(source, call.geometry, settings, k, call.key.seedMix);
@@ -400,44 +475,69 @@ void Renderer::advance(Call &call, int k, const std::vector<uint8_t> &source) {
     lap(profile_.codec, t);
     lastRunLength_ += 1;
     lastCapture_ = k;
-    double deblock = 0;
-    shown_ = render(*result.picture, call.geometry, settings, result.step, &deblock);
-    lap(profile_.upsample, t);
-    profile_.upsample -= deblock;
-    profile_.deblock += deblock;
+    step_ = result.step;
+    // A keyframe that arrives makes the decoder's picture from this capture alone:
+    // nothing before it matters any more.
+    if (kind == FrameKind::Key) run_ = Run{k, {}, true};
+    if (standIn) run_.complete = false;
     run_.fps.push_back(settings.fingerprint());
-
-    // Checkpoint at keyframes the decoder lost (the only places its history
-    // reaches past).
-    if (kind == FrameKind::DroppedKey) {
-        Checkpoint cp;
-        cp.state = state_->copy();
-        cp.run = run_;
-        cp.bytes = (state_->encoder ? state_->encoder->byteCount() : 0) * 2 + run_.fps.size() * 8;
-        store(call.key, k, std::move(cp));
+    if (show) {
+        // Only the frame asked for is shown (the captures before it in a re-run are not).
+        double deblock = 0;
+        shown_ = render(*result.picture, call.geometry, settings, result.step, &deblock);
+        lap(profile_.upsample, t);
+        profile_.upsample -= deblock;
+        profile_.deblock += deblock;
     }
+
+    // Checkpoints: every cfg_.every captures between keyframes, and at keyframes the
+    // decoder lost (the only places a datamosh's history reaches past). Never from a
+    // run with a stand-in in it.
+    if (run_.complete && cfg_.budget > 0 &&
+        (kind == FrameKind::DroppedKey || (kind == FrameKind::Predicted && cfg_.every > 0 && k % cfg_.every == 0)))
+        store(call.key, k, snapshot());
+}
+
+Renderer::Checkpoint Renderer::snapshot() const {
+    Checkpoint cp;
+    cp.state = std::make_shared<CodecState>(*state_);  // shares the pictures
+    cp.run = run_;
+    cp.step = step_;
+    size_t b = sizeof(CodecState) + state_->vectors.size() * sizeof(MotionVector) + run_.fps.size() * 8;
+    if (state_->encoder) b += state_->encoder->byteCount();
+    if (state_->decoder && state_->decoder != state_->encoder) b += state_->decoder->byteCount();
+    cp.bytes = b;
+    return cp;
+}
+
+void Renderer::park() {
+    if (!stream_ || !state_ || !state_->decoder || !lastCapture_ || !run_.complete || stream_->timing.intraOnly())
+        return;
+    if (run_.fps.size() != size_t(*lastCapture_ - run_.origin + 1)) return;
+    store(*stream_, *lastCapture_, snapshot());
 }
 
 void Renderer::store(const StreamKey &key, int capture, Checkpoint cp) {
+    if (cfg_.budget == 0) return;
     auto id = std::make_pair(key, capture);
     auto it = checkpoints_.find(id);
     if (it != checkpoints_.end()) {
-        if (it->second.run.origin == cp.run.origin && it->second.run.fps == cp.run.fps) return;
+        if (it->second.run.origin == cp.run.origin && it->second.run.fps == cp.run.fps) {
+            it->second.used = ++tick_;
+            return;
+        }
         checkpointBytes_ -= it->second.bytes;
         checkpoints_.erase(it);
-        checkpointOrder_.erase(std::find(checkpointOrder_.begin(), checkpointOrder_.end(), id));
     }
+    cp.used = ++tick_;
     checkpointBytes_ += cp.bytes;
     checkpoints_.emplace(id, std::move(cp));
-    checkpointOrder_.push_back(id);
-    while (checkpointBytes_ > kCheckpointBudget && !checkpointOrder_.empty()) {
-        auto oldest = checkpointOrder_.front();
-        checkpointOrder_.erase(checkpointOrder_.begin());
-        auto o = checkpoints_.find(oldest);
-        if (o != checkpoints_.end()) {
-            checkpointBytes_ -= o->second.bytes;
-            checkpoints_.erase(o);
-        }
+    // Over budget: the least recently used (taken or resumed from) go first.
+    while (checkpointBytes_ > cfg_.budget && !checkpoints_.empty()) {
+        auto lru = std::min_element(checkpoints_.begin(), checkpoints_.end(),
+                                    [](const auto &a, const auto &b) { return a.second.used < b.second.used; });
+        checkpointBytes_ -= lru->second.bytes;
+        checkpoints_.erase(lru);
     }
 }
 
