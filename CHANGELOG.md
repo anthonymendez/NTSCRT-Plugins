@@ -18,6 +18,13 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 - **The Sim CRT shader is a little faster:** each frame used to be drawn twice behind the scenes (to keep its
   picture the same whatever order frames are rendered in); now it is drawn once, with the very same picture,
   byte for byte. About 0.07-0.1 ms less per frame on an RTX 5090 at 1080p and UHD.
+- **Animated presets no longer add keyframes.** Choosing *Glitch pop*, *15 second glitches*, *V Hold glitch* and
+  the other animated looks now sets the controls once and the effect plays the animation by itself, so choosing
+  one is quicker and the Inspector stays light (about 3,000 keyframes before). The pictures are exactly the same
+  as before. Keyframes you add to a control win over the animation for that control; changing a control by hand
+  takes it out of the animation (the others keep moving); *(none)* in the Preset menu stops the animation.
+  Projects made with earlier versions keep their keyframes and play as before. Final Cut Pro: the same (not yet
+  tried on a Mac).
 
 ## [0.5.3] - 2026-11-20
 

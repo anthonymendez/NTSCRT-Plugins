@@ -178,7 +178,13 @@ exactly this. This project avoids every likely cause we know of:
   times are independent and that `startTimeForEffect:` is relative to the clip's
   native start, but not which base `renderTime` uses; with *Debug Logging* on the
   log prints the raw times (`debug state ...`) to check this.
-- Animated presets (upstream `timeline` keys) become keyframes: every look parameter's keyframes
+- Animated presets (upstream `timeline` keys) write no keyframes since 0.6.0: every look parameter's
+  keyframes are removed, the first frame's values set, and the animation stored in the hidden string
+  parameter `kAnimation` (14, `setStringParameterValue:toParameter:`); `pluginState:` computes the
+  moving values for its frame (and the earlier frames' looks) from it (`host::Animation`), keyed
+  parameters keeping their keyframes' values. Unverified: that a hidden string parameter of ~20 KB is
+  kept with the project and readable from `pluginState:`. With `NTSCRT_PRESET_KEYFRAMES=1` they become
+  keyframes as before: every look parameter's keyframes
   are removed (`removeAllKeyframesForParameter:andChannel:`), then for each key the code adds a
   keyframe (`addKeyframe:toParameter:andChannel:`, which carries no value) and sets the value at
   that time with `set…Value:toParameter:atTime:`, from `startTimeForEffect:` one frame

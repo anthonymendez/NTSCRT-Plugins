@@ -63,6 +63,8 @@ const char kDebugParam[] = "host_debug_logging";
 const char kOpenLogsParam[] = "host_open_logs";
 const char kDebugAllParam[] = "host_debug_all";               // push button: toggles the global switch
 const char kDebugAllStatusParam[] = "host_debug_all_status";  // read-only: the global switch's state
+// Hidden: the animation of the animated preset last chosen (ntscrt::host::animation_text; "" = none).
+const char kAnimParam[] = "host_animation";
 const char kDebugAllOn[] = "ON for every NTSCRT effect";
 const char kDebugAllOff[] = "off";
 const char kDebugAllTurnOn[] = "Turn on debug logging for all effects";
@@ -456,6 +458,7 @@ public:
         debug_ = fetchBooleanParam(kDebugParam);
         debug_all_ = fetchPushButtonParam(kDebugAllParam);
         debug_all_status_ = fetchStringParam(kDebugAllStatusParam);
+        anim_param_ = fetchStringParam(kAnimParam);
         for (size_t i = 0; i < s.params.size(); ++i) {
             by_name_[s.params[i].name] = i;
             if (s.params[i].type == PType::Bool) by_id_[s.params[i].id] = i;
@@ -661,6 +664,8 @@ public:
                     const Preset &pr = g_.looks[size_t(i - 1)];
                     if (pr.format) apply_values(applies_values(g_.schema, pr.data), args.time, "NTSCRT Digital video format");
                     else apply_preset(pr.data, args.time);
+                } else if (i == 0) {
+                    stop_animation();  // "(none)": the values stay, nothing moves by itself any more
                 }
             } else if (loop_preset_ && name == kLoopPresetParam) {
                 int i = 0;
@@ -671,6 +676,9 @@ public:
             } else if (name == kSaveParam) {
                 save_preset_file(args.time);
             } else {
+                // A hand edit (or the user's keyframe) of a control the animation moves: the
+                // control is the user's from now on (ntscrt::host::Animation).
+                if (auto it = by_name_.find(name); it != by_name_.end()) take_over({it->second});
                 apply_choice_effects(name, args.time);
             }
             // preset apply/load changed many params (keyframes too): flush once
@@ -789,6 +797,9 @@ public:
                                                      "screenloop.enabled"};
     bool bool_at(size_t i, double t) const {
         try {
+            const auto a = animation();
+            if (a->moves(i) && !has_keys(i))
+                return truthy(a->value(i, t - const_cast<NtscrtEffect *>(this)->host_range(t).origin));
             return static_cast<OFX::BooleanParam *>(params_[i])->getValueAtTime(t);
         } catch (...) {
             return true;  // unreadable: assume on
@@ -848,8 +859,51 @@ public:
         return json();
     }
 
+    // ---- procedural animation (animated presets, ntscrt::host::Animation) ---
+    // The animation the hidden param holds, at the source's frame rate: rebuilt when either
+    // changes, shared by the renders reading it.
+    std::shared_ptr<const Animation> animation() const {
+        std::string text;
+        try {
+            if (anim_param_) anim_param_->getValue(text);
+        } catch (...) {
+        }
+        const double fps = const_cast<NtscrtEffect *>(this)->source_frame_rate();
+        std::lock_guard<std::mutex> lk(anim_mu_);
+        if (!anim_ || text != anim_text_ || fps != anim_fps_) {
+            const auto t0 = std::chrono::steady_clock::now();
+            anim_ = std::make_shared<const Animation>(g_.schema, text, fps);
+            anim_text_ = std::move(text);
+            anim_fps_ = fps;
+            if (anim_->active() || anim_->taken_over()) {
+                std::ostringstream o;
+                o << "instance #" << id_ << " animation: " << anim_->moving().size() << " params move ("
+                  << anim_->taken_over() << " taken over by the user), " << anim_->pass() << " frames per pass at "
+                  << fps << " fps, no keyframes (" << anim_->keys_per_pass() << " a pass would have taken); built in "
+                  << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() << " ms";
+                dlog::write(o.str());
+            }
+        }
+        return anim_;
+    }
+    bool has_keys(size_t i) const {
+        try {
+            return static_cast<OFX::ValueParam *>(params_[i])->getNumKeys() > 0;
+        } catch (...) {
+            return true;  // can't tell: the host's value
+        }
+    }
+    // Param i's value at host time t: the animation's when it moves the param and the param has
+    // no keyframes (keyframes win: an older project's preset keys, or the user's own).
+    json frame_value(const Animation *a, size_t i, double t, double origin) const {
+        if (a && a->moves(i) && !has_keys(i)) return a->value(i, t - origin);
+        return value_at(i, t);
+    }
+
     void look_at_time(double t, std::string &look, std::string &fb) const {
-        const Built b = build_look(g_.schema, [&](size_t i) { return value_at(i, t); });
+        const auto a = animation();
+        const double origin = a->active() ? const_cast<NtscrtEffect *>(this)->host_range(t).origin : 0.0;
+        const Built b = build_look(g_.schema, [&](size_t i) { return frame_value(a.get(), i, t, origin); });
         look = b.look.dump();
         fb = b.feedback.is_null() ? std::string() : b.feedback.dump();
     }
@@ -893,11 +947,12 @@ public:
     }
     // The look at time t, built once per param state (look_gen_). The string
     // stays valid until the next call. Called under mu_.
-    const std::string &cached_look(double t) {
+    const std::string &cached_look(double t, const std::shared_ptr<const Animation> &anim, double origin) {
         const uint64_t gen = look_gen_;
-        if (gen != look_cache_gen_ || look_cache_.size() >= 2048) {
+        if (gen != look_cache_gen_ || look_cache_.size() >= 2048 || anim != look_cache_anim_) {  // (held: no reuse)
             look_cache_.clear();
             look_cache_gen_ = gen;
+            look_cache_anim_ = anim;
         }
         auto it = look_cache_.find(t);
         if (it != look_cache_.end()) return it->second;
@@ -910,6 +965,7 @@ public:
         }
         const Built b = build_look(g_.schema, [&](size_t i) {
             if (i < keyed_.size() && keyed_[i]) return value_at(i, t);
+            if (anim && anim->moves(i)) return anim->value(i, t - origin);
             if (held_[i].is_null()) held_[i] = value_at(i, t);
             return held_[i];
         });
@@ -920,8 +976,8 @@ public:
     // the next frames' history lookups. A cached look for the same time that
     // differs means params changed without a changedParam (a host that doesn't
     // report some keyframe edit): the history is dropped.
-    void note_current_look(double t, const std::string &look) {
-        if (look_cache_gen_ == look_gen_) {
+    void note_current_look(double t, const std::string &look, const std::shared_ptr<const Animation> &anim) {
+        if (look_cache_gen_ == look_gen_ && look_cache_anim_ == anim) {
             auto it = look_cache_.find(t);
             if (it != look_cache_.end()) {
                 if (it->second == look) return;
@@ -932,9 +988,10 @@ public:
                 if (inst_) ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_ALL & ~NTSCRT_CACHE_SOURCE);
             }
         }
-        if (look_cache_gen_ != look_gen_ || look_cache_.size() >= 2048) {
+        if (look_cache_gen_ != look_gen_ || look_cache_.size() >= 2048 || look_cache_anim_ != anim) {
             look_cache_.clear();
             look_cache_gen_ = look_gen_;
+            look_cache_anim_ = anim;
         }
         look_cache_[t] = look;
     }
@@ -981,8 +1038,9 @@ public:
         return animated ? dirty : changed;
     }
 
-    // Does any Glitch param have keyframes (unreadable: assume so)?
+    // Does any Glitch param have keyframes, or move with the animation (unreadable: assume so)?
     bool glitch_keyed() const {
+        if (animation()->moves_under("/glitch/")) return true;
         for (size_t i = 0; i < params_.size(); ++i) {
             const ParamDef &p = g_.schema.params[i];
             if (p.feedback || p.path.rfind("/glitch/", 0) != 0) continue;
@@ -1002,13 +1060,27 @@ public:
         for (const char *h : {kVersionParam, kPresetParam, kLoopPresetParam, kPresetFileParam, kLoadParam, kSaveParam,
                               kDebugParam, kOpenLogsParam, kDebugAllParam, kDebugAllStatusParam})
             if (name == h) return 0;
+        if (name == kAnimParam) {
+            // The animation changed (a preset, a control taken over, an undo): every look but
+            // the source's; Glitch's history only if the animation moved a Glitch value before
+            // (the one last built) or does now.
+            bool glitch = false;
+            {
+                std::lock_guard<std::mutex> lk(anim_mu_);
+                glitch = anim_ && anim_->moves_under("/glitch/");
+            }
+            glitch = glitch || animation()->moves_under("/glitch/");
+            const uint32_t m = NTSCRT_CACHE_ALL & ~uint32_t(NTSCRT_CACHE_SOURCE);
+            return glitch ? m : m & ~uint32_t(NTSCRT_CACHE_GLITCH);
+        }
         auto it = by_name_.find(name);
         if (it == by_name_.end()) return NTSCRT_CACHE_ALL;  // the seed, anything unknown
         const ParamDef &p = g_.schema.params[it->second];
-        bool keyed = true;  // only a Glitch param's keys matter (unknown: keyed)
+        bool keyed = true;  // only a Glitch param's keys matter (unknown: keyed); moving with the animation counts
         if (!p.feedback && p.path.rfind("/glitch/", 0) == 0) {
             try {
-                keyed = static_cast<OFX::ValueParam *>(params_[it->second])->getNumKeys() > 0;
+                keyed = static_cast<OFX::ValueParam *>(params_[it->second])->getNumKeys() > 0 ||
+                        animation()->moves(it->second);
             } catch (...) {
             }
         }
@@ -1169,7 +1241,136 @@ private:
         }
     }
 
-    // Applies a preset (bundled or a loaded file) as the shared model plans it
+    // NTSCRT_PRESET_KEYFRAMES=1: animated presets as host keyframes, as before 0.6.0 (comparisons).
+    // Read from the process environment each time (not the C runtime's copy made at load), so a
+    // host process (or the tests) can switch it.
+    static bool preset_keyframes() {
+#ifdef _WIN32
+        char v[8] = {0};
+        const DWORD n = GetEnvironmentVariableA("NTSCRT_PRESET_KEYFRAMES", v, DWORD(sizeof v));
+        return n > 0 && n < sizeof v && std::string(v) != "0";
+#else
+        const char *e = std::getenv("NTSCRT_PRESET_KEYFRAMES");
+        return e && *e && std::string(e) != "0";
+#endif
+    }
+
+    // Applies a preset with the procedural animation (ntscrt::host::plan_preset_procedural):
+    // every look param presets set loses its keyframes and gets a plain value (an animated
+    // preset's first frame), and the hidden animation param the preset's animation ("" for a
+    // still look: whatever moved before stops). No keyframes are written.
+    void apply_preset_procedural(const json &preset, double t) {
+        const auto t0 = std::chrono::steady_clock::now();
+        // The stretch keyframes would have covered (the clip's length, the playhead): the
+        // animation follows it, so the pictures are those of the keyframed version.
+        const TimeRange range = host_range(t);
+        const int64_t available = range.known ? int64_t(std::llround(range.last - range.origin)) + 1 : 0;
+        const PresetPlan plan = plan_preset_procedural(g_.schema, preset, source_frame_rate(), available,
+                                                       frame_of(t, range.origin, false));
+        const auto t_planned = std::chrono::steady_clock::now();
+        applying_ = true;
+        beginEditBlock(plan.replaces_look ? "NTSCRT preset" : "NTSCRT Screen Loop preset");
+        size_t cleared = 0;
+        try {
+            for (const auto &[i, entries] : plan.look.keys) {
+                try {
+                    auto *vp = static_cast<OFX::ValueParam *>(params_[i]);
+                    if (vp->getNumKeys() > 0) {
+                        vp->deleteAllKeys();
+                        ++cleared;
+                    }
+                } catch (...) {
+                }
+                set_value(i, entries.front().second, t);
+            }
+            for (const auto &[i, v] : plan.feedback) set_value(i, v, t);
+            if (plan.replaces_look && anim_param_) {
+                std::string cur;
+                anim_param_->getValue(cur);
+                if (cur != plan.animation) anim_param_->setValue(plan.animation);
+            }
+        } catch (...) {
+            endEditBlock();
+            applying_ = false;
+            throw;
+        }
+        endEditBlock();
+        applying_ = false;
+        const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        const auto t_done = std::chrono::steady_clock::now();
+        if (!plan.animation.empty()) {
+            // Same shape as the keyframed version's line (tests/resolve parses it).
+            std::ostringstream o;
+            o << "instance #" << id_ << " animated preset at t=" << t << ": " << plan.look.pass
+              << " frames per pass, frames " << range.origin + double(plan.look.first) << ".."
+              << range.origin + double(plan.look.first + plan.look.frames - 1) << " animated (origin " << range.origin
+              << (range.known ? "" : ", clip range unknown") << "), 0 keyframes on 0 params in "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(t_done - t0).count() << " ms; procedural: "
+              << plan.look.keys.size() << " look and " << plan.feedback.size() << " Screen Loop params written, "
+              << plan.animation.size() << " bytes of animation";
+            if (cleared) o << ", " << cleared << " params' keyframes removed";
+            o.setf(std::ios::fixed);
+            o.precision(1);
+            o << " (planned in " << ms(t0, t_planned) << " ms, written in " << ms(t_planned, t_done) << " ms);"
+              << host_ranges_text();
+            dlog::write(o.str());
+        } else if (dlog::verbose()) {
+            std::ostringstream o;
+            o.setf(std::ios::fixed);
+            o.precision(1);
+            o << "instance #" << id_ << " preset applied at t=" << t << ": " << plan.look.keys.size() << " look and "
+              << plan.feedback.size() << " Screen Loop params written in " << ms(t0, t_done) << " ms";
+            if (cleared) o << " (" << cleared << " params' keyframes removed)";
+            dlog::write(o.str());
+        }
+    }
+
+    // "(none)" chosen: the animation stops (the controls keep their values).
+    void stop_animation() {
+        if (!anim_param_) return;
+        std::string cur;
+        try {
+            anim_param_->getValue(cur);
+            if (cur.empty()) return;
+            applying_ = true;
+            anim_param_->setValue(std::string());
+            applying_ = false;
+        } catch (...) {
+            applying_ = false;
+            return;
+        }
+        dlog::write("instance #" + std::to_string(id_) + " Preset (none): the animation stopped");
+    }
+
+    // Controls the user set by hand (or a choice's "applies" wrote) leave the animation: their
+    // value holds on every frame (ntscrt::host::animation_without).
+    void take_over(const std::vector<size_t> &edited) {
+        if (!anim_param_) return;
+        const auto a = animation();
+        if (!a->active()) return;
+        std::vector<std::string> ids;
+        for (size_t i : edited)
+            if (a->moves(i)) ids.push_back(g_.schema.params[i].id);
+        if (ids.empty()) return;
+        try {
+            std::string cur;
+            anim_param_->getValue(cur);
+            const std::string next = animation_without(cur, ids);
+            if (next == cur) return;
+            const bool was = applying_;
+            applying_ = true;
+            anim_param_->setValue(next);
+            applying_ = was;
+        } catch (...) {
+            return;
+        }
+        std::string list;
+        for (const auto &id : ids) list += (list.empty() ? "" : ", ") + id;
+        dlog::write("instance #" + std::to_string(id_) + " taken out of the animation (edited by hand): " + list);
+    }
+
+    // Applies a preset: procedurally (above) unless NTSCRT_PRESET_KEYFRAMES=1 or guard keys are
+    // asked for (tests). The keyframed version, as 0.5.3: as the shared model plans it
     // (ntscrt::host::plan_preset): a look preset replaces the look, so every param
     // presets set loses its keyframes; an animated preset (upstream timeline keys)
     // then gets sparse host keyframes: the timeline loops every duration seconds from
@@ -1178,6 +1379,10 @@ private:
     // first / last values hold).
     // See docs/params.md.
     void apply_preset(const json &preset, double t, bool guards = false) {
+        if (!guards && !preset_keyframes()) {
+            apply_preset_procedural(preset, t);
+            return;
+        }
         const auto t0 = std::chrono::steady_clock::now();
         const TimeRange range = host_range(t);
         const int64_t available = range.known ? int64_t(std::llround(range.last - range.origin)) + 1 : 0;
@@ -1210,6 +1415,11 @@ private:
                 }
             }
             for (const auto &[i, v] : plan.feedback) set_value(i, v, t);
+            if (plan.replaces_look && anim_param_) {  // keyframes replace any procedural animation
+                std::string cur;
+                anim_param_->getValue(cur);
+                if (!cur.empty()) anim_param_->setValue(std::string());
+            }
             if (plan.look.animated()) {
                 std::ostringstream o;
                 o << "instance #" << id_ << " animated preset at t=" << t << ": " << plan.look.pass
@@ -1239,6 +1449,11 @@ private:
     // Writes (param index, value) pairs at time t as one edit (Digital formats, choice "applies").
     void apply_values(const std::vector<std::pair<size_t, json>> &vals, double t, const char *what) {
         if (vals.empty()) return;
+        {
+            std::vector<size_t> written;
+            for (const auto &[i, v] : vals) written.push_back(i);
+            take_over(written);
+        }
         applying_ = true;
         beginEditBlock(what);
         try {
@@ -1315,7 +1530,9 @@ private:
             sendMessage(OFX::Message::eMessageError, "", "Enter a file path to save the preset to.");
             return;
         }
-        const Built b = build_look(g_.schema, [&](size_t i) { return value_at(i, t); });
+        const auto a = animation();
+        const double origin = a->active() ? host_range(t).origin : 0.0;
+        const Built b = build_look(g_.schema, [&](size_t i) { return frame_value(a.get(), i, t, origin); });
         // Upstream's look format with the Screen Loop settings under "screen_loop" and,
         // while the loop is on, an upstream Screen Loop file beside it (docs/params.md).
         std::ofstream f(std::filesystem::u8path(path), std::ios::binary | std::ios::trunc);
@@ -1354,6 +1571,11 @@ private:
     OFX::BooleanParam *debug_ = nullptr;
     OFX::PushButtonParam *debug_all_ = nullptr;
     OFX::StringParam *debug_all_status_ = nullptr;
+    OFX::StringParam *anim_param_ = nullptr;  // kAnimParam
+    mutable std::mutex anim_mu_;              // the three below
+    mutable std::shared_ptr<const Animation> anim_;
+    mutable std::string anim_text_;
+    mutable double anim_fps_ = 0;
     int shown_all_label_ = -1;   // global switch state the button's label shows (-1 = the default)
     std::vector<signed char> shown_enabled_, shown_secret_;  // update_dependents' last writes (-1 = none yet)
     size_t last_look_hash_ = 0;  // debug logging: full look only when it changes
@@ -1376,6 +1598,7 @@ private:
     std::vector<json> held_;      // values of the params without keyframes (null = not read yet)
     uint64_t held_gen_ = ~uint64_t(0);
     uint64_t look_cache_gen_ = ~uint64_t(0);
+    std::shared_ptr<const Animation> look_cache_anim_;  // the animation look_cache_ was built with
     size_t look_builds_ = 0;
     std::string last_warning_;  // degraded-frame message shown / logged
     ntscrt_instance *inst_ = nullptr;
@@ -1404,7 +1627,8 @@ struct RenderCtx {
         std::vector<uint8_t> padded;
     };
     std::map<const ntscrt_image *, Live> live;
-    bool animated = true;  // some param has keyframes: other frames can differ
+    bool animated = true;  // some param has keyframes or moves with the animation: other frames can differ
+    std::shared_ptr<const Animation> anim;  // the procedural animation this render uses
     int fetches = 0;  // other frames the core pulled (debug log)
     size_t live_max = 0;  // of those, the most held at once (debug log)
     double fetch_ms = 0;  // time spent in the host's fetchImage for them (debug log)
@@ -1460,7 +1684,7 @@ struct RenderCtx {
         auto *c = static_cast<RenderCtx *>(u);
         if (!c->animated) return nullptr;  // "same as the current frame": nothing to build
         try {
-            return c->fx->cached_look(c->start + double(frame)).c_str();
+            return c->fx->cached_look(c->start + double(frame), c->anim, c->start).c_str();
         } catch (...) {
             return nullptr;
         }
@@ -1574,14 +1798,15 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
             dlog::write(o.str());
         }
     }
-    ctx.animated = animated();
+    ctx.anim = animation();
+    ctx.animated = animated() || ctx.anim->active();
     if (loop_flush_needed(look, seed, ctx.animated)) {
         ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_SCREENLOOP);
         if (dlog::verbose())
             dlog::write("instance #" + std::to_string(id_) + " Screen Loop history dropped before t=" +
                         std::to_string(args.time) + " (the look, the seed or keyframes changed)");
     }
-    if (ctx.animated) note_current_look(args.time, look);
+    if (ctx.animated) note_current_look(args.time, look, ctx.anim);
     const size_t builds_before = look_builds_;
     const auto t_core = std::chrono::steady_clock::now();
     ntscrt_status st;
@@ -1695,7 +1920,7 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
                   << " temporal_size=" << (ctx.fetched.empty() ? std::string("-") : ctx.fetched)
                   << " temporal_missing=" << ctx.missing;
             o
-              << " animated=" << ctx.animated << " look_builds=" << (look_builds_ - builds_before)
+              << " animated=" << ctx.animated << " animation_params=" << ctx.anim->moving().size() << " look_builds=" << (look_builds_ - builds_before)
               << " sequential=" << args.sequentialRenderStatus << " field=" << int(args.fieldToRender)
               << " debug_by=" << (debug_box ? "effect" : "") << (debug_box && (debug_all || debug_env) ? "," : "")
               << (debug_all ? "all" : "") << (debug_all && debug_env ? "," : "") << (debug_env ? "env" : "");
@@ -1894,7 +2119,9 @@ void NtscrtFactory::describeInContext(OFX::ImageEffectDescriptor &desc, OFX::Con
     {
         auto *d = desc.defineChoiceParam(kPresetParam);
         d->setLabel("Preset");
-        d->setHint("Choosing a preset writes all its values into the parameters below (they can then be keyframed).");
+        d->setHint("Choosing a preset writes all its values into the parameters below (they can then be keyframed). "
+                   "Animated presets animate by themselves, without keyframes; changing or keyframing a control "
+                   "takes that control out of the animation, and (none) stops it.");
         d->appendOption(kNoPreset);
         for (const auto &p : g.looks) d->appendOption(p.name);
         d->setDefault(0);
@@ -1932,6 +2159,17 @@ void NtscrtFactory::describeInContext(OFX::ImageEffectDescriptor &desc, OFX::Con
         e->setLabel("Save preset...");
         e->setHint("Write the current look (at the playhead) to the preset file.");
         e->setParent(*hg);
+    }
+    {
+        // The animated preset's animation (the effect computes the moving values each frame;
+        // no keyframes). Saved with the project, never shown.
+        auto *d = desc.defineStringParam(kAnimParam);
+        d->setLabel("Animation");
+        d->setDefault("");
+        d->setStringType(OFX::eStringTypeSingleLine);
+        d->setIsSecret(true);
+        d->setAnimates(false);
+        d->setParent(*hg);
     }
     {
         auto *d = desc.defineStringParam(kVersionParam);

@@ -331,3 +331,58 @@ presets. `NTSCRT_SIM_SINGLE=0` (read when a chain is made) restores crtsim's own
 
 **Reason.** The two chain frames gave one picture twice: half of sim's CRT time.
 
+## 2026-11-20 — agent G2 — animated presets without keyframes: `host_animation` (OpenFX), `kAnimation` = 14 (FxPlug), `hostparams/ntscrt_host/params.h`
+
+**Change.** One param added to each plug-in, nothing removed, renamed, retyped or reordered (D2's rules hold):
+- OpenFX: `host_animation`, a string param in the Presets group, secret, not animatable, persistent, default `""`.
+- FxPlug: `kAnimation = 14` (host extras range), a hidden, not animatable string param, default `""`.
+- `hostparams` (`ntscrt::host`): `animation_text`, `animation_without`, class `Animation`, `plan_preset_procedural`,
+  and `PresetPlan::animation`. `preset_keys` / `plan_preset` are unchanged (same keys: the per-pass curves moved
+  into a helper both use).
+
+**What a preset writes now.** Choosing an animated preset (bundled or a loaded file) writes no keyframes: every
+look param presets set loses its keyframes (as before) and gets the timeline's first-frame value as a plain
+value, and the animation param gets `animation_text` (JSON: `kind: "ntscrt_animation"`, the upgraded preset with
+the timeline values every key gives alike left out of its keys, the ids of the params that can move, `off`: the
+ids taken out of it, and `keyed`: the stretch keyframes would have covered: `{fps, first, frames}`, frames from
+the effect's first frame). 8 to 21 KB for the bundled presets, against ~3,000 keyframes before (57,840 in
+0.5.0-rc.1/rc.2). A still look writes `""` (whatever moved stops); a Screen Loop file leaves it alone.
+`NTSCRT_PRESET_KEYFRAMES=1` (both plug-ins, read at each preset) still writes keyframes as 0.5.3 did, for A/B tests.
+
+**Rendering.** Each frame the plug-in computes the moving params' values from the text (`Animation::value`, at
+the frame rate the effect renders with, n = host time minus the effect's origin, as for the keyframes):
+exactly the values the keyframes gave, i.e. the same sparse keys within each pass, interpolated linearly the way
+Resolve / FxPlug / the mock host interpolate them, over the same stretch, with the first / last values held
+before / after it as the keyframes did. So the pictures are the keyframed version's frame for frame (see
+"Pictures" below). Looks of other frames (the Glitch receiver's and Digital video's histories) use the same values.
+A param counts as keyed for cache flushing (`cache_mask`, `glitch_keyed`) while the animation moves it.
+
+**User keyframes and edits on top (the rule).**
+- A control **with keyframes** is never animated: its keyframes win. That covers projects from older versions
+  (their preset keyframes, and no animation text) and keyframes the user adds afterwards.
+- A **hand edit** of a control the animation moves takes that control out of the animation (`off`): the user's
+  value holds on every frame; the other controls keep moving. The same for values a choice's `applies` or a
+  Digital video format writes. (Least surprising: the value you set is the value you see, everywhere, as with a
+  plain still control; nothing else stops moving. The alternative, the edit overriding only at the playhead,
+  can't be told apart from "my edit did nothing" on any other frame.)
+- Choosing **(none)** (OpenFX) / **(Custom)** (FxPlug) in the Preset menu stops the whole animation, keeping the
+  controls' values. Choosing another preset replaces it. Undo restores the param like any other.
+- The Inspector shows the first frame's values (no keyframe diamonds); enabled / hidden states follow those
+  still values, not the animation (no Inspector writes while playing).
+- Save preset writes the look at the playhead with the animation's values in it, as it did with the keyframes.
+
+**Old projects.** A project saved before this change has no `host_animation`: it loads as `""` (D2: a param
+added later takes its default), so nothing is animated procedurally and every keyframe renders as before.
+Nothing migrates or deletes keyframes; choosing a preset clears the params it sets, as every version did.
+
+**Pictures.** `test_ofx` "presets: the procedural animation renders exactly like the keyframes it replaces":
+252 frames, 6 presets, 60 / 24 / 29.97 fps, a clip from frame 0 and an Adjustment Clip an hour in, frames across
+the keyed stretch, before and after it: every pixel value identical to the keyframed render. `tests/hostparams`
+compares the values with `preset_keys` + linear interpolation for all 16 bundled animated presets at 7 frame rates
+and 6 positions / clip lengths (equal, including fractional times). Exactness relies on the host interpolating
+keyframes linearly as `a + (b - a) * u` in doubles; Resolve was compared in headless renders (see the report of
+this change). The stretch is kept only so the pictures stay the same: dropping `keyed` (plan without a frame
+rate) makes the animation loop for the whole effect.
+
+**Reason.** Keyframes made choosing a preset slow, made the Inspector heavy (0.5.1's old-project lock-up), arrived
+in Resolve in pieces during the first render, and didn't follow clip-length / frame-rate changes.

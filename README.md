@@ -87,8 +87,9 @@ You can keyframe (animate) any setting, as with other Resolve effects.
 *V Hold glitch*, *Obliterated* and *Webcam*. Choosing one sets all the look's settings at once (and clears their
 keyframes; Undo brings them back). Then fine-tune anything.
 
-- **Animated looks** such as *Glitch pop* and *15 second glitches* add keyframes that make glitches come and go,
-  repeating over the clip.
+- **Animated looks** such as *Glitch pop* and *15 second glitches* make glitches come and go, repeating over the
+  clip. The effect plays the animation itself, without adding keyframes. Keyframing a control yourself, or
+  changing it by hand, takes that control out of the animation; *(none)* in the Preset menu stops it.
 - **Digital video/…** entries (Webcam (2005), Video call, MiniDV, Early web video, CD-ROM (Video 1),
   Datamosh) give the clip the look of an old digital camera or internet video. They only change the digital
   video settings and the picture size, and leave the rest of your look alone.
@@ -313,8 +314,9 @@ Details: [docs/RELEASING.md](docs/RELEASING.md#what-a-release-contains-and-how-t
 
 ### Technical notes on using it
 
-- **Presets** set every look control and remove their keyframes (undo brings them back). Animated looks arrive
-  as keyframes that play the NTSCRT app's animation from the clip's first frame, looping until its end. The
+- **Presets** set every look control and remove their keyframes (undo brings them back). Animated looks play
+  the NTSCRT app's animation from the clip's first frame, computed by the effect for each frame (no keyframes;
+  before 0.6.0 they were written as keyframes, which older projects keep). The
   **Digital video/…** entries are upstream's digital formats: they switch Digital video on and set its controls
   and the Downscale width, leaving the rest of the look alone.
 - **Preset files** (*Load preset… / Save preset…*) are the same JSON as the NTSCRT app, and the NTSC section is
@@ -331,13 +333,11 @@ Details: [docs/RELEASING.md](docs/RELEASING.md#what-a-release-contains-and-how-t
 
 ### Known issues and limitations
 
-- **Animated presets are keyframed, not linked.** Choosing *Glitch pop*, *15 second glitches* and the other
-  animated looks writes their animation as keyframes (where each moving control's curve bends), looping from
-  the clip's first frame, for whole loops around the playhead: as many as about 3000 keyframes allow, at most
-  3600 frames (the first / last values hold outside them; on a long clip, choose the preset again further on
-  to key there). Changing the clip's length or frame rate later doesn't re-time them: choose the preset again.
-  On an Adjustment Clip Resolve doesn't say where the clip starts: the loop is in step with the timeline's
-  frame 0 instead.
+- **Animated presets play around the playhead.** *Glitch pop*, *15 second glitches* and the other animated
+  looks loop from the clip's first frame for the stretch keyframes covered before 0.6.0 (so the pictures are
+  the same as then): whole loops around the playhead where the preset was chosen, at most 3600 frames (the
+  first / last values hold outside it; on a long clip, choose the preset again further on). On an Adjustment
+  Clip Resolve doesn't say where the clip starts: the loop is in step with the timeline's frame 0 instead.
 - **Glitch's simulated TV restarts every minute** of an effect (a minute of timecode): a rolling picture
   (Vertical hold off centre) can jump at those boundaries. It keeps frames and edits fast however far into
   the timeline they are.

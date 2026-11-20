@@ -15,7 +15,7 @@ Tests (see README.md next to this file):
   order     random-access renders == sequential renders (default look, Digital, Screen Loop)
   cli       plug-in output == ntscrt-cli on the same frames (default look + every CRT preset +
             the bundled Digital video looks, chosen from the plug-in's Preset menu)
-  animated  an animated bundled preset chosen from the Preset menu becomes keyframes: frames match
+  animated  an animated bundled preset chosen from the Preset menu animates (0.6.0: without keyframes): frames match
             ntscrt-cli --timeline (the preset's keys played per frame) and not the frozen look;
             Horizontal resolution and a Digital video format set what they apply
   depth     8-bit int / 16-bit int / 16-bit float / 32-bit float sources give the same result
@@ -784,11 +784,14 @@ class Suite:
         apply_s = time.time() - t0
         look = json.loads((ROOT / "presets" / f"{name}.json").read_text(encoding="utf-8"))
         problems, notes = [], []
-        # The preset became keyframes: a moving value differs between frames as the timeline says.
+        # Since 0.6.0 the preset writes no keyframes (the effect animates the values itself: the frames
+        # below are the check); with NTSCRT_PRESET_KEYFRAMES=1 a moving value's keys differ between
+        # frames as the timeline says.
         pass_frames = max(1, round(look["timeline"]["duration"] * self.fps))
         keyed = {f: fx.GetInput("ntsc_composite_preemphasis", f) for f in (0, 12, 25)}
         m = {"keyed_composite_preemphasis": keyed, "pass_frames": pass_frames}
-        if len({round(v or 0, 6) for v in keyed.values()}) < 2:
+        legacy_keys = os.environ.get("NTSCRT_PRESET_KEYFRAMES", "") not in ("", "0")
+        if legacy_keys and len({round(v or 0, 6) for v in keyed.values()}) < 2:
             problems.append(f"Composite preemphasis doesn't move over time: {keyed}")
         # Keyed values against the timeline evaluated here (this look's keys are all Linear; toggles hold).
         keys = sorted(look["timeline"]["keys"], key=lambda k: k["t"])
@@ -1038,7 +1041,7 @@ class Suite:
             if first:
                 info.update({"first_render_t": float(first.group(1)), "first_render_frame": int(first.group(2)),
                              "first_render_ms": int(first.group(3)), "reported_at_render": first.group(4).strip()})
-            ap = re.search(r"animated preset at t=([\d.]+): (\d+) frames per pass, frames ([\d.]+)\.\.([\d.]+) keyed "
+            ap = re.search(r"animated preset at t=([\d.]+): (\d+) frames per pass, frames ([\d.]+)\.\.([\d.]+) (?:keyed|animated) "
                            r"\(origin ([\d.]+)([^)]*)\), (\d+) keyframes on (\d+) params in (\d+) ms", text)
             if ap:
                 info.update({"preset_t": float(ap.group(1)), "keyed_from": float(ap.group(3)), "keyed_to": float(ap.group(4)),

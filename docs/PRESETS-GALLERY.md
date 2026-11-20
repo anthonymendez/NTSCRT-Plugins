@@ -43,7 +43,7 @@ Bundled looks with fixed settings (the noise, waves and glitches still move ever
 
 ## Animated looks
 
-These looks carry timeline keys: choosing one in **Presets → Preset** writes keyframes, one pass of the timeline from the effect's first frame, repeated until the effect ends. Each GIF shows one pass. (16 presets)
+These looks carry timeline keys: choosing one in **Presets → Preset** plays one pass of the timeline from the effect's first frame, repeated (no keyframes). Each GIF shows one pass. (16 presets)
 
 <table>
 <tr>

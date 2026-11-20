@@ -48,6 +48,7 @@ enum HostParamID : uint32_t {
     kDebugLogging = 11,     // toggle: log every frame (diagnostics; never in the look or presets)
     kOpenLogs = 12,         // push button: show the log folder in Finder
     kDebugAll = 13,         // push button: debug logging for all NTSCRT effects on / off (host::DebugSwitch)
+    kAnimation = 14,        // hidden string: the animated preset's animation (host::animation_text; "" = none)
 };
 constexpr uint32_t kLastHostID = 99;  // host extras live in [1, 99]
 constexpr uint32_t kFirstMappedID = 100;     // param_ids.json assigns [100, 4999]
@@ -87,6 +88,7 @@ struct HostPlan {
     // a plain value; more = keyframes at frame offsets from the effect's first frame.
     std::map<uint32_t, std::vector<std::pair<int64_t, json>>> look;
     HostValues feedback;  // Screen Loop params
+    std::string animation;  // plan_preset_procedural: the kAnimation text ("" = none)
     bool animated() const { return pass > 0; }
 };
 
@@ -124,6 +126,13 @@ public:
     // the effect's first frame to its last (<= 0 = unknown).
     // at: the frame (offset from the first) the keyed stretch must cover, e.g. the playhead.
     HostPlan plan_preset(const json &preset, double fps, int64_t available, int64_t at = 0) const;
+    // The same with the procedural animation (host::plan_preset_procedural): plain values only
+    // (one entry per param) and `animation` for kAnimation; pass / first / frames as above.
+    HostPlan plan_preset_procedural(const json &preset, double fps, int64_t available, int64_t at = 0) const;
+    // The host values a frame renders with: get's, with the animation's for the params it moves
+    // (unless keyed(param) says the param has keyframes: they win). n: frames from the effect's start.
+    HostGetter animated_getter(const HostGetter &get, const host::Animation &anim, double n,
+                               const std::function<bool(const Param &)> &keyed) const;
     // Host values a Digital video format's (or an option's) "applies" map writes.
     HostValues applies_host_values(const json &applies) const;
     // What a user edit of control `edited` writes next: its option's applies, choices dropping to Custom.

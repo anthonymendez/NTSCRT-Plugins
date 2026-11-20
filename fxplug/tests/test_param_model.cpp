@@ -361,6 +361,45 @@ TEST_CASE("model: animated presets become keyframes matching the upstream timeli
     CHECK(m.plan_preset(load("presets/Glitch pop.json"), 30, 0).frames % 60 == 0);  // unknown length: whole passes
 }
 
+// 0.6.0: the same presets with the procedural animation build the keyframed looks, frame for frame.
+TEST_CASE("model: the procedural animation builds the keyframed looks without keyframes") {
+    const Model &m = real_model();
+    for (const std::string name : {"Glitch pop", "V Hold glitch", "Tracking Noise up"}) {
+        CAPTURE(name);
+        const json preset = load("presets/" + name + ".json");
+        for (double fps : {24.0, 30.0, 60.0}) {
+            CAPTURE(fps);
+            const HostPlan pk = m.plan_preset(preset, fps, 150, 40);
+            const HostPlan pp = m.plan_preset_procedural(preset, fps, 150, 40);
+            REQUIRE_FALSE(pp.animation.empty());
+            CHECK(pp.pass == pk.pass);
+            CHECK(pp.first == pk.first);
+            CHECK(pp.frames == pk.frames);
+            CHECK(pp.look.size() == pk.look.size());
+            for (const auto &[id, k] : pp.look) CHECK(k.size() == 1);  // plain values only
+            const host::Animation anim(m.schema, pp.animation, fps);
+            REQUIRE(anim.active());
+            auto plain = [&](const Param &p) {
+                auto it = pp.look.find(p.host_id);
+                return it != pp.look.end() ? it->second.front().second : m.default_host_value(p);
+            };
+            for (int64_t n = 0; n < 200; n += 3) {
+                CAPTURE(n);
+                const json got = m.build(m.animated_getter(plain, anim, double(n), [](const Param &) { return false; })).look;
+                std::string where;
+                CHECK_MESSAGE(host::within_key_tolerance(m.schema, got, keyed_look(m, pk, n), &where, 1e-6), where);
+            }
+            // a param with keyframes keeps the host's value
+            const size_t moving = anim.moving().front();
+            const Param &mp = m.params[moving];
+            const json mine = m.build(m.animated_getter(plain, anim, 17.0, [&](const Param &p) { return p.host_id == mp.host_id; })).look;
+            CHECK(host::value_at(mine, mp.path) == host::value_at(m.build(plain).look, mp.path));
+        }
+    }
+    CHECK(m.plan_preset_procedural(load("presets/Clean VHS.json"), 30, 100).animation.empty());
+    CHECK(m.plan_preset_procedural(load("presets/Screen Loop/Bottom to top.json"), 30, 100).animation.empty());
+}
+
 TEST_CASE("model: Horizontal resolution applies, Custom demotion, Digital video formats") {
     const Model &m = real_model();
     const Param *pre = m.find("downscale.preset"), *w = m.find("downscale.width");

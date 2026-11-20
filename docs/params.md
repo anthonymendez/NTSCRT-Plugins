@@ -14,7 +14,7 @@ NTSCRT v0.21.0, look `"version"` 2) to `ntscrt_render_*`, evaluated at the frame
                 "legacy": {"quality": 0.22}},   // NTSCRT-Plugins: 0.4.0 controls, see "Digital video" below
   "crop":      {"enabled": false, "ratio": "1:1", "x": 0.5, "y": 0.5, "scale": 1.0},
   "alpha":     {"mode": "clip"},   // NTSCRT-Plugins addition: "clip" | "spill" (see below)
-  "timeline":  { /* ignored by the core: hosts turn its keys into keyframes (below) */ },
+  "timeline":  { /* ignored by the core: hosts animate their params from its keys (below) */ },
   "view":      { /* ignored */ }
 }
 ```
@@ -155,7 +155,8 @@ playhead (not the keyframes).
 Host extras (not in schema, each host adds them): **Preset** choice (bundled presets from
 `ntscrt_bundled_presets_json`), **Load preset…/Save preset…** (file path), **Seed** (int), **Screen Loop preset**.
 Choosing a preset writes all its values into the host params (so they can then be keyframed), clearing
-those params' keyframes first; a Digital video format writes only what it applies.
+those params' keyframes first; a Digital video format writes only what it applies. A hidden string param
+(OpenFX `host_animation`, FxPlug `kAnimation`) holds an animated preset's animation (below).
 
 ## Animated presets (`timeline`)
 Upstream looks can carry `"timeline": {"duration": seconds, "fps", "enabled", "keys": [...]}`, each key
@@ -176,8 +177,17 @@ clip's start). Resolve gives effects without media (an Adjustment Clip) timeline
 with a made-up range of 0..1999: then frame numbers are host times (frame 0 = the timeline's frame 0) and the
 effect's length is unknown.
 
-Applying the preset clears every look param's keyframes and writes **sparse** host keyframes for the params
-that move (`preset_keys`): numbers get a key where their per-frame curve bends (a piecewise-linear fit within
+**No keyframes (0.6.0).** Applying the preset clears every look param's keyframes, writes the timeline's
+first-frame values as plain values and stores the animation in the hidden param (`plan_preset_procedural`,
+`animation_text`); each frame the plug-in computes the moving params' values (`Animation`) — exactly the values
+the sparse keyframes described next gave, over the same stretch, holding the same first / last values outside
+it, so the pictures are unchanged (`test_ofx` renders both to identical pixels). A param with keyframes (an older
+project's, or the user's) keeps its keyframes' values; a hand edit takes the param out of the animation; *(none)*
+stops it ([dev/CONTRACT-CHANGES.md](dev/CONTRACT-CHANGES.md), 2026-11-20). `NTSCRT_PRESET_KEYFRAMES=1` writes
+the keyframes instead, as 0.5 did.
+
+The keyframes (0.5.0-rc.3 to 0.5.3, and the reference for the values above): every look param's keyframes are
+cleared and **sparse** host keyframes written for the params that move (`preset_keys`): numbers get a key where their per-frame curve bends (a piecewise-linear fit within
 0.5% of the value's swing, capped at 0.5% of its slider range and at 2% of the value itself, half a step for
 finely stepped CRT values; exact, i.e. a key wherever the curve isn't a straight line, for integers, the Glitch
 receiver's timing controls and ntsc-rs's `*_scale` settings, and wherever the value holds still). That is exact
@@ -189,7 +199,8 @@ frame 0, as many as about `kMaxPresetKeys` (3000) keys allow (at least one pass,
 the playhead (a quarter of it before the playhead when the effect is longer) and inside the effect when its
 length is known; before it the timeline's first values hold, after it the last ones. `tests/hostparams` checks
 every bundled animated preset against the per-frame evaluation, and `test_ofx` renders sparse keys and a key on
-every frame to the same pixels. Both plug-ins get these keys from the shared model (`plan_preset`).
+every frame to the same pixels. Both plug-ins get these keys (and the procedural animation) from the shared
+model (`plan_preset`, `plan_preset_procedural`).
 
 **Histories:** the stages that simulate a history from frame 0 (the Glitch receiver, Digital video's stream
 with Datamosh) restart it every minute of the effect (`core/src/sim_segment.h`; whole seconds of the rounded
@@ -201,7 +212,8 @@ as cheap as one at its start.
 Everything above is implemented once, in the host-independent library `hostparams/` (`ntscrt::host`,
 `ntscrt_host/params.h`, no OpenFX or Apple headers, tested on every platform in `tests/hostparams`): schema
 parsing, value coercion, colours, JSON pointers, building the look and feedback, `enabled_if` / `visible_if`,
-`applies` and Digital video formats, preset application (`plan_preset`: values, timeline keyframes, the
+`applies` and Digital video formats, preset application (`plan_preset` / `plan_preset_procedural`: values,
+the timeline's animation, the
 `screen_loop` key of our files, migration), the menu order, Save preset's files, the seed range, which core
 caches an edit can affect and the rotating log file (`ntscrt_host/file_log.h`). The OpenFX plug-in calls it on
 look-typed values; the FxPlug plug-in through `fxplug/model/param_model.h`, which adds only FxPlug's own parts
