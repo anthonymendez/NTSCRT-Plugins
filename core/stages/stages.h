@@ -130,6 +130,10 @@ public:
     int fallback_status() const;
     const std::string &fallback_reason() const;
     size_t chain_load_attempts() const;  // tests: how often a chain was (re)built
+    // Chains built since the last call, with their time and what librashader's shader
+    // cache had of them ("crt_compile=crt-royale:812ms(cache found 0 compiled 34)"),
+    // for the render's timings note; "" if none.
+    std::string take_compile_note();
     // A preset whose pictures depend on the frames before them ran since
     // construction or flush(): one with feedback / history that the stage can't
     // reset each frame. None of the 7 bundled (crtsim's feedback is reset every

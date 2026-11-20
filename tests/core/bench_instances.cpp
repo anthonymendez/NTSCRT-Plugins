@@ -127,6 +127,7 @@ int main(int argc, char **argv) {
         }
         if (f == 0) {
             first_wall = ms(t1, Clock::now());
+            std::printf("first frame timings (instance 0): %s\n", ntscrt_last_timings(inst[0]));
             mem2 = private_mb();
             gmem2 = gpu_mb();
         }

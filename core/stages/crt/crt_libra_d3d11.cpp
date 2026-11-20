@@ -32,12 +32,17 @@ public:
         void *preset = lib.open_preset(preset_path, params_);
         libra_shader_preset_t p = static_cast<libra_shader_preset_t>(preset);
         auto *device = static_cast<ID3D11Device *>(dev.native_device());
+        // librashader's shader cache: only in the folder the plug-in gave it
+        // (shader_cache.cpp), never its own default (%LOCALAPPDATA%\librashader).
+        filter_chain_d3d11_opt_t opt{};
+        opt.version = LIBRASHADER_CURRENT_VERSION;
+        opt.disable_cache = !lib.shader_cache_on;
         // Compiling a preset takes long (up to a second): record its GPU-side
         // setup (lookup textures) on a deferred context so threads sharing the
         // device keep rendering meanwhile; only the replay takes the lock.
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> deferred;
         if (create_deferred && SUCCEEDED(device->CreateDeferredContext(0, &deferred))) {
-            if (libra_error_t e = create_deferred(&p, device, deferred.Get(), nullptr, &chain_)) {
+            if (libra_error_t e = create_deferred(&p, device, deferred.Get(), &opt, &chain_)) {
                 lib.free_preset(p);
                 throw std::runtime_error("librashader d3d11_filter_chain_create_deferred(" + preset_path +
                                          "): " + lib.take_error(e));
@@ -52,7 +57,7 @@ public:
             static_cast<ID3D11DeviceContext *>(dev.native_context())->ExecuteCommandList(list.Get(), FALSE);
         } else {
             std::lock_guard<std::recursive_mutex> lock(dev.context_mutex());
-            if (libra_error_t e = create_(&p, device, nullptr, &chain_)) {
+            if (libra_error_t e = create_(&p, device, &opt, &chain_)) {
                 lib.free_preset(p);
                 throw std::runtime_error("librashader d3d11_filter_chain_create(" + preset_path +
                                          "): " + lib.take_error(e));

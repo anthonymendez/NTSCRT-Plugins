@@ -2,7 +2,9 @@
 #
 # Also builds the runtime resources into ${NTSCRT_RESOURCES_BUILD_DIR}
 # (default <build>/resources):
-#   librashader.dll | librashader.dylib   cargo-built from vendor/librashader
+#   librashader.dll | librashader.dylib   cargo-built from vendor/librashader, as
+#                                         changed by rust/librashader-patch (its
+#                                         shader cache's storage; see apply.cmake)
 #   shaders/...                           files of resources/shader-manifest.txt,
 #                                         copied from vendor/slang-shaders, and
 #                                         this directory's slang/ (our own: crtsim-single)
@@ -11,7 +13,11 @@
 # resource dir; `install()` puts it under <prefix>/resources.
 target_sources(ntscrt_core PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/crt.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/crt_libra.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/crt_libra.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/shader_cache.cpp)
+# The cache folder's key names the plug-in version (shader_cache.cpp).
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/shader_cache.cpp TARGET_DIRECTORY ntscrt_core
+  PROPERTIES COMPILE_DEFINITIONS "NTSCRT_CACHE_VERSION=\"${NTSCRT_VERSION}\"")
 ntscrt_add_shaders(ntscrt_core ${CMAKE_CURRENT_SOURCE_DIR}/shaders/crt_place.slang)
 
 set(NTSCRT_LIBRASHADER_DIR ${NTSCRT_ROOT}/vendor/librashader CACHE PATH "librashader source (submodule, pinned 76462c03)")
@@ -59,6 +65,20 @@ else()
     message(FATAL_ERROR "cargo not found: install Rust or set NTSCRT_LIBRASHADER_PREBUILT")
   endif()
   set(cargo_dir ${CMAKE_BINARY_DIR}/librashader-target)
+  # The patched copy cargo builds from (rust/librashader-patch/apply.cmake).
+  set(libra_src ${CMAKE_BINARY_DIR}/librashader-src)
+  set(libra_patch ${NTSCRT_ROOT}/rust/librashader-patch)
+  set(libra_stamp ${libra_src}/NTSCRT-PATCHED.txt)
+  file(GLOB libra_patch_files CONFIGURE_DEPENDS ${libra_patch}/*)
+  add_custom_command(OUTPUT ${libra_stamp}
+    COMMAND ${CMAKE_COMMAND} -DSRC=${NTSCRT_LIBRASHADER_DIR} -DDST=${libra_src} -DPATCH=${libra_patch}
+            -P ${libra_patch}/apply.cmake
+    DEPENDS ${libra_patch_files} ${NTSCRT_LIBRASHADER_DIR}/Cargo.lock
+            ${NTSCRT_LIBRASHADER_DIR}/librashader-cache/src/cache.rs
+            ${NTSCRT_LIBRASHADER_DIR}/librashader-cache/src/compilation.rs
+            ${NTSCRT_LIBRASHADER_DIR}/librashader-runtime-mtl/src/filter_chain.rs
+    COMMENT "librashader: patched copy -> ${libra_src}"
+    VERBATIM)
   # As upstream DEVELOPMENT.md: `cargo build --release -p librashader-capi --features stable`.
   # Only the runtime CrtStage uses: the default (all runtimes) makes librashader.dll import
   # D3DX9_43.dll (legacy DirectX 9 runtime, missing on a clean Windows: the DLL fails to load
@@ -95,8 +115,8 @@ else()
       ${cmds}
       COMMAND lipo -create ${slices} -output ${lib_out}
       COMMAND install_name_tool -id @rpath/librashader.dylib ${lib_out}
-      WORKING_DIRECTORY ${NTSCRT_LIBRASHADER_DIR}
-      DEPENDS ${NTSCRT_LIBRASHADER_DIR}/Cargo.lock
+      WORKING_DIRECTORY ${libra_src}
+      DEPENDS ${libra_stamp}
       COMMENT "cargo: librashader-capi (${archs}) -> ${lib_out}"
       VERBATIM)
   else()
@@ -112,8 +132,8 @@ else()
       COMMAND ${CMAKE_COMMAND} -E make_directory ${lib_out_dir}
       COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${cargo_dir} ${rustflags} ${NTSCRT_CARGO} ${cargo_args}
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${built} ${lib_out}
-      WORKING_DIRECTORY ${NTSCRT_LIBRASHADER_DIR}
-      DEPENDS ${NTSCRT_LIBRASHADER_DIR}/Cargo.lock
+      WORKING_DIRECTORY ${libra_src}
+      DEPENDS ${libra_stamp}
       COMMENT "cargo: librashader-capi -> ${lib_out}"
       VERBATIM)
   endif()

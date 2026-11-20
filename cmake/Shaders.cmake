@@ -1,8 +1,11 @@
 # ntscrt_add_shaders(<target> <file.slang>...)
 #
 # Compiles each Slang file at build time with a pinned prebuilt slangc into
-#   - HLSL text per entry point (profile cs_5_0; compiled at runtime by
-#     D3DCompile from d3dcompiler_47.dll), and
+#   - HLSL text per entry point (profile cs_5_0) and, built on Windows, its
+#     Direct3D bytecode, compiled at build time by D3DCompile with the
+#     arguments the D3D11 backend would use at run time (the backend compiles
+#     the HLSL itself when the bytecode is missing or with
+#     NTSCRT_PRECOMPILED_KERNELS=0), and
 #   - one Metal Shading Language library per file (compiled at runtime by
 #     -[MTLDevice newLibraryWithSource:]),
 # and embeds both plus an entry-point table ([numthreads], structured-buffer
@@ -20,8 +23,10 @@
 # .slangh in its directory or core/gpu/shaders changes.
 #
 # Override the compiler with -DNTSCRT_SLANGC=/path/to/slangc.
+# -DNTSCRT_PRECOMPILE_DXBC=OFF leaves the bytecode out (Windows build hosts).
 set(NTSCRT_SLANG_VERSION 2026.19)
 set(NTSCRT_SLANGC "" CACHE FILEPATH "slangc to use instead of the pinned download")
+option(NTSCRT_PRECOMPILE_DXBC "Embed Direct3D bytecode of the GPU kernels (compiled at build time)" ON)
 
 function(_ntscrt_slang_fetch out_var)
   if(NTSCRT_SLANGC)
@@ -84,6 +89,8 @@ function(ntscrt_add_shaders target)
 
   if(NOT TARGET ntscrt_shaderc)
     add_executable(ntscrt_shaderc ${NTSCRT_ROOT}/core/gpu/tools/shaderc.cpp)
+    # Built with the plug-ins' compiler, run on the build host: Windows hosts
+    # load d3dcompiler_47.dll (System32) for the bytecode.
     target_link_libraries(ntscrt_shaderc PRIVATE nlohmann_json::nlohmann_json)
     target_compile_features(ntscrt_shaderc PRIVATE cxx_std_17)
   endif()
@@ -113,6 +120,10 @@ extern \"C\" void ntscrt_shaders_anchor_${tid}(void) {}
     set_target_properties(${target} PROPERTIES NTSCRT_SHADERS_AGG ${agg})
   endif()
 
+  set(dxbc_flag)
+  if(NOT CMAKE_HOST_WIN32 OR NOT NTSCRT_PRECOMPILE_DXBC)
+    set(dxbc_flag --no-dxbc)
+  endif()
   file(GLOB shared_deps ${NTSCRT_ROOT}/core/gpu/shaders/*.slang ${NTSCRT_ROOT}/core/gpu/shaders/*.slangh)
   foreach(f ${ARGN})
     get_filename_component(f ${f} ABSOLUTE)
@@ -128,7 +139,7 @@ extern \"C\" void ntscrt_shaders_anchor_${tid}(void) {}
     set(inc ${gen}/${tid}_${sid}.inc)
     add_custom_command(OUTPUT ${inc}
       COMMAND $<TARGET_FILE:ntscrt_shaderc> ${slangc} ${f} ${stem} ${inc} ${gen}/tmp
-              -I ${dir} -I ${NTSCRT_ROOT}/core
+              -I ${dir} -I ${NTSCRT_ROOT}/core ${dxbc_flag}
       DEPENDS ${f} ${local_deps} ${shared_deps} ntscrt_shaderc
       COMMENT "slangc ${stem}.slang -> HLSL + MSL"
       VERBATIM)

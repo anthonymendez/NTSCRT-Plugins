@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <string_view>
 #include <vector>
 
 #include "backend.h"
@@ -51,6 +52,19 @@ const ShaderEntry *find_shader(std::string_view name, const ShaderFile **file_ou
             }
     }
     return nullptr;
+}
+
+std::vector<const ShaderFile *> registered_shader_files() {
+    std::lock_guard<std::mutex> lock(files_mutex());
+    return files();
+}
+
+bool use_precompiled_kernels() {
+    static const bool on = [] {
+        const char *e = std::getenv("NTSCRT_PRECOMPILED_KERNELS");
+        return !(e && (*e == '0' || std::string_view(e) == "off"));
+    }();
+    return on;
 }
 
 const char *Device::last_create_error() { return create_error().c_str(); }

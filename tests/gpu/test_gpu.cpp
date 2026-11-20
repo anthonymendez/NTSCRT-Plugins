@@ -246,3 +246,31 @@ TEST_CASE("wrong backend returns null with a message, no throw") {
     CHECK(std::string(gpu::Device::last_create_error()).find("Metal") != std::string::npos);
 }
 #endif
+
+#ifdef _WIN32
+#include "gpu/d3d11/d3d11_interop.h"
+#include "gpu/shader_registry.h"
+
+// The bytecode the build embedded (shaderc.cpp) is what D3DCompile makes here at run
+// time, byte for byte: the kernels, and so the pictures, are the same as when the
+// device compiled them itself (NTSCRT_PRECOMPILED_KERNELS=0).
+TEST_CASE("build-time kernel bytecode equals the run-time compile") {
+    size_t with = 0, total = 0;
+    for (const gpu::ShaderFile *f : gpu::registered_shader_files())
+        for (size_t i = 0; i < f->count; ++i) {
+            const gpu::ShaderEntry &e = f->entries[i];
+            ++total;
+            if (!e.dxbc) continue;
+            ++with;
+            const std::string name = std::string(f->stem) + "/" + e.name;
+            CAPTURE(name);
+            const std::vector<uint8_t> runtime = gpu::d3d11::runtime_kernel_bytecode(name);
+            CHECK(std::vector<uint8_t>(e.dxbc, e.dxbc + e.dxbc_size) == runtime);
+        }
+    MESSAGE(with << " of " << total << " kernels have build-time bytecode");
+#ifdef NTSCRT_EXPECT_DXBC
+    CHECK(total > 20);
+    CHECK(with == total);
+#endif
+}
+#endif
