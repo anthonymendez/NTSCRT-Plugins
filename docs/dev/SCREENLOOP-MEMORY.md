@@ -220,3 +220,80 @@ first fix, *now* = with the three fixes below (`bundle-fix5`).
 - Resolve's memory: 8.4-8.6 GB at P = 100 and 11.7-12.0 GB at P = 1850 in all three builds (the fetched frames are
   the small clip resized; no change from these fixes). Resolve suite (15 tests) and parity for the screenloop and
   sizeloop groups (82 images per pair, all pairs equal) pass with these fixes; `--parity-quick` passes on 0.5.1.
+
+## The cost of a re-run (2026-11-20)
+
+A re-run of the window (a cold seek, an edit or a new Screen Loop setting at the playhead) in headless Resolve,
+UHD, frame 1850, 0.5.3: 21.4 s for the cold seek, 18.1-18.4 s for each re-run after an edit, 402-410 frames
+fetched. Where it went (`NTSCRT_PROFILE=1`, which now adds `loop_select=..., profile source:ms/n,upload:ms/n,
+camera:ms/n,tv:ms/n` to the timings, each part waited for on the GPU): getting the source frames 9.0-9.4 s for
+411 (22 ms each: Resolve's `fetchImage` 7-8 ms, the copy of its 133 MB CUDA float frame into CPU memory, the
+conversion to 8 bits), their upload 1.1 s, cameras 0.2 s, TV passes (NTSC, Downscale, Glitch, CRT) 4.4 s. The
+TV passes are a quarter of it; the source frames are most of it.
+
+What changed, all with the same pictures:
+
+- **No new buffer per fetched frame** (default). The GPU fetch (`read_gpu_padded`, `ofx/ntscrt_ofx.cpp`)
+  reuses the buffer of the frame released before it (it allocated and zero-filled 133 MB per UHD frame); the
+  core's conversion takes the buffer of a frame its source cache just evicted (`SourceCache::spare`); the CUDA
+  readback copies rows on the thread pool (`host_gpu_cuda.cpp`). The last two follow `NTSCRT_FAST_TRANSFER`.
+- **Screen Loop's store of its window's source frames** (default 4096 MB for all effects,
+  `NTSCRT_SCREENLOOP_SOURCE_MB`, 0 = none; `LoopSourceStore`, `core/src/ntscrt.cpp`): 8-bit frames after the crop,
+  the ones the loop and the frame rendered read, so a re-run reads them from memory instead of from the host.
+  When full, an effect keeps the frames closest below the playhead (a re-run reads in order from the window
+  start: a frame further back than everything kept would push out one that same re-run reads later, and no
+  re-run would ever find any); frames outside the two windows before the playhead, or of another size, scale or
+  crop, go first; the effect used least recently gives up all of its frames first. Freed by a source flush
+  (`NTSCRT_CACHE_SOURCE`, the host's purgeCaches). The memory is in Resolve's process, on top of what Resolve
+  itself keeps of every fetched frame (10-15% more for the frames of a window: 8 MB per 1080p frame against
+  Resolve's ~80 MB, 33 MB per UHD frame against its 200-330 MB). A whole window is about 3.4 GB at 1080p (the
+  default holds it) and 13 GB at UHD (the default holds ~120 of its 410 frames; 16384 holds it).
+- **Deferred run ahead** (`NTSCRT_SCREENLOOP_AHEAD=defer`, not the default; `howl_engine.h`, "Running ahead"):
+  a re-run takes no step of the run ahead (a third of its TV passes at frame 1850: 477 instead of 714), and the
+  frames played after it catch it up (at least 4 steps a frame, paced to reach the playhead by the window start),
+  reading the source frames again (from the store, else the host). In the core alone (`bench_screenloop`, free
+  host frames) a UHD cold seek took 5.2-6.0 s instead of 6.3-7.4 s, but in Resolve only 3-5% less (the passes are
+  not where the time goes) and playing on after it cost 8 s more (268 frames fetched again), so it stays opt-in.
+  With a store holding the window, playing on fetches nothing either way.
+- **Running the loop's pictures smaller under Downscale** (not done): the TV pictures already follow the
+  Downscale size (`feedback_size` of the chain); what runs at the scene's size is the camera (0.2 s of a re-run)
+  and NTSC on the camera's picture, which upstream runs before Downscale on the full picture: its filters (luma /
+  chroma lowpass, ringing, smear, chroma delay, edge wave, head switching, per-row noise and the field it keeps)
+  read whole rows and neighbouring rows, and the camera's auto exposure averages the whole picture, so a smaller
+  camera picture changes the pictures. No exact shortcut without an NTSC that computes only the rows Downscale
+  keeps; at most the NTSC share of the TV passes (about a fifth of a re-run) to gain.
+
+Headless Resolve 21.1.2 (`C:/ntb/w21h-res/slrerun.py`, under the shared lock; the parity clip resized to the
+effect's size in a Fusion comp, as in the section above; steps at P = 1850: the first render with Screen Loop
+preset A (a cold seek), preset B, two zoom edits (each a re-run), then frames 1851..1930 in one job (across the
+window start 1920; Resolve renders the comp's frame 0 in between, so 1851 resumes from the checkpoint at 1830).
+Plug-in seconds for the full-size renders of the step, frames fetched, Resolve's peak private memory. *base* =
+0.5.3, *buffers* = this build with `NTSCRT_SCREENLOOP_SOURCE_MB=0` (the buffer changes alone), *default* = this
+build, *16 GB* = `NTSCRT_SCREENLOOP_SOURCE_MB=16384`.
+
+| UHD, P = 1850 | base | buffers | default (4 GB) | 16 GB | 16 GB + defer |
+|---|---|---|---|---|---|
+| cold seek (preset A) | 22.7 s, 410 f, 9.6 GB | 13.5 s, 410 f, 9.4 GB | 14.7 s, 410 f, 13.1 GB | 16.6 s, 410 f, 21.8 GB | 15.4 s, 410 f, 21.8 GB |
+| preset B (re-run) | 18.5 s, 402 f, 10.0 GB | 10.5 s, 418 f, 9.8 GB | 7.6 s, 274 f, 14.2 GB | 3.0 s, 0 f, 22.1 GB | 2.3 s, 0 f, 22.1 GB |
+| zoom edit (re-run) | 18.7 s, 402 f | 10.2 s, 399 f | 7.5 s, 270 f | 2.9 s, 0 f | 2.2 s, 0 f |
+| zoom edit again | 18.2 s, 402 f | 10.1 s, 398 f | 7.7 s, 270 f | 3.0 s, 0 f | 2.2 s, 0 f |
+| play 1851..1930 | 2.2 s, 21 f, 10.8 GB | 2.6 s, 42 f, 10.5 GB | 1.9 s, 0 f, 14.8 GB | 1.9 s, 0 f, 25.4 GB | 4.3 s, 0 f, 25.2 GB |
+
+| 1080p, P = 1850 | base | buffers | default (4 GB) |
+|---|---|---|---|
+| cold seek (preset A) | 9.6 s, 410 f, 7.8 GB | 7.6 s, 410 f, 7.9 GB | 8.0 s, 410 f, 10.6 GB |
+| preset B (re-run) | 7.0 s, 387 f, 8.3 GB | 5.0 s, 377 f, 8.2 GB | 1.1 s, 0 f, 11.0 GB |
+| zoom edit (re-run) | 7.0 s, 387 f | 5.0 s, 377 f | 1.0 s, 0 f |
+| zoom edit again | 7.1 s, 387 f | 5.0 s, 379 f | 1.0 s, 0 f |
+| play 1851..1930 | 0.6 s, 1 f, 9.1 GB | 0.6 s, 1 f, 9.2 GB | 0.6 s, 0 f, 12.5 GB |
+
+(1080p and the 16 GB columns: the build before the threaded CUDA readback, which took about 1 s off each UHD
+re-run. More fetched frames than the window in some rows: Resolve aborts and renders again after a preset change.)
+Deferred run ahead alone, UHD, without the store: cold seek 14.4 s vs 15.1 s, re-runs 10.8-11.0 s vs 11.2-11.3 s,
+play on 10.4 s (271 frames fetched again) vs 2.5 s.
+
+Same pictures: `test_howl_seek` (seeks, scrubbing, both run-ahead modes, "its window of source frames is kept",
+a store smaller than the window), `test_howl_loop` (both modes, frame by frame against cold renders), `test_ofx`
+(every edit step against a clean instance, with the store off and on: `test_ofx_screenloop_store`), the full
+ctest with `NTSCRT_REQUIRE_GPU=1 NTSCRT_GOLDEN_STRICT=1`, Resolve's frames of the steps above compared between
+0.5.3 and this build, and the parity groups screenloop and sizeloop.
