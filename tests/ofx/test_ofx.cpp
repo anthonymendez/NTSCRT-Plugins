@@ -2263,3 +2263,131 @@ TEST_CASE("Screen Loop: a render the host aborts drops only the loop it was runn
     CHECK(again.fetches > 0);  // the aborted run was dropped: re-run in full
     CHECK(again.px == f.clean(T));
 }
+
+// Digital video after a jump into a clip (docs/dev/DIGITAL-CHECKPOINTS.md): the first render
+// re-runs the stream from its keyframe (a Datamosh look: from the minute's start); after it,
+// stepping back, the viewer's render scale in between and a render the host aborts re-run from
+// the codec's checkpoints (at most 15 captures), with the pictures of a fresh effect.
+// NTSCRT_BENCH_DIGITAL_SIZE=WxH, NTSCRT_BENCH_DIGITAL_FRAMES=a,b: timings (another size, other
+// playheads; 1850 and 108900 = 01:00:30:00 at 30 fps by default; a 30 fps clip).
+TEST_CASE("Digital video: after a jump into a clip, steps back, the viewer's scale and aborts re-run little") {
+    int w = 128, h = 72;
+    if (const char *e = std::getenv("NTSCRT_BENCH_DIGITAL_SIZE"); e && *e) std::sscanf(e, "%dx%d", &w, &h);
+    std::vector<double> frames = {1850, 108900};
+    if (const char *e = std::getenv("NTSCRT_BENCH_DIGITAL_FRAMES"); e && *e) {
+        frames.clear();
+        std::istringstream in(e);
+        for (std::string x; std::getline(in, x, ',');) frames.push_back(std::atof(x.c_str()));
+    }
+    const bool bench = std::getenv("NTSCRT_BENCH_DIGITAL_SIZE") || std::getenv("NTSCRT_BENCH_DIGITAL_FRAMES");
+    std::ostringstream report;
+    report << "| format | frame | jump: fetches, ms | next frame | 5 steps back: fetches, ms | viewer (0.25) | "
+              "full size after | aborted, then again: fetches, ms |\n|---|---|---|---|---|---|---|---|\n";
+    for (const char *name : {"Webcam (2005)", "Video call", "MiniDV", "Early web video", "CD-ROM (Video 1)", "Datamosh"}) {
+        for (double T : frames) {
+            CAPTURE(name);
+            CAPTURE(T);
+            LoopEditFixture f(w, h);
+            for (const char *c : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName}) {
+                f.inst->clips[c]->any_frame_last = 250000;
+                f.inst->clips[c]->props.set(kOfxImageEffectPropFrameRange, {0.0, 250000.0});
+                f.inst->clips[c]->props.set(kOfxImageEffectPropFrameRate, {30.0});
+            }
+            f.inst->props.set(kOfxImageEffectPropFrameRate, {30.0});
+            f.shot(T + 1000);  // warm-up (the default look: Digital video off)
+            f.choose("host_preset", std::string("Digital video/") + name, T);
+            const auto jump = f.shot(T);
+            const auto next = f.shot(T + 1);
+            int back_fetches = 0;
+            double back_ms = 0;
+            for (int i = 1; i <= 5; ++i) {
+                const auto s = f.shot(T - i);
+                back_fetches += s.fetches;
+                back_ms += s.ms;
+                if (i == 5 && !bench) CHECK(s.px == f.clean(T - i));
+            }
+            const auto viewer = f.shot(T + 1, 0.25);
+            const auto full = f.shot(T + 2);
+            long asked = 0;
+            f.host.on_abort = [&] { return ++asked > 2 ? 1 : 0; };
+            REQUIRE(f.render_at(T - 20, 1.0) == kOfxStatOK);
+            f.host.on_abort = nullptr;
+            const auto again = f.shot(T - 20);
+            if (!bench) {
+                CHECK(full.px == f.clean(T + 2));
+                CHECK(again.px == f.clean(T - 20));
+            }
+            // Stepping back after the jump: the frames the jump coded on the way (none for the
+            // formats coding every frame alone: each step reads the frame before it). Unless the
+            // jump landed on a keyframe: the frames before it are another stream, never coded.
+            if (jump.fetches > 0) CHECK(back_fetches <= 5);
+            // The full-size stream goes on after the viewer's render; the aborted render's
+            // checkpoints stay (each format codes at most 15 captures from one).
+            CHECK(full.fetches <= 2);
+            CHECK(again.fetches <= 2 * 15);
+            report << "| " << name << " | " << T << " | " << jump.fetches << ", " << int(jump.ms) << " | "
+                   << next.fetches << ", " << int(next.ms) << " | " << back_fetches << ", " << int(back_ms) << " | "
+                   << viewer.fetches << ", " << int(viewer.ms) << " | " << full.fetches << ", " << int(full.ms)
+                   << " | " << again.fetches << ", " << int(again.ms) << " |\n";
+        }
+    }
+    MESSAGE(report.str());
+    std::printf("[timing] Digital video jumps %dx%d\n%s", w, h, report.str().c_str());
+}
+
+// Digital video moved by an animated preset (no keyframes: the look of each frame comes from the
+// host_animation text): the stream's history checks see each frame's animated values, so jumps,
+// steps back, the viewer's scale and an abort render a fresh effect's pictures; a control the user
+// takes over from the animation changes the history, and the checkpoints after it no longer hold.
+TEST_CASE("Digital video: an animated preset that moves Digital values keeps jumps exact") {
+    namespace fs = std::filesystem;
+    LoopEditFixture f(96, 54);
+    for (const char *c : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName}) {
+        f.inst->clips[c]->props.set(kOfxImageEffectPropFrameRate, {30.0});
+        f.inst->clips[c]->any_frame_last = 5000;
+    }
+    f.inst->props.set(kOfxImageEffectPropFrameRate, {30.0});
+    // A Datamosh-like stream (every keyframe dropped: the history reaches back to the minute's start)
+    // whose quality and data loss move over a 4 s loop.
+    json look = json::parse(std::ifstream(fs::path(NTSCRT_SOURCE_DIR) / "presets" / "Cheap camcorder.json"));
+    auto &v = look["digital"]["values"];
+    v["frame_rate"] = 30;
+    v["keyframe_interval"] = 1;
+    v["datamosh"] = 1;
+    v["data_loss"] = 0.2;
+    look["timeline"] = {{"enabled", true}, {"duration", 4}, {"fps", 30},
+                        {"keys", json::array({{{"t", 0}, {"easing", "Linear"}, {"digital", {{"quality", 0.2}, {"data_loss", 0.0}}}},
+                                              {{"t", 0.5}, {"easing", "Linear"}, {"digital", {{"quality", 0.9}, {"data_loss", 0.5}}}}})}};
+    const fs::path file = fs::temp_directory_path() / ("ntscrt_ofx_dv_anim-" + pid_suffix() + ".json");
+    { std::ofstream(file) << look.dump(); }
+    const auto u8 = file.u8string();
+    f.param("host_preset_file")->str = std::string(u8.begin(), u8.end());
+    const double T = 200;
+    f.shot(T + 1000);  // warm-up
+    f.user_edit("host_load_preset", T);
+    fs::remove(file);
+    REQUIRE(f.param("digital_enabled")->v[0] == 1);
+    const ntscrt::host::Animation a(host_schema(), f.param("host_animation")->str, 30);
+    const size_t qi = schema_index("digital_quality2");
+    REQUIRE(a.moves(qi));
+    CHECK(a.value(qi, 20).get<double>() != a.value(qi, 50).get<double>());
+    for (double t : {T, T - 1, T - 2, T - 3, T - 40, T + 1, T + 5}) {
+        CAPTURE(t);
+        CHECK(f.shot(t).px == f.clean(t));
+    }
+    f.shot(T + 6, 0.25);  // the viewer's scale in between
+    CHECK(f.shot(T + 6).px == f.clean(T + 6));
+    long asked = 0;
+    f.host.on_abort = [&] { return ++asked > 2 ? 1 : 0; };
+    REQUIRE(f.render_at(T - 20, 1.0) == kOfxStatOK);
+    f.host.on_abort = nullptr;
+    CHECK(f.shot(T - 20).px == f.clean(T - 20));
+    // The user takes Quality over from the animation: one value on every frame from now on.
+    f.param("digital_quality2")->v[0] = 0.5;
+    f.user_edit("digital_quality2", T);
+    CHECK(f.param("host_animation")->str.find("digital.quality2") != std::string::npos);
+    for (double t : {T - 2, T, T + 7}) {
+        CAPTURE(t);
+        CHECK(f.shot(t).px == f.clean(t));
+    }
+}

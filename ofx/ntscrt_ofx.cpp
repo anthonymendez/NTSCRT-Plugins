@@ -1883,10 +1883,9 @@ void NtscrtEffect::render_frame(const OFX::RenderArguments &args) {
         log_route("digital_route", "Digital video", digital_route_said_);
     }
     if (ctx.aborted) {
-        // Frames were skipped: the Digital stream built on stand-ins must not be
-        // reused (the core drops the Screen Loop run that stood in pictures by
-        // itself, keeping the others). The host discards this frame.
-        ntscrt_flush_caches_mask(inst_, NTSCRT_CACHE_DIGITAL);
+        // Frames were skipped: the core drops the Digital stream and the Screen Loop
+        // run that stood in pictures by itself, keeping their checkpoints and the
+        // other loops (docs/dev/DIGITAL-CHECKPOINTS.md). The host discards this frame.
         dlog::write("instance #" + std::to_string(id_) + " render t=" + std::to_string(args.time) +
                     " aborted by the host after " + std::to_string(ctx.fetches) + " earlier frames");
         return;

@@ -14,6 +14,17 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Fixed
+- **Digital video is quicker to work with after a jump into a clip, with the same pictures:** the effect now
+  keeps the codec's state every half second or so while it plays a Digital video look's stream, so going back
+  a few frames, stepping back one frame at a time, a render at the viewer's size in between and a render
+  Resolve cancels no longer re-run the stream from its last keyframe (with Datamosh, from the start of the
+  minute: up to 1,800 frames read again). Measured on a 1080p Datamosh look, 30 s past the hour: stepping back
+  ten frames took 1.6 s, now 0.06 s; a jump back a few seconds over frames already seen reads at most 15
+  frames again. The first jump to a frame still plays its stream once from its keyframe. Also fixed: a
+  render at a reduced render scale in between (Resolve's viewer) could change the full-size pictures that
+  followed it; each size now has its own stream. Memory: `NTSCRT_DIGITAL_CHECKPOINT_MB` (default 256 MB).
+
 ### Changed
 - **The Sim CRT shader is a little faster:** each frame used to be drawn twice behind the scenes (to keep its
   picture the same whatever order frames are rendered in); now it is drawn once, with the very same picture,

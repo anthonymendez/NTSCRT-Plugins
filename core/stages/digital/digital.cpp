@@ -114,7 +114,7 @@ std::shared_ptr<gpu::Texture> DigitalStage::process_gpu(DigitalGpu &gpu, const s
     r.profile() = {};
     std::vector<uint8_t> current = gpu.scale(*pic, capture, in.settings, &r.profile());
     const std::vector<uint8_t> &shown =
-        r.code(in.n, std::move(current), capture, ctx.fps, in.settings, in.settingsAt, in.earlier, ctx.seed);
+        r.code(in.n, std::move(current), capture, ctx.fps, in.settings, in.settingsAt, in.earlier, ctx.seed, {w, h});
     if (shown.size() != size_t(capture.width) * capture.height * 4) return pic;  // upscale() leaves it so
     return gpu.upscale(shown, capture, w, h, &r.profile());
 }
@@ -123,12 +123,14 @@ void DigitalStage::flush() { impl_->renderer.flush(); }
 
 std::string DigitalStage::profile_note() const {
     const digital::Renderer::Profile &p = impl_->renderer.lastProfile();
-    char b[256];
+    const digital::Renderer &r = impl_->renderer;
+    char b[384];
     std::snprintf(b, sizeof b,
                   " digital_ms=scale:%.3f,download:%.3f,earlier:%.3f,camera:%.3f,codec:%.3f,deblock:%.3f,upsample:%.3f,"
-                  "upload:%.3f,upscale:%.3f digital_captures=%d",
+                  "upload:%.3f,upscale:%.3f digital_captures=%d digital_from=%d digital_checkpoints=%zu:%.1fMB+%zu:%.1fMB",
                   p.scale, p.download, p.earlier, p.camera, p.codec, p.deblock, p.upsample, p.upload, p.upscale,
-                  p.captures);
+                  p.captures, r.lastResumedFrom(), r.checkpointCount(), double(r.checkpointBytes()) / (1024.0 * 1024.0), r.trailCount(),
+                  double(r.trailBytes()) / (1024.0 * 1024.0));
     return b;
 }
 

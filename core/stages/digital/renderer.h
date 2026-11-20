@@ -129,9 +129,22 @@ using EarlierFrames = std::function<std::optional<SourceFrame>(int frame)>;
 // Settings at a source frame (keyframes).
 using SettingsAt = std::function<Settings(int frame)>;
 
+// Checkpoints (docs/dev/DIGITAL-CHECKPOINTS.md): the codec's state after a capture, kept
+// every `every` captures (and at each keyframe a datamosh drops) while the stream is coded,
+// so a jump back, a re-render or a render at another size in between resumes from the
+// closest one at or before the frame instead of re-running from the last keyframe.
+// `budget` bytes in all, the least recently used go first;
+// NTSCRT_DIGITAL_CHECKPOINT_MB (0 = none), default 256 MB.
+struct CheckpointConfig {
+    int every = 15;  // captures; <= 0: only at dropped keyframes
+    size_t budget = 0;
+    static CheckpointConfig fromEnvironment();
+};
+
 class Renderer {
 public:
-    static constexpr size_t kCheckpointBudget = size_t(96) << 20;
+    Renderer() : cfg_(CheckpointConfig::fromEnvironment()) {}
+    explicit Renderer(CheckpointConfig cfg) : cfg_(cfg) {}
 
     // The capture size for a picture at a capture width — the Downscale's rule.
     static Size captureSize(int width, int height, int captureWidth);
@@ -147,11 +160,21 @@ public:
     // process() without the pictures at the frame's size: `current` is frame n
     // at the capture size (what scale() makes of it); returns the picture to
     // show, at the capture size (what upscale() takes). The GPU route's CPU part.
+    // `source`: the size of the frames the capture pictures are made from (the
+    // picture's; earlier frames come at the same render scale): a stream and its
+    // checkpoints are only reused for frames of the same size.
     const std::vector<uint8_t> &code(int n, std::vector<uint8_t> current, Size capture, double sourceFPS,
                                      const Settings &settings, const SettingsAt &settingsAt = nullptr,
-                                     const EarlierFrames &earlier = nullptr, uint64_t seed = 0);
+                                     const EarlierFrames &earlier = nullptr, uint64_t seed = 0, Size source = {});
 
     int lastRunLength() const { return lastRunLength_; }
+    // Where the last call's run went on from: the capture of the checkpoint (or of
+    // the stream's own state) it resumed, -1 when it started from a keyframe.
+    int lastResumedFrom() const { return lastResumedFrom_; }
+    size_t checkpointCount() const { return checkpoints_.size(); }
+    size_t checkpointBytes() const { return checkpointBytes_; }
+    size_t trailCount() const { return trail_.size(); }
+    size_t trailBytes() const { return trailBytes_; }
 
     // Where the last process() call's time went (ms of wall time, CPU side;
     // the façade adds them to the timings note: digital_ms=...). scale: the
@@ -203,39 +226,56 @@ private:
         Timing timing;
         uint64_t seedMix = 0;
         bool still = false;
+        int sourceW = 0, sourceH = 0;  // the frames' size (a host's render scale)
         auto operator<=>(const StreamKey &) const = default;
     };
-    // The run since the decoder's picture was last known from scratch: the
-    // settings fingerprints of captures origin, origin+1, ... — a checkpoint
-    // (or the stream) is only reused while those still hold.
+    // The run since the decoder's picture was last known from scratch (the last
+    // keyframe): the settings fingerprints of captures origin, origin+1, ... — a
+    // checkpoint (or the stream) is only reused while those still hold.
+    // `complete`: no capture of it stood in for a frame the host didn't give.
     struct Run {
         int origin = 0;
         std::vector<uint64_t> fps;
+        bool complete = true;
     };
+    // The codec's state after a capture. Pictures are never changed once made
+    // (each step makes new ones), so a checkpoint shares them with the stream.
     struct Checkpoint {
         std::shared_ptr<CodecState> state;
         Run run;
+        float step = 0;  // that capture's deblocking step (its picture is shown with it)
         size_t bytes = 0;
+        uint64_t used = 0;
     };
     struct Call;  // per-process() context
 
     void rerun(Call &call, int c);
-    void advance(Call &call, int k, const std::vector<uint8_t> &source);
+    void advance(Call &call, int k, const std::vector<uint8_t> &source, bool show, bool standIn);
+    void showState(Call &call, int c);
     std::optional<std::vector<uint8_t>> earlierCapture(Call &call, int k);
     bool runHolds(Call &call, const Run &run, int from, int upTo);
+    Checkpoint snapshot() const;
     void store(const StreamKey &key, int capture, Checkpoint cp);
+    void park();
 
+    CheckpointConfig cfg_;
     std::optional<StreamKey> stream_;
     std::shared_ptr<CodecState> state_;
     std::optional<int> lastCapture_;
     std::optional<int> lastFrame_;
     Run run_;
+    float step_ = 0;  // the last capture's deblocking step
     std::vector<uint8_t> shown_;
 
     std::map<std::pair<StreamKey, int>, Checkpoint> checkpoints_;
-    std::vector<std::pair<StreamKey, int>> checkpointOrder_;
     size_t checkpointBytes_ = 0;
+    // The last re-run's states before the frame it was for (at most `every`, within
+    // a quarter of the budget, on top of it): stepping back re-runs nothing.
+    std::map<std::pair<StreamKey, int>, Checkpoint> trail_;
+    size_t trailBytes_ = 0;
+    uint64_t tick_ = 0;
     int lastRunLength_ = 0;
+    int lastResumedFrom_ = -1;
     Profile profile_;
 };
 
