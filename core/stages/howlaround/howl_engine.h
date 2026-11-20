@@ -211,13 +211,27 @@ public:
     }
 
     // Put aside while another setting's loop is shown (Howlaround keeps a few, so going
-    // back to a setting continues its history instead of re-running it): only the
-    // state at next() stays, the checkpoints and the run ahead go. Neither changes a
-    // picture (a later re-run or window start re-makes them, step for step).
+    // back to a setting continues its history instead of re-running it): the state at
+    // next() stays, and of the checkpoints the last one of that run at or before next()
+    // (a host that renders another frame first, as Resolve does with a Fusion comp's
+    // current frame, moves the state away: the checkpoint brings it back with at most
+    // checkpoint_every frames re-run). The other checkpoints and the run ahead go. None
+    // of that changes a picture (a later re-run or window start re-makes them, step for step).
     void park() {
         inflight_.clear();  // empty between calls anyway
-        ckpts_.clear();
-        ckpt_bytes_ = 0;
+        auto keep = ckpts_.end();
+        if (valid_) {
+            auto it = ckpts_.upper_bound({anchor_, next_});
+            if (it != ckpts_.begin() && std::prev(it)->first.first == anchor_) keep = std::prev(it);
+        }
+        for (auto it = ckpts_.begin(); it != ckpts_.end();) {
+            if (it == keep) {
+                ++it;
+                continue;
+            }
+            ckpt_bytes_ -= it->second.bytes;
+            it = ckpts_.erase(it);
+        }
         ahead_.drop();
     }
     // Bytes of the pictures this loop holds (its history, the run ahead's, checkpoints).

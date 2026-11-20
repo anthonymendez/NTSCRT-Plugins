@@ -297,8 +297,8 @@ TEST_CASE("Screen Loop: other settings in between, then back: the history goes o
     CHECK(x.src.fetches == 0);
     CHECK(x.render(22) == seq_b[22]);
     CHECK(x.src.fetches == 0);
-    // Seeking back after coming back: a parked loop kept no checkpoints, so this re-runs the
-    // window; the frame is still the one an undisturbed instance renders.
+    // Seeking back after coming back: a parked loop kept only its last checkpoint (here the
+    // window start's); the frame is still the one an undisturbed instance renders.
     CHECK(x.render(9) == seq_b[9]);
     // NTSCRT_SCREENLOOP_KEEP_MB=0: nothing is kept, going back re-runs (the same frame).
     set_env("NTSCRT_SCREENLOOP_KEEP_MB", "0");

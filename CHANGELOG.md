@@ -14,6 +14,11 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Fixed
+- **Going back to a Screen Loop preset is quick even after Resolve rendered another frame in between** (as it
+  does with a Fusion comp's current frame): the kept loop now resumes from its last checkpoint, at most 30
+  frames back, instead of re-running up to 479 frames. Pictures are unchanged.
+
 ### Changed
 - Docs: **the README is rewritten for video editors:** what the effect does, what you need, how to install,
   update and remove it, how to apply it in Resolve, a tour of the presets and sections, tips and

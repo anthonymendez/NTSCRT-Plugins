@@ -151,7 +151,9 @@ Now:
   no flush. With keyframes anywhere (before or now) it is dropped as before: earlier frames' looks could differ.
 - **The core keeps the loops of the last few settings** (`Howlaround::Impl::Slot::parked`, four per render size,
   256 MB in all, `NTSCRT_SCREENLOOP_KEEP_MB`): a loop put aside keeps only its state at its last frame
-  (`Engine::park`: no checkpoints, no run ahead), so going back to a setting at the same playhead continues it.
+  (`Engine::park`: its last checkpoint, no run ahead), so going back to a setting at the same playhead continues it,
+  and after a render of another frame in between (Resolve renders a Fusion comp's current frame with each job)
+  resumes from that checkpoint, at most 30 frames back.
   A temporal CRT preset in the loop (none of the bundled ones) keeps nothing across a settings change and resets
   the loop's CRT, as the flush did (`HowlHooks::tv_reset`).
 - No picture changes: each kept loop is the same deterministic run (`test_howl_seek` "other settings in between,
