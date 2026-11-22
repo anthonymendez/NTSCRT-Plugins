@@ -46,7 +46,10 @@ public:
     static Library *load(const std::string &resource_dir, std::string &err);
 
     // Creates a chain for `preset_path` on `dev` (D3D11 or Metal runtime).
-    std::unique_ptr<Chain> create_chain(gpu::Device &dev, const std::string &preset_path);
+    // compile_only: only to fill the shader cache (shader_warm.h). The chain can't
+    // render (D3D11: its lookup textures are never uploaded), and building it never
+    // takes the device's context lock.
+    std::unique_ptr<Chain> create_chain(gpu::Device &dev, const std::string &preset_path, bool compile_only = false);
 
     void *sym(const char *name) const;
     std::string path;
@@ -69,7 +72,9 @@ private:
 };
 
 // Backend-specific chain factories (crt_libra_d3d11.cpp / crt_libra_metal.mm).
-std::unique_ptr<Chain> create_d3d11_chain(Library &lib, gpu::Device &dev, const std::string &preset_path);
-std::unique_ptr<Chain> create_metal_chain(Library &lib, gpu::Device &dev, const std::string &preset_path);
+std::unique_ptr<Chain> create_d3d11_chain(Library &lib, gpu::Device &dev, const std::string &preset_path,
+                                          bool compile_only);
+std::unique_ptr<Chain> create_metal_chain(Library &lib, gpu::Device &dev, const std::string &preset_path,
+                                          bool compile_only);
 
 }  // namespace ntscrt::crt

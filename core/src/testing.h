@@ -5,6 +5,7 @@
 #include <ntscrt/ntscrt.h>
 
 #include <cstddef>
+#include <string>
 
 namespace ntscrt::testing {
 
@@ -52,5 +53,21 @@ struct PhaseTimes {
     }
 };
 PhaseTimes last_phases(ntscrt_instance *inst);
+
+// The background shader-cache warm-up (ntscrt_warm_shader_cache_background) of this process.
+struct WarmupState {
+    int runs = 0;       // threads started
+    int completed = 0;  // runs that went to the end (or found nothing to do)
+    bool running = false;
+    int built = 0;      // presets built, all runs
+    bool already_complete = false;  // the last run found the cache folder complete
+    bool stopped = false;           // the last run was stopped (ntscrt_destroy of the last instance)
+    std::string why;                // the last run's reason for doing nothing
+};
+WarmupState warmup_state();
+// Waits until no background warm-up runs; false on timeout.
+bool wait_warmup(int timeout_ms);
+// Stops a running one and forgets that one ran, so the next instance starts it again.
+void forget_warmup();
 
 }  // namespace ntscrt::testing

@@ -2,7 +2,8 @@
 # NTSCRT .pkg postinstall (runs as root after the payload-free package "installs").
 # Runs the install.sh that build-pkg.sh copied next to this script: it downloads the
 # LATEST GitHub release, verifies it against the release's SHA256SUMS and installs the
-# DaVinci Resolve and/or Final Cut Pro plug-in.
+# DaVinci Resolve and/or Final Cut Pro plug-in, then builds the CRT shaders into the shader
+# cache of the user logged in at the screen, as that user (install.sh: warm_shaders).
 # Optional environment (CI / offline): NTSCRT_FROM=<zip or folder>, NTSCRT_VERSION=<tag>.
 # Output goes to stdout (Installer copies it to /var/log/install.log) and is appended to
 # /Library/Logs/NTSCRT/install.log (root-owned; nothing is written to fixed paths in /tmp).

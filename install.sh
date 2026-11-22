@@ -14,6 +14,10 @@
 # Default: installs for every app it finds (/Applications/DaVinci Resolve,
 # /Applications/Final Cut Pro.app), or for both if it finds neither.
 # Asks for your password once (sudo) to write /Library/OFX/Plugins and /Applications.
+# After installing the Resolve plug-in it builds the CRT shaders for this Mac into your
+# shader cache (~/Library/Caches/NTSCRT), as you (never as root), so their first use in
+# Resolve doesn't compile them; any problem there is one line, never a failed install.
+# NTSCRT_SHADER_WARMUP=0 skips it.
 # If the direct download fails it falls back to `gh release download`
 # (GitHub CLI, signed in) or the GITHUB_TOKEN environment variable.
 # Downloaded zips are checked against the release's SHA256SUMS before anything is
@@ -99,6 +103,39 @@ as_user() {  # as_user <cmd...>: run as the console user when we're root
   else
     "$@"
   fi
+}
+
+# warm_shaders <installed NTSCRT.ofx.bundle>: build every CRT preset's shaders into the
+# user's shader cache with the bundle's own tool (the plug-in's code, GPU, cache key and
+# files). As the user (as_user when we're root), never as root: the cache is per user.
+# Never fails the install: whatever goes wrong is one line.
+warm_shaders() {
+  tool="$1/Contents/MacOS/ntscrt-warm"
+  why=""
+  case "${NTSCRT_SHADER_WARMUP:-}" in 0|off|false) why="NTSCRT_SHADER_WARMUP=$NTSCRT_SHADER_WARMUP" ;; esac
+  if [ -z "$why" ] && [ ! -x "$tool" ]; then why="this version has no warm-up tool"; fi
+  if [ -z "$why" ] && [ "$(id -u)" -eq 0 ] && [ -z "$CONSOLE_USER" ]; then why="running as root with nobody logged in"; fi
+  if [ -n "$why" ]; then
+    say "Shader warm-up skipped ($why): the plug-in builds the CRT shaders when first used."
+    return 0
+  fi
+  say "Building the CRT shaders for this Mac (one time, at most 300 s)"
+  if [ "$(id -u)" -eq 0 ]; then
+    # The user's own home (sudo may keep root's HOME); NTSCRT_SHADER_CACHE passes through (tests).
+    { as_user /usr/bin/env HOME="${user_home:-/Users/$CONSOLE_USER}" NTSCRT_SHADER_CACHE="${NTSCRT_SHADER_CACHE:-}" \
+        "$tool" --timeout 300 2>&1 || echo "rc=$?"; } | sed 's/^/    /' > "$WORK/warm.log" || true
+  else
+    { "$tool" --timeout 300 2>&1 || echo "rc=$?"; } | sed 's/^/    /' > "$WORK/warm.log" || true
+  fi
+  cat "$WORK/warm.log"
+  rc="$(sed -n 's/^    rc=\([0-9]*\)$/\1/p' "$WORK/warm.log" | tail -n 1)"
+  case "${rc:-0}" in
+    0) say "CRT shaders ready." ;;
+    1) say "Shader warm-up didn't run (see above): the plug-in builds the CRT shaders when first used." ;;
+    3) say "Shader warm-up stopped at its time limit: the plug-in builds the rest when first used." ;;
+    *) say "Shader warm-up incomplete (exit $rc, see above): the plug-in builds what's missing when first used." ;;
+  esac
+  return 0
 }
 
 if [ -n "$UNINSTALL" ]; then
@@ -298,6 +335,7 @@ if [ -n "$WANT_RESOLVE" ]; then
   new_v="$(bundle_version "$bundle")"; old_v="$(bundle_version "$OFX_DEST/NTSCRT.ofx.bundle")"
   say "Installing DaVinci Resolve plugin $new_v${old_v:+ (replacing $old_v)} -> $OFX_DEST/NTSCRT.ofx.bundle"
   install_swap "$bundle" "$OFX_DEST" NTSCRT.ofx.bundle
+  warm_shaders "$OFX_DEST/NTSCRT.ofx.bundle"
   say "Resolve: (re)start it, then Effects > OpenFX > Filters > NTSCRT."
 fi
 

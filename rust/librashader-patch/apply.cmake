@@ -9,6 +9,8 @@
 #    instead of its persy database in %LOCALAPPDATA%\librashader; nothing is cached until
 #    the plug-in calls ntscrt_libra_set_cache_dir (core/stages/crt/shader_cache.cpp).
 # 2. The Metal runtime caches its SPIR-V like the Direct3D 11 one (it had no cache).
+# 3. ntscrt_libra_run_isolated (pool.rs): a chain built through it compiles on a private
+#    one-thread rayon pool, not the global one renders use (the background warm-up's).
 # Every edit must match the source exactly once, or the build stops: after a librashader
 # update, check them against the new code. The changed files stay under librashader's
 # licence (MPL-2.0 OR GPL-3.0-only); THIRD_PARTY_NOTICES.md says what changed.
@@ -42,11 +44,12 @@ function(ntscrt_patch rel old new)
 endfunction()
 
 # ---- 1. librashader-cache: file store ----
-file(COPY "${PATCH}/store.rs" DESTINATION "${DST}/librashader-cache/src")
+file(COPY "${PATCH}/store.rs" "${PATCH}/pool.rs" DESTINATION "${DST}/librashader-cache/src")
 ntscrt_patch(librashader-cache/src/lib.rs [=[
 mod cache;
 ]=] [=[
 mod cache;
+mod pool;
 mod store;
 
 pub use store::set_cache_dir;
@@ -136,6 +139,30 @@ ntscrt_patch(librashader-runtime-mtl/src/filter_chain.rs [=[
             SpirvCross,
             FilterChainError,
         >(shaders, textures.iter().map(|t| &t.meta))?;
+]=])
+
+# ---- 3. a private rayon pool (pool.rs) ----
+ntscrt_patch(librashader-cache/Cargo.toml [=[
+persy = "1.6.0"
+]=] [=[
+persy = "1.6.0"
+rayon = { workspace = true }
+]=])
+ntscrt_patch(Cargo.lock [=[
+ "persy",
+ "platform-dirs",
+ "serde",
+ "thiserror 2.0.18",
+ "windows",
+]
+]=] [=[
+ "persy",
+ "platform-dirs",
+ "rayon",
+ "serde",
+ "thiserror 2.0.18",
+ "windows",
+]
 ]=])
 
 file(WRITE "${DST}/NTSCRT-PATCHED.txt"

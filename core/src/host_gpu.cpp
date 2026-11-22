@@ -19,6 +19,7 @@
 
 #include "../stages/crop/crop_internal.h"
 #include "facade.h"
+#include "warmup.h"
 
 namespace ntscrt::hostgpu {
 
@@ -146,6 +147,7 @@ ntscrt_status ntscrt_render_host_gpu(ntscrt_instance *inst, const ntscrt_render_
                                      const ntscrt_host_gpu *host, const ntscrt_gpu_image *src, int32_t src_x,
                                      int32_t src_y, const ntscrt_gpu_image *dst) {
     if (!inst || !args || !host || !valid(src) || !valid(dst)) return NTSCRT_ERR_INVALID_ARG;
+    const warmup::RenderScope rendering;  // the background shader warm-up waits
     PhaseTimes &pt = facade::times(inst);
     pt.clear("gpu-direct");
     struct Done {

@@ -14,6 +14,22 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+### Added
+- **The installers prepare the CRT shaders for your graphics card**, so each CRT shader's first frame in Resolve
+  comes without a compile wait (they depend on your GPU, driver and system, so they can't ship ready-made). After
+  copying the plug-in, the Windows installer (MSI, `install.ps1`, *Install NTSCRT.cmd*) and the Mac installer
+  (`.pkg`, `install.sh`) run the new `ntscrt-warm` tool in the plug-in's folder as you (never as administrator or
+  root: the shader cache is yours), which builds all seven into the shader cache in about __WARM_S__ s, showing a
+  line per shader. No GPU, a cache that can't be written or any other problem is one line, never a failed
+  install; it stops after 5 minutes at most. Measured in Resolve at 1080p: __MEASURE__ `install.ps1 -NoWarmup` or
+  `NTSCRT_SHADER_WARMUP=0` skips it.
+- **The plug-in fills in missing CRT shaders in the background:** when an effect is created and the shader cache
+  lacks some of them for this plug-in version, GPU and driver (after a driver update, or a plug-in copied by
+  hand), it builds them on a low-priority thread of its own, one at a time and only while Resolve isn't rendering,
+  once per session. It never runs while Resolve scans its plug-ins, never waits on a render nor makes one wait,
+  and pictures stay byte for byte the same. `NTSCRT_SHADER_WARMUP=0` turns it off
+  ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)).
+
 ### Fixed
 - **Digital video is quicker to work with after a jump into a clip, with the same pictures:** the effect now
   keeps the codec's state every half second or so while it plays a Digital video look's stream, so going back

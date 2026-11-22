@@ -6,6 +6,9 @@
   "C:\Program Files\NTSCRT Installer\" and runs it elevated (deferred custom action,
   as SYSTEM). The script downloads the LATEST GitHub release and swaps the OpenFX
   bundle into C:\Program Files\Common Files\OFX\Plugins, so this MSI never goes stale.
+  Then, as the user running the install (not elevated: the shader cache is per user),
+  the installed bundle's ntscrt-warm.exe builds the CRT shaders for this PC's GPU into
+  that user's cache (install.ps1 skips that step as SYSTEM). Its failure is ignored.
 
   Build (see installer/windows/build-msi.ps1):
     wix build installer/windows/NTSCRT.wxs -arch x64 -d Version=0.3.0
@@ -61,6 +64,8 @@
     <!-- Deferred actions read their command line from a property named after the action. -->
     <SetProperty Id="NtscrtInstall" Sequence="execute" Before="NtscrtInstall"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install.ps1&quot; -Version &quot;[NTSCRT_VERSION]&quot; [NTSCRT_FROM_ARG]" />
+    <SetProperty Id="NtscrtWarmup" Sequence="execute" Before="NtscrtWarmup"
+                 Value="&quot;[CommonFiles64Folder]OFX\Plugins\NTSCRT.ofx.bundle\Contents\Win64\ntscrt-warm.exe&quot; --timeout 300" />
     <SetProperty Id="NtscrtUninstall" Sequence="execute" Before="NtscrtUninstall"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install.ps1&quot; -Uninstall" />
 
@@ -69,12 +74,17 @@
          script's own swap is atomic, so a failure leaves the installed plug-in untouched. -->
     <CustomAction Id="NtscrtInstall" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec64"
                   Execute="deferred" Impersonate="no" Return="check" />
+    <!-- The shader warm-up, impersonated: as the installing user, with that user's token (not
+         elevated). A missing tool (older release), no GPU or a timeout never fail the install. -->
+    <CustomAction Id="NtscrtWarmup" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec64"
+                  Execute="deferred" Impersonate="yes" Return="ignore" />
     <!-- Removes the plug-in. Ignored on failure so the installer can always be uninstalled. -->
     <CustomAction Id="NtscrtUninstall" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec64"
                   Execute="deferred" Impersonate="no" Return="ignore" />
 
     <InstallExecuteSequence>
       <Custom Action="NtscrtInstall" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="NtscrtWarmup" After="NtscrtInstall" Condition="NOT REMOVE" />
       <Custom Action="NtscrtUninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 

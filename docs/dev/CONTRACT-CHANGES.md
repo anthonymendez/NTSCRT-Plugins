@@ -397,3 +397,21 @@ C ABI unchanged. The OpenFX plug-in no longer flushes `NTSCRT_CACHE_DIGITAL` whe
 core drops the stream that met a missing frame itself).
 
 **Reason.** Checkpoints of the codec state (docs/dev/DIGITAL-CHECKPOINTS.md).
+
+## 2026-11-22 — agent L2 — `ntscrt.h`: shader cache warm-up (`ntscrt_warm_shader_cache`, `..._background`)
+
+**Change.** Added (no existing signature changed, `NTSCRT_ABI_VERSION` stays 1): `ntscrt_warm_progress_fn`,
+`ntscrt_warm_result`, `ntscrt_warm_shader_cache(resource_dir, progress, user, result)` (builds every bundled CRT
+preset into the shader cache now, on the core's own device) and `ntscrt_warm_shader_cache_background(inst, progress,
+user)` (the same on the instance's device, in the background: one low-priority thread, a preset only while no render
+call ran for a second, librashader's compiles on a private one-thread rayon pool through the patched-in
+`ntscrt_libra_run_isolated`; once per process; stopped and joined by the last `ntscrt_destroy`). `stages.h`:
+`crt_bundled_chain_files()`. `crt::Library::create_chain` gained `compile_only` (no context lock: the chain only fills
+the cache). The OpenFX binary exports `ntscrt_ofx_warm_shader_cache(progress, user)` for the bundle's `ntscrt-warm`
+tool (Contents/Win64/ntscrt-warm.exe, Contents/MacOS/ntscrt-warm), which the installers run as the user. The
+OpenFX plug-in calls the background variant when it creates an instance (never at load / describe); FxPlug doesn't
+yet. A complete warm-up writes `warm.txt` into the cache's key folder (trimmed with it).
+
+**Reason.** The cache key depends on the user's GPU, driver and system files, so compiled shaders can't ship with
+the installer: the installer builds them right after installing, and the plug-in fills in what a driver update or a
+hand-copied bundle leaves missing.

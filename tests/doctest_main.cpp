@@ -19,5 +19,14 @@ int main(int argc, char **argv) {
 #endif
     }
 #endif
+    // The plug-in's background shader warm-up stays off in tests that don't ask for it
+    // (test_ofx creates many instances; test_shader_warmup turns it on itself).
+    if (!std::getenv("NTSCRT_SHADER_WARMUP")) {
+#ifdef _WIN32
+        _putenv_s("NTSCRT_SHADER_WARMUP", "0");
+#else
+        setenv("NTSCRT_SHADER_WARMUP", "0", 1);
+#endif
+    }
     return doctest::Context(argc, argv).run();
 }

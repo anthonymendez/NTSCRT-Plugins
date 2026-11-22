@@ -130,6 +130,8 @@ jobs:
       - name: Smoke-test install.ps1 (checksum verified, tampered zip / missing SHA256SUMS refused)
         if: hashFiles('dist/NTSCRT-OFX-windows-x64.zip') != ''
         shell: pwsh
+        env:
+          NTSCRT_SHADER_WARMUP: "0"   # the warm-up step has its own test (next)
         run: |
           $zipName = "NTSCRT-OFX-windows-x64.zip"
           $srv = Join-Path $env:RUNNER_TEMP "srv"; $bad = Join-Path $env:RUNNER_TEMP "srv-bad"
@@ -174,6 +176,13 @@ jobs:
           } finally { Stop-Process -Id $py.Id -ErrorAction SilentlyContinue }
 
       # MSI that runs install.ps1 (downloads the latest release when users run it).
+      # install.ps1's shader warm-up: fills a cache folder of its own; a cache that can't be
+      # written, the time limit, no tool, a failing tool: one line each, never a failed install.
+      - name: Smoke-test install.ps1's shader warm-up (non-fatal)
+        if: hashFiles('dist/NTSCRT-OFX-windows-x64.zip') != ''
+        shell: pwsh
+        run: ./tests/installer/test_install_warmup.ps1 -From dist/NTSCRT-OFX-windows-x64.zip
+
       - name: Build MSI installer
         run: |
           dotnet tool install --global wix --version 5.0.2
@@ -192,6 +201,9 @@ jobs:
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/i", "`"$msi`"", "/qn", "NTSCRT_FROM=`"$zip`"", "/l*v", "msi-install.log"
           if ($p.ExitCode -ne 0) { Get-Content msi-install.log -Tail 80; throw "msiexec /i exit $($p.ExitCode)" }
           Select-String -Path msi-install.log -Pattern "==>" | ForEach-Object { $_.Line }
+          # The impersonated warm-up action (its outcome never fails the install): what it said.
+          Select-String -Path msi-install.log -Pattern "NtscrtWarmup|presets ready|shader cache off|skipped:|no GPU|stopped after" |
+            ForEach-Object { $_.Line }
           if (-not (Test-Path (Join-Path $bundle "Contents\Win64\NTSCRT.ofx"))) { throw "bundle not installed: $bundle" }
           Get-Content (Join-Path $bundle "Contents\Resources\VERSION")
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/x", "`"$msi`"", "/qn", "/l*v", "msi-uninstall.log"
@@ -331,8 +343,13 @@ jobs:
           ls -R "$x"
           post="$(find "$x" -name postinstall -path '*Scripts*' | head -n 1)"
           [ -n "$post" ] && [ -f "$(dirname "$post")/install.sh" ] || { echo "::error::postinstall/install.sh missing in pkg"; exit 1; }
-          sudo NTSCRT_FROM="$PWD/dist/NTSCRT-OFX-macos-universal.zip" sh "$post"
+          # The shader warm-up runs as the console user, into a cache folder of this test's.
+          cache="$RUNNER_TEMP/pkg-shader-cache"; rm -rf "$cache"
+          sudo NTSCRT_FROM="$PWD/dist/NTSCRT-OFX-macos-universal.zip" NTSCRT_SHADER_CACHE="$cache" sh "$post"
           test -f /Library/OFX/Plugins/NTSCRT.ofx.bundle/Contents/MacOS/NTSCRT.ofx
+          test -x /Library/OFX/Plugins/NTSCRT.ofx.bundle/Contents/MacOS/ntscrt-warm
+          sudo grep -E "Shader warm-up|CRT shaders ready" /Library/Logs/NTSCRT/install.log || { echo "::error::no shader warm-up line"; exit 1; }
+          find "$cache" -name warm.txt -exec sh -c 'echo "$1:"; cat "$1"; ls -ld "$(dirname "$1")"' _ {} \; || true
           cat /Library/OFX/Plugins/NTSCRT.ofx.bundle/Contents/Resources/VERSION
           sudo test -s /Library/Logs/NTSCRT/install.log
           sudo tail -n 5 /Library/Logs/NTSCRT/install.log

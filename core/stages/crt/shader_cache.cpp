@@ -249,6 +249,7 @@ void trim_shader_cache(const fs::path &root, const fs::path &keep, uint64_t cap,
             // files, then the folder if that emptied it.
             for (const File &f : mine) fs::remove(f.path, e1);
             fs::remove(d->path() / "key.txt", e1);
+            fs::remove(d->path() / "warm.txt", e1);
             fs::remove(d->path(), e1);
             continue;
         }
@@ -264,6 +265,34 @@ void trim_shader_cache(const fs::path &root, const fs::path &keep, uint64_t cap,
         std::error_code e;
         if (fs::remove(f.path, e)) total -= std::min(total, f.size);
     }
+}
+
+namespace {
+size_t count_objects(const fs::path &dir) {
+    size_t n = 0;
+    std::error_code ec;
+    for (fs::directory_iterator f(dir, ec), end; !ec && f != end; f.increment(ec)) {
+        const std::string name = u8str(f->path().filename());
+        std::error_code e1;
+        if (ends_with(name, ".bin") && f->is_regular_file(e1)) ++n;
+    }
+    return n;
+}
+}  // namespace
+
+void mark_shader_cache_warm(const fs::path &dir, const std::string &chain_files) {
+    write_atomic(dir / "warm.txt", "objects " + std::to_string(count_objects(dir)) + "\nchains " + chain_files + "\n");
+}
+
+bool shader_cache_warm_complete(const fs::path &dir, const std::string &chain_files) {
+    std::ifstream f(dir / "warm.txt", std::ios::binary);
+    if (!f) return false;
+    std::string objects, chains;
+    std::getline(f, objects);
+    std::getline(f, chains);
+    if (!starts_with(objects, "objects ") || chains != "chains " + chain_files) return false;
+    const long long want = std::atoll(objects.c_str() + 8);
+    return want > 0 && count_objects(dir) >= size_t(want);
 }
 
 const ShaderCacheState &configure_shader_cache(Library &lib, gpu::Device &dev) {

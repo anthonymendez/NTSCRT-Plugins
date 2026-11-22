@@ -7,6 +7,7 @@ add_library(ntscrt_core STATIC
   src/frames_needed.cpp
   src/host_gpu.cpp
   src/host_gpu_fill.cpp
+  src/warmup.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/embedded_schema.cpp)
 
 ntscrt_embed_text(${CMAKE_CURRENT_BINARY_DIR}/embedded_schema.cpp

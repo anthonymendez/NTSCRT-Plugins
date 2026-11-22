@@ -51,4 +51,11 @@ std::string shader_cache_folder_name(const std::string &key_text);
 void trim_shader_cache(const std::filesystem::path &root, const std::filesystem::path &keep, uint64_t cap_bytes,
                        int max_age_days = 7);
 
+// A warm-up (shader_warm.h) built every preset in `chain_files` into the key folder
+// `dir`: warm.txt there records them and how many objects the folder then held.
+void mark_shader_cache_warm(const std::filesystem::path &dir, const std::string &chain_files);
+// warm.txt is there for these chain files and the folder still holds that many
+// objects (none trimmed or removed since). Reads one small file and the folder list.
+bool shader_cache_warm_complete(const std::filesystem::path &dir, const std::string &chain_files);
+
 }  // namespace ntscrt::crt

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../gpu/gpu.h"
@@ -142,6 +143,11 @@ public:
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };
+
+// The bundled CRT presets as a render loads them: {preset id, chain file relative to
+// <resources>/shaders} (crtsim's is crt/crtsim-single.slangp unless NTSCRT_SIM_SINGLE=0).
+// What the shader-cache warm-up builds (core/stages/crt/shader_warm.h).
+std::vector<std::pair<std::string, std::string>> crt_bundled_chain_files();
 
 // ---- Screen Loop / howlaround (agent G) — GPU, sequential ---------------------
 // See core/stages/howlaround/howl_engine.h (random access) and

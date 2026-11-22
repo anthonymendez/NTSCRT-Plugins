@@ -44,7 +44,8 @@ Final Cut only where it will matter once it's out.
 4. Start Resolve again.
 
 The installer is small: it downloads the newest version of the plug-in while it runs. So even an old installer
-gets you the latest version.
+gets you the latest version. At the end it spends a few seconds preparing the CRT shaders for your graphics card,
+so the first time you use each one in Resolve it appears without a wait.
 
 **"Windows protected your PC" or "can't be opened"?** The installer isn't signed with a Microsoft or Apple
 certificate yet, so the first time it needs one extra click. This is expected.
@@ -260,6 +261,7 @@ them first: [install.ps1](install.ps1), [install.sh](install.sh).
 | Specific release | `-Version vX.Y.Z` | `--version vX.Y.Z` |
 | Only one app | (Resolve only on Windows) | `--resolve` or `--fcp` |
 | Install a zip you downloaded | `-From path\to.zip` | `--from path/to.zip` |
+| Skip preparing the CRT shaders | `-NoWarmup` | `NTSCRT_SHADER_WARMUP=0 sh install.sh` |
 
 `-Version` / `--version` take `latest` (the default) or a tag like `v1.2.3`.
 
@@ -333,7 +335,10 @@ Details: [docs/RELEASING.md](docs/RELEASING.md#what-a-release-contains-and-how-t
 - **First frames:** the plug-in's own GPU kernels come compiled with it (Windows), and the CRT shaders it compiles
   the first time each is used are kept in a cache folder (`%LOCALAPPDATA%\NTSCRT\cache`,
   `~/Library/Caches/NTSCRT`), so a new effect's first frame doesn't wait for a compile again in later sessions.
-  Safe to delete; `NTSCRT_SHADER_CACHE=0` turns it off ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)).
+  The installers fill that cache for every CRT shader right after installing (it depends on your GPU, driver and
+  system, so it can't ship ready-made), and the plug-in fills in what's missing (after a driver update, say) in
+  the background while Resolve is idle. Safe to delete; `NTSCRT_SHADER_CACHE=0` turns it off,
+  `NTSCRT_SHADER_WARMUP=0` the background part ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)).
 
 ### Known issues and limitations
 

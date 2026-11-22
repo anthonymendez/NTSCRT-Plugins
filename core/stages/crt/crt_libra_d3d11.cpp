@@ -19,7 +19,8 @@ namespace {
 
 class D3D11Chain final : public Chain {
 public:
-    D3D11Chain(Library &lib, gpu::Device &dev, const std::string &preset_path) : lib_(lib), dev_(dev) {
+    D3D11Chain(Library &lib, gpu::Device &dev, const std::string &preset_path, bool compile_only)
+        : lib_(lib), dev_(dev) {
         create_ = reinterpret_cast<PFN_libra_d3d11_filter_chain_create>(lib.sym("libra_d3d11_filter_chain_create"));
         frame_ = reinterpret_cast<PFN_libra_d3d11_filter_chain_frame>(lib.sym("libra_d3d11_filter_chain_frame"));
         set_param_ =
@@ -53,6 +54,7 @@ public:
                 free_(&chain_);
                 throw std::runtime_error("librashader: FinishCommandList failed");
             }
+            if (compile_only) return;  // shaders built (and cached): nothing for the device to run
             std::lock_guard<std::recursive_mutex> lock(dev.context_mutex());
             static_cast<ID3D11DeviceContext *>(dev.native_context())->ExecuteCommandList(list.Get(), FALSE);
         } else {
@@ -66,6 +68,10 @@ public:
         // create consumes the preset on success.
     }
     ~D3D11Chain() override {
+        if (!framed_) {  // never ran a frame (a shader-cache warm-up's): nobody else uses it
+            if (chain_) free_(&chain_);
+            return;
+        }
         std::lock_guard<std::recursive_mutex> lock(dev_.context_mutex());
         if (chain_) free_(&chain_);
     }
@@ -83,6 +89,7 @@ public:
         opt.current_subframe = 1;
         opt.frames_per_second = 1.f;
         std::lock_guard<std::recursive_mutex> lock(dev_.context_mutex());  // librashader drives the context
+        framed_ = true;
         auto *ctx = static_cast<ID3D11DeviceContext *>(dev_.native_context());
         if (libra_error_t e = frame_(&chain_, ctx, size_t(frame_count), srv, rtv, &vp, nullptr,
                                      clear_history ? &opt : nullptr))
@@ -97,6 +104,7 @@ private:
     Library &lib_;
     gpu::Device &dev_;
     libra_d3d11_filter_chain_t chain_ = nullptr;
+    bool framed_ = false;  // frame() ran (under the context lock)
     PFN_libra_d3d11_filter_chain_create create_ = nullptr;
     PFN_libra_d3d11_filter_chain_frame frame_ = nullptr;
     PFN_libra_d3d11_filter_chain_set_param set_param_ = nullptr;
@@ -105,8 +113,9 @@ private:
 
 }  // namespace
 
-std::unique_ptr<Chain> create_d3d11_chain(Library &lib, gpu::Device &dev, const std::string &preset_path) {
-    return std::make_unique<D3D11Chain>(lib, dev, preset_path);
+std::unique_ptr<Chain> create_d3d11_chain(Library &lib, gpu::Device &dev, const std::string &preset_path,
+                                          bool compile_only) {
+    return std::make_unique<D3D11Chain>(lib, dev, preset_path, compile_only);
 }
 
 }  // namespace ntscrt::crt
