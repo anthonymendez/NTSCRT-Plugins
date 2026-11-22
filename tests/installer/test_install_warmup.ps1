@@ -18,7 +18,8 @@ $failures = @()
 function Invoke-Install([string]$Name, [string]$Source, [string]$Cache, [hashtable]$Extra = @{}) {
     $dest = Join-Path $work "dest-$Name"
     $env:NTSCRT_SHADER_CACHE = $Cache
-    Remove-Item Env:NTSCRT_SHADER_WARMUP -ErrorAction SilentlyContinue
+    # 1: also from an administrator PowerShell (CI runners are elevated with UAC on).
+    $env:NTSCRT_SHADER_WARMUP = "1"
     $out = & $installer -From $Source -Dest $dest @Extra *>&1 | Out-String
     Write-Host "---- $Name ----"
     Write-Host $out

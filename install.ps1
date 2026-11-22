@@ -15,7 +15,8 @@
 # shader cache (%LOCALAPPDATA%\NTSCRT\cache), so their first use in Resolve doesn't compile
 # them: a few seconds, capped by -WarmupTimeout; any problem there is one line, never a
 # failed install (the plug-in then builds them in the background when first used).
-# -NoWarmup or NTSCRT_SHADER_WARMUP=0 skips it.
+# -NoWarmup or NTSCRT_SHADER_WARMUP=0 skips it; from an administrator PowerShell it is skipped
+# too (the cache is your normal account's) unless NTSCRT_SHADER_WARMUP=1.
 # If the direct download fails it falls back to `gh release download`
 # (GitHub CLI, signed in) or the GITHUB_TOKEN environment variable.
 # A downloaded zip is checked against the release's SHA256SUMS before anything is
@@ -135,7 +136,7 @@ function Invoke-ShaderWarmup([string]$Bundle) {
     if ($NoWarmup) { $why = "-NoWarmup" }
     elseif (@("0", "off", "false") -contains [string]$env:NTSCRT_SHADER_WARMUP) { $why = "NTSCRT_SHADER_WARMUP=$env:NTSCRT_SHADER_WARMUP" }
     elseif ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { $why = "running as SYSTEM" }
-    elseif ((Test-Admin) -and (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -ErrorAction SilentlyContinue).EnableLUA -eq 1) {
+    elseif ($env:NTSCRT_SHADER_WARMUP -ne "1" -and (Test-Admin) -and (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -ErrorAction SilentlyContinue).EnableLUA -eq 1) {
         $why = "PowerShell runs as administrator; the shader cache belongs to your own account"
     }
     elseif (-not (Test-Path -LiteralPath $tool)) { $why = "this version has no warm-up tool" }
