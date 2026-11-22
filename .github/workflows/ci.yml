@@ -34,10 +34,10 @@ jobs:
   windows:
     name: windows (MSVC, Release)
     runs-on: windows-2022
-    # 150, not 90: ctest alone takes ~75 min on the runner (test_ofx ~32 min, test_howl_seek ~30,
-    # test_ofx_screenloop_store ~6), and building, golden images, packaging and the installer smoke
-    # tests come on top.
-    timeout-minutes: 150
+    # The job takes ~54 min (run 45057381250: build 7, ctest -j 4 45, golden 1, packaging and
+    # the installer smoke tests ~1; it was ~99 with serial ctest, run 45016899648): 75 leaves
+    # room for a slow runner without letting a hang run for hours.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
         with:
@@ -96,10 +96,13 @@ jobs:
             build/cargo-ntscrs
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
+      # -j 4: the runner's 4 vCPUs. The long suites are split into parts so they spread, the cases
+      # with time budgets run alone (RUN_SERIAL), and the slowest Screen Loop cases run at their
+      # smaller WARP sizes (docs/TESTING.md "Unit tests in parallel").
       - name: Test
         env:
           NTSCRT_REQUIRE_GPU: "1"   # a missing D3D11 device fails the GPU tests instead of skipping them
-        run: ctest --test-dir build -C Release --output-on-failure -LE golden
+        run: ctest --test-dir build -C Release --output-on-failure -LE golden -j 4
 
       # Golden images (docs/TESTING.md): upstream crt-smoke references and self-references,
       # verbose so every comparison's numbers are in the log. Strict: a missing reference fails.
@@ -315,7 +318,7 @@ jobs:
         if: success() || failure()
         env:
           NTSCRT_REQUIRE_GPU: "1"   # a missing Metal device fails the GPU tests instead of skipping them
-        run: ctest --test-dir build --output-on-failure -LE golden
+        run: ctest --test-dir build --output-on-failure -LE golden -j "$(sysctl -n hw.ncpu)"
 
       - name: Package OFX bundle (universal)
         shell: bash

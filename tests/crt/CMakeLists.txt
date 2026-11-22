@@ -31,3 +31,6 @@ foreach(m unusable background off)
   add_test(NAME test_shader_warmup_${m} COMMAND test_shader_warmup)
   set_tests_properties(test_shader_warmup_${m} PROPERTIES ENVIRONMENT "NTSCRT_TEST_WARMUP=${m};NTSCRT_SHARED_CHAINS=0")
 endforeach()
+# "background" checks what the warm-up does while renders run for 3 s: alone (RUN_SERIAL) and
+# first under ctest -j, so other tests' load doesn't change its timing.
+set_tests_properties(test_shader_warmup_background PROPERTIES RUN_SERIAL TRUE COST 100000)
