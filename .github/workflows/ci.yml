@@ -34,9 +34,9 @@ jobs:
   windows:
     name: windows (MSVC, Release)
     runs-on: windows-2022
-    # The job takes ~55 min (run 45051537481: build 7, ctest -j 4 ~46 before the smaller
-    # default-window cases, golden 1, packaging and installer smoke tests ~3; it was ~99 with
-    # serial ctest): 75 leaves room for a slow runner without letting a hang run for hours.
+    # The job takes ~54 min (run 45057381250: build 7, ctest -j 4 45, golden 1, packaging and
+    # the installer smoke tests ~1; it was ~99 with serial ctest, run 45016899648): 75 leaves
+    # room for a slow runner without letting a hang run for hours.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
