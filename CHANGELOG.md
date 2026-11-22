@@ -14,6 +14,8 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-22
+
 ### Added
 - **The installers prepare the CRT shaders for your graphics card**, so each CRT shader's first frame in Resolve
   comes without a compile wait (they depend on your GPU, driver and system, so they can't ship ready-made). After
@@ -620,7 +622,8 @@ The macOS installer skips Final Cut Pro until a release includes it.
   `%LOCALAPPDATA%\NTSCRT\ntscrt-ofx.log` / `~/Library/Logs/NTSCRT/ntscrt-ofx.log`, rotated at 1 MB.
   `NTSCRT_OFX_LOG=<file|off>` moves or disables it, `NTSCRT_OFX_LOG_VERBOSE=1` logs every frame.
 
-[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.2...v0.5.3
 [0.5.1]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/anthonymendez/NTSCRT-Plugins/compare/v0.4.0...v0.5.0
