@@ -2,6 +2,7 @@
 #
 # Output: <build>/ofx/<Config>/NTSCRT.ofx.bundle/
 #   Contents/Win64/NTSCRT.ofx          (Windows DLL, static CRT)
+#   Contents/Win64/ntscrt-warm.exe     (installers' shader-cache warm-up; MacOS/ntscrt-warm)
 #   Contents/MacOS/NTSCRT.ofx          (macOS; universal when configured with
 #                                       -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64")
 #   Contents/Info.plist                (macOS)
@@ -75,6 +76,21 @@ if(APPLE)
   # OfxGetPlugin/OfxGetNumberOfPlugins carry default visibility (Support lib EXPORT).
   set_target_properties(ntscrt_ofx PROPERTIES BUNDLE FALSE)
 endif()
+
+# ntscrt-warm: the installers' shader-cache warm-up (ofx/warm/ntscrt_warm.cpp), next to
+# the plug-in binary it loads. Built with the plug-in so a packaged bundle always has it.
+add_executable(ntscrt_warm warm/ntscrt_warm.cpp)
+set_target_properties(ntscrt_warm PROPERTIES
+  OUTPUT_NAME ntscrt-warm
+  RUNTIME_OUTPUT_DIRECTORY ${NTSCRT_OFX_BUNDLE}/Contents/${NTSCRT_OFX_ARCHDIR}
+  PDB_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/ofx/$<CONFIG>/pdb)
+if(WIN32)
+  target_link_libraries(ntscrt_warm PRIVATE shell32 ole32 advapi32)  # SHGetKnownFolderPath, token checks
+else()
+  find_package(Threads REQUIRED)
+  target_link_libraries(ntscrt_warm PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+endif()
+add_dependencies(ntscrt_ofx ntscrt_warm)
 
 set(NTSCRT_LIBRASHADER_LIB "" CACHE FILEPATH "Optional librashader .dll/.dylib to copy into the OFX bundle Resources")
 configure_file(Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)

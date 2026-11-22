@@ -14,7 +14,8 @@
 target_sources(ntscrt_core PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/crt.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/crt_libra.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/shader_cache.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/shader_cache.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/shader_warm.cpp)
 # The cache folder's key names the plug-in version (shader_cache.cpp).
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/shader_cache.cpp TARGET_DIRECTORY ntscrt_core
   PROPERTIES COMPILE_DEFINITIONS "NTSCRT_CACHE_VERSION=\"${NTSCRT_VERSION}\"")

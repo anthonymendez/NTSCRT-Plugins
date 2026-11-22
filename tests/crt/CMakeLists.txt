@@ -21,3 +21,13 @@ set_tests_properties(test_shader_cache PROPERTIES ENVIRONMENT "NTSCRT_SHARED_CHA
 add_test(NAME test_shader_cache_off COMMAND test_shader_cache)
 set_tests_properties(test_shader_cache_off PROPERTIES
                      ENVIRONMENT "NTSCRT_SHADER_CACHE=0;NTSCRT_TEST_SHADER_CACHE_OFF=1;NTSCRT_SHARED_CHAINS=0")
+
+# The shader cache warm-up (test_shader_warmup.cpp): each case in a process (and a
+# temporary cache folder) of its own, picked by NTSCRT_TEST_WARMUP.
+ntscrt_add_test(test_shader_warmup test_shader_warmup.cpp)
+target_compile_definitions(test_shader_warmup PRIVATE NTSCRT_RESOURCES_DIR="${NTSCRT_RESOURCES_BUILD_DIR}")
+set_tests_properties(test_shader_warmup PROPERTIES ENVIRONMENT "NTSCRT_TEST_WARMUP=fresh")
+foreach(m unusable background off)
+  add_test(NAME test_shader_warmup_${m} COMMAND test_shader_warmup)
+  set_tests_properties(test_shader_warmup_${m} PROPERTIES ENVIRONMENT "NTSCRT_TEST_WARMUP=${m};NTSCRT_SHARED_CHAINS=0")
+endforeach()

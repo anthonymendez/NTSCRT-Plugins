@@ -11,6 +11,12 @@
 # What it does: downloads the release zip (or uses -From), extracts it to a temp
 # folder, and copies NTSCRT.ofx.bundle into C:\Program Files\Common Files\OFX\Plugins.
 # The copy asks for administrator rights (one UAC prompt). Then restart Resolve.
+# Last, as you (never elevated), it builds the CRT shaders for this PC's GPU into your
+# shader cache (%LOCALAPPDATA%\NTSCRT\cache), so their first use in Resolve doesn't compile
+# them: a few seconds, capped by -WarmupTimeout; any problem there is one line, never a
+# failed install (the plug-in then builds them in the background when first used).
+# -NoWarmup or NTSCRT_SHADER_WARMUP=0 skips it; from an administrator PowerShell it is skipped
+# too (the cache is your normal account's) unless NTSCRT_SHADER_WARMUP=1.
 # If the direct download fails it falls back to `gh release download`
 # (GitHub CLI, signed in) or the GITHUB_TOKEN environment variable.
 # A downloaded zip is checked against the release's SHA256SUMS before anything is
@@ -24,7 +30,9 @@ param(
     [string]$Repo = $(if ($env:NTSCRT_REPO) { $env:NTSCRT_REPO } else { "anthonymendez/NTSCRT-Plugins" }),
     [string]$Dest = (Join-Path $env:CommonProgramFiles "OFX\Plugins"),   # OpenFX folder (override for testing)
     [string]$BaseUrl = "",                # download <BaseUrl>/<asset> + <BaseUrl>/SHA256SUMS instead of the GitHub release (CI tests, mirrors)
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$NoWarmup,                    # don't build the CRT shaders into your shader cache after installing
+    [double]$WarmupTimeout = 300          # seconds the shader warm-up may take
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with the progress bar on PS 5.1
@@ -117,6 +125,46 @@ function Invoke-Swap([string]$Mode, [string]$BundlePath) {
 function Get-BundleVersion([string]$Bundle) {
     $f = Join-Path $Bundle "Contents\Resources\VERSION"
     if (Test-Path -LiteralPath $f) { "v" + (Get-Content -LiteralPath $f -TotalCount 1).Trim() } else { "" }
+}
+# Builds every CRT preset's shaders into the user's shader cache with the installed plug-in's
+# own warm-up tool (Contents\Win64\ntscrt-warm.exe: the same code, GPU, cache key and files as
+# a render in Resolve). As the user running this script, never elevated: the cache is per user.
+# Never fails the install: whatever goes wrong is one line.
+function Invoke-ShaderWarmup([string]$Bundle) {
+    $tool = Join-Path $Bundle "Contents\Win64\ntscrt-warm.exe"
+    $why = ""
+    if ($NoWarmup) { $why = "-NoWarmup" }
+    elseif (@("0", "off", "false") -contains [string]$env:NTSCRT_SHADER_WARMUP) { $why = "NTSCRT_SHADER_WARMUP=$env:NTSCRT_SHADER_WARMUP" }
+    elseif ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { $why = "running as SYSTEM" }
+    elseif ($env:NTSCRT_SHADER_WARMUP -ne "1" -and (Test-Admin) -and (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -ErrorAction SilentlyContinue).EnableLUA -eq 1) {
+        $why = "PowerShell runs as administrator; the shader cache belongs to your own account"
+    }
+    elseif (-not (Test-Path -LiteralPath $tool)) { $why = "this version has no warm-up tool" }
+    if ($why) {
+        Say "Shader warm-up skipped ($why): the plug-in builds the CRT shaders when first used."
+        return
+    }
+    Say "Building the CRT shaders for this PC's GPU (one time, at most $WarmupTimeout s)"
+    try {
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $tool
+        $psi.Arguments = "--timeout " + $WarmupTimeout.ToString([Globalization.CultureInfo]::InvariantCulture)
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.CreateNoWindow = $true
+        $p = [Diagnostics.Process]::Start($psi)
+        # The tool stops itself at the time limit, which ends its output.
+        while ($null -ne ($line = $p.StandardOutput.ReadLine())) { Write-Host "    $line" }
+        if (-not $p.WaitForExit(30000)) { $p.Kill(); throw "the warm-up tool didn't exit" }
+        switch ($p.ExitCode) {
+            0 { Say "CRT shaders ready." }
+            1 { Say "Shader warm-up didn't run (see above): the plug-in builds the CRT shaders when first used." }
+            3 { Say "Shader warm-up stopped at its time limit: the plug-in builds the rest when first used." }
+            default { Say "Shader warm-up incomplete (exit $($p.ExitCode), see above): the plug-in builds what's missing when first used." }
+        }
+    } catch {
+        Say "Shader warm-up skipped ($($_.Exception.Message)): the plug-in builds the CRT shaders when first used."
+    }
 }
 function Show-ResolveNote([string]$What) {
     if (Get-Process -Name "Resolve" -ErrorAction SilentlyContinue) {
@@ -269,6 +317,7 @@ try {
     else { Say "Installing NTSCRT $newVer to $Target (administrator prompt)" }
     Invoke-Swap "install" $bundle
     if (-not (Test-Path (Join-Path $Target "Contents\Win64\NTSCRT.ofx"))) { throw "Install didn't complete." }
+    Invoke-ShaderWarmup $Target
     Say "Installed NTSCRT $newVer. (Re)start DaVinci Resolve: Effects > OpenFX > Filters > NTSCRT."
 } finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $work

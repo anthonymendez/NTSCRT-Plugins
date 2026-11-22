@@ -432,6 +432,12 @@ void CrtStage::flush() {
     for (auto &[k, c] : impl_->chains) c.last_frame = -1000;
 }
 
+std::vector<std::pair<std::string, std::string>> crt_bundled_chain_files() {
+    std::vector<std::pair<std::string, std::string>> v;
+    for (const auto &p : kPresets) v.emplace_back(p.id, chain_file(p.path));
+    return v;
+}
+
 int CrtStage::fallback_status() const { return impl_->fb_status; }
 const std::string &CrtStage::fallback_reason() const { return impl_->fb_reason; }
 size_t CrtStage::chain_load_attempts() const { return impl_->attempts; }

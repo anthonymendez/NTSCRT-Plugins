@@ -286,6 +286,51 @@ NTSCRT_API ntscrt_status ntscrt_host_gpu_write(ntscrt_instance *inst, const ntsc
  * rendering); otherwise GPU work shows up in the phase that waits for it. */
 NTSCRT_API const char *ntscrt_last_timings(ntscrt_instance *inst);
 
+/* ---- CRT shader cache warm-up -------------------------------------------
+ * librashader compiles a CRT preset's shaders the first time a chain for it is
+ * built, and keeps them in a per-user cache folder keyed by the plug-in version,
+ * librashader, the GPU and its driver (docs/ENVIRONMENT.md, NTSCRT_SHADER_CACHE).
+ * These functions fill that folder ahead of the first render, building every
+ * bundled preset on the device and with the chain files a render uses. */
+
+/* One line of progress ("royale: 412 ms (cache found 0 compiled 34)", then a
+ * summary). UTF-8, valid during the call. */
+typedef void (*ntscrt_warm_progress_fn)(void *user, const char *line);
+
+typedef struct ntscrt_warm_result {
+    int32_t presets;   /* bundled presets */
+    int32_t built;     /* built (their shaders now in the cache) */
+    int32_t failed;
+    int32_t cache_on;  /* 0: the cache is off or unusable, nothing was built */
+    uint64_t found;    /* shader objects read from the cache */
+    uint64_t compiled; /* shader objects compiled (and written to it) */
+    double ms;
+} ntscrt_warm_result;
+
+/* Builds every bundled preset into the cache, now, on the calling thread (and
+ * librashader's thread pool), with the core's own GPU device (the one
+ * ntscrt_create uses without a native_device). For installers (an installer
+ * runs it as the user who will render, never elevated: the cache is per user).
+ * NTSCRT_OK: every preset is in the cache, or the cache is off (result->cache_on
+ * 0; nothing to do). NTSCRT_ERR_GPU: no GPU device. NTSCRT_ERR_MISSING_RESOURCE:
+ * librashader or a preset file missing. NTSCRT_ERR_INTERNAL: a preset failed to
+ * build. Never throws; result may be NULL. */
+NTSCRT_API ntscrt_status ntscrt_warm_shader_cache(const char *resource_dir, ntscrt_warm_progress_fn progress,
+                                                  void *user, ntscrt_warm_result *result);
+
+/* The same, in the background, for hosts to call when an effect instance is
+ * created (not at load or describe time: a host's plug-in scan shouldn't
+ * compile): on the instance's device, one low-priority thread, starting a few
+ * seconds later and building a preset only while no render call has run for a
+ * second. Its shader builds never use the thread pool renders compile on, nor
+ * hold a lock renders take. Nothing happens if the cache folder already holds
+ * every preset (warm.txt), if it ran in this process before, or with
+ * NTSCRT_SHADER_WARMUP=0. Returns at once; `progress` (may be NULL) is called
+ * from the background thread until the last ntscrt_destroy, which stops the
+ * warm-up and waits for the preset being built. Pictures don't change. */
+NTSCRT_API void ntscrt_warm_shader_cache_background(ntscrt_instance *inst, ntscrt_warm_progress_fn progress,
+                                                    void *user);
+
 #ifdef __cplusplus
 }
 #endif

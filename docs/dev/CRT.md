@@ -153,6 +153,45 @@ The default look's last frame is byte-identical before and after (`bench_transfe
 differs (1080p: 4.8% of 8-bit values, at most 175/255, mostly in the moving head-switching band at the bottom,
 where the old one showed the previous frames' noise).
 
+## Shader cache warm-up (2026-11-22)
+
+The shader cache (`shader_cache.h`) is keyed by the plug-in version, librashader, `d3dcompiler_47.dll` and the GPU
+and driver (macOS: the OS release), so it can't ship pre-built. Two things fill it ahead of a render
+(`shader_warm.h`): both build every bundled preset's chain (`crt_bundled_chain_files()`: the chain files a render
+loads, `crtsim-single` for Sim) with `create_chain(..., compile_only)` on the render device, through the same
+`configure_shader_cache`, and throw it away; a complete run writes `warm.txt` into the key folder.
+
+- **Installers:** `ntscrt-warm` (`ofx/warm/`, in the bundle next to the plug-in) loads the plug-in binary and calls
+  its `ntscrt_ofx_warm_shader_cache` (`ntscrt_warm_shader_cache`: the core's own shared device, like an instance
+  without a native device). `install.ps1`, the MSI (an impersonated deferred action) and `install.sh` / the `.pkg`
+  (`launchctl asuser` + `sudo -u` the console user) run it as the user, never elevated / root; the tool refuses
+  SYSTEM and root itself, and on Windows takes LOCALAPPDATA from the user's known folder. 5-minute cap (the tool
+  stops itself); any failure is one line. Measured: 0.8-1.4 s for all seven, cold, on an RTX 5090.
+- **Background:** `ntscrt_warm_shader_cache_background`, called by the OpenFX plug-in when it creates an instance
+  (Resolve's plug-in scan only loads and describes). Once per process; skipped when `warm.txt` lists the current
+  chain files and the folder still holds that many objects. A thread waits `NTSCRT_SHADER_WARMUP_DELAY_MS` (3 s),
+  then before each preset until no render call is running and none ended in the last `NTSCRT_SHADER_WARMUP_IDLE_MS`
+  (1 s): `warmup::RenderScope` in `ntscrt_render_cpu` / `_metal` / `_host_gpu`. Each chain is built through
+  `ntscrt_libra_run_isolated` (`rust/librashader-patch/pool.rs`): on a private one-thread rayon pool at background
+  priority, so its `into_par_iter` work never queues in the global pool render chains compile on; compile-only
+  chains take no device context lock (D3D11: the deferred context's command list is dropped; nobody frames them).
+  The last `ntscrt_destroy` stops it and waits for the preset being built (Royale cold on that one thread: ~1.1 s).
+  Not done: pre-building the in-memory chains (~70 MB CPU + 20 MB GPU each, and building them for the shared
+  registry would hold its lock and the context lock while renders want them); FxPlug doesn't call it yet; the
+  installer warms the default adapter only (a laptop whose Resolve runs on the other GPU is covered by the
+  background warm-up).
+
+Headless Resolve, `--only firstframe`, 1080p, RTX 5090 (render ms / chain build ms):
+
+| | aperture | easymode | glow_gauss | glow_lanczos | hyllian | royale | sim |
+|---|---|---|---|---|---|---|---|
+| empty cache | 250 / 103 | 33 / 27 | 61 / 46 | 24 / 15 | 98 / 79 | 594 / 567 | 59 / 40 |
+| after `ntscrt-warm` (found all, compiled 0) | 166 / 22 | 11 / 4 | 21 / 9 | 18 / 9 | 33 / 13 | 186 / 158 | 27 / 10 |
+
+A new effect's first frame (CRT off): 26 ms empty cache, 25 ms warmed, 21 ms while the background warm-up
+(no delay, no idle wait) was compiling beside it; 28 ms with its defaults (it waited, then was stopped when the
+session quit, 0 presets built).
+
 ## Tests
 
 - `test_crt_order`: for each bundled preset (default look and CRT alone) and two sim looks with the feedback

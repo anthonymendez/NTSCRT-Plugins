@@ -2508,3 +2508,61 @@ TEST_CASE("first frames at 1080p (timings)" * doctest::skip(std::getenv("NTSCRT_
         ++at;
     }
 }
+
+// ctest test_ofx_after_warmup: the bundle's ntscrt-warm tool (the installers' warm-up) has
+// just filled NTSCRT_SHADER_CACHE in another process. This plug-in binary finds it
+// complete: every CRT preset's first render compiles nothing, and its background warm-up
+// (NTSCRT_SHADER_WARMUP=1 here) sees warm.txt and does nothing.
+TEST_CASE("shader warm-up: after the installer's warm-up no preset compiles" *
+          doctest::skip(std::getenv("NTSCRT_TEST_AFTER_WARMUP") == nullptr)) {
+    const size_t log_start = read_log().size();
+    Fixture f;
+    f.create();
+    mock::Clip &src = *f.inst->clips[kOfxImageEffectSimpleSourceClipName];
+    mock::Clip &dst = *f.inst->clips[kOfxImageEffectOutputClipName];
+    const int w = 320, h = 240;
+    src.width = dst.width = w;
+    src.height = dst.height = h;
+    src.any_frame.assign(size_t(w) * h * 4, 0.5f);
+    dst.any_frame.assign(src.any_frame.size(), 0.f);
+    src.any_frame_last = dst.any_frame_last = 1000;
+    src.props.set(kOfxImageEffectPropFrameRange, {0.0, 1000.0});
+    auto render = [&](double t) {
+        mock::PropSet in;
+        in.set(kOfxPropTime, {t});
+        in.set(kOfxImageEffectPropFieldToRender, {std::string(kOfxImageFieldNone)});
+        in.set(kOfxImageEffectPropRenderWindow, {0, 0, w, h});
+        in.set(kOfxImageEffectPropRenderScale, {1.0, 1.0});
+        REQUIRE(f.host.action(f.plug, kOfxImageEffectActionRender, f.inst.get(), &in) == kOfxStatOK);
+    };
+    f.param("crt_enabled")->v[0] = 1;
+    REQUIRE(f.changed("crt_enabled", 1) == kOfxStatOK);
+    mock::Param *crt = f.param("crt_preset");
+    const int options = crt->props.dim(kOfxParamPropChoiceOption);
+    int presets = 0;
+    for (int i = 0; i < options; ++i) {
+        const std::string label = crt->props.s(kOfxParamPropChoiceOption, i);
+        // GitHub's macOS VM GPU hangs rendering these two (see ci_virtual_gpu).
+        if (ci_virtual_gpu() && (label == "CRT Royale" || label == "CRT Sim")) continue;
+        ++presets;
+        crt->v[0] = i;
+        REQUIRE(f.changed("crt_preset", 10 + i) == kOfxStatOK);
+        render(10 + i);
+    }
+    // The background warm-up's verdict (it starts with the instance, after NTSCRT_SHADER_WARMUP_DELAY_MS).
+    std::string log;
+    for (int i = 0; i < 200; ++i) {
+        log = read_log().substr(log_start);
+        if (log.find("shader warm-up: ") != std::string::npos) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    int notes = 0;
+    for (size_t at = log.find("crt_compile="); at != std::string::npos; at = log.find("crt_compile=", at + 1)) {
+        const std::string note = log.substr(at, log.find(')', at) + 1 - at);
+        MESSAGE(note);
+        CHECK_MESSAGE(note.find(" compiled 0)") != std::string::npos, note);
+        ++notes;
+    }
+    CHECK(notes >= presets);  // one chain per preset (Screen Loop off)
+    CHECK_MESSAGE(log.find("shader warm-up: the cache already has every preset") != std::string::npos, log);
+}

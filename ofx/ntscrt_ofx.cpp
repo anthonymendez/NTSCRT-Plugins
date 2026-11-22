@@ -470,6 +470,12 @@ public:
 
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, g_.res_dir.c_str()};
         if (ntscrt_create(&ci, &inst_) != NTSCRT_OK) inst_ = nullptr;
+        // Fill the CRT shader cache for every preset if it lacks some (a new driver, a
+        // bundle copied by hand): in the background, between renders, once per process.
+        // Here, not at load / describe: Resolve's plug-in scan never creates an instance.
+        if (inst_)
+            ntscrt_warm_shader_cache_background(
+                inst_, [](void *, const char *line) { dlog::write(line); }, nullptr);
         id_ = ++instance_count();
         {
             std::ostringstream o;
@@ -2258,6 +2264,25 @@ void NtscrtFactory::describeInContext(OFX::ImageEffectDescriptor &desc, OFX::Con
     for (const auto &p : g.schema.params) {
         auto it = groups.find(p.group);
         define_value_param(desc, p, it == groups.end() ? nullptr : it->second);
+    }
+}
+
+// For the installers (ofx/warm/ntscrt_warm.cpp, which loads this binary): fills the
+// CRT shader cache for every preset now, with this binary's own resources, device and
+// cache key, so the first render in Resolve finds them. Returns an ntscrt_status, or -1
+// when the shader cache is off or can't be written (nothing built).
+#ifdef _WIN32
+#define NTSCRT_OFX_EXPORT extern "C" __declspec(dllexport)
+#else
+#define NTSCRT_OFX_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
+NTSCRT_OFX_EXPORT int32_t ntscrt_ofx_warm_shader_cache(ntscrt_warm_progress_fn progress, void *user) {
+    try {
+        ntscrt_warm_result r{};
+        const ntscrt_status st = ntscrt_warm_shader_cache(resource_dir().c_str(), progress, user, &r);
+        return st == NTSCRT_OK && !r.cache_on ? -1 : int32_t(st);
+    } catch (...) {
+        return int32_t(NTSCRT_ERR_INTERNAL);
     }
 }
 

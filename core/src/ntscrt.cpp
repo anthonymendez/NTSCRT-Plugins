@@ -31,6 +31,7 @@
 #include "host_gpu.h"
 #include "pixel_convert.h"
 #include "testing.h"
+#include "warmup.h"
 
 using namespace ntscrt;
 
@@ -502,9 +503,18 @@ ntscrt_status ntscrt_create(const ntscrt_create_info *info, ntscrt_instance **ou
 void ntscrt_destroy(ntscrt_instance *inst) {
     if (!inst) return;
     delete inst;  // drops its reference to the shared device (freed with the last one)
-    // The last instance: join the Digital stage's worker threads now, from
-    // ordinary code, rather than ever in a static destructor (DLL unload).
-    if (live_instances().fetch_sub(1) == 1) digital::shutdown_threads();
+    // The last instance: join the Digital stage's worker threads (and the background
+    // shader warm-up) now, from ordinary code, rather than ever in a static
+    // destructor (DLL unload).
+    if (live_instances().fetch_sub(1) == 1) {
+        warmup::stop_background();
+        digital::shutdown_threads();
+    }
+}
+
+void ntscrt_warm_shader_cache_background(ntscrt_instance *inst, ntscrt_warm_progress_fn progress, void *user) {
+    if (inst && inst->dev && inst->gpu_gone.empty())
+        warmup::start_background(inst->dev, inst->resource_dir, progress, user);
 }
 
 const char *ntscrt_last_error(ntscrt_instance *inst) { return inst ? inst->last_error.c_str() : ""; }
@@ -1318,6 +1328,7 @@ const char *ntscrt_last_timings(ntscrt_instance *inst) { return inst ? inst->tim
 ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args *args, const ntscrt_image *src,
                                 ntscrt_image *dst) {
     if (!inst || !args || !src || !dst || !src->data || !dst->data) return NTSCRT_ERR_INVALID_ARG;
+    const warmup::RenderScope rendering;  // the background shader warm-up waits
     const bool premult = args->source_premultiplied != 0;
     const bool high = dst->format == NTSCRT_RGBA16 || dst->format == NTSCRT_RGBA16F || dst->format == NTSCRT_RGBA32F;
     PhaseTimes &pt = inst->times;
@@ -1417,6 +1428,7 @@ ntscrt_status ntscrt_render_cpu(ntscrt_instance *inst, const ntscrt_render_args 
 ntscrt_status ntscrt_render_metal(ntscrt_instance *inst, const ntscrt_render_args *args, void *src_texture,
                                   void *dst_texture, void *command_buffer) {
     if (!inst || !args || !src_texture || !dst_texture) return NTSCRT_ERR_INVALID_ARG;
+    const warmup::RenderScope rendering;  // the background shader warm-up waits
     if (!inst->dev || inst->dev->backend() != gpu::Backend::Metal)
         return fail(inst, NTSCRT_ERR_GPU, "ntscrt_render_metal: instance has no Metal device");
     gpu::Device &dev = *inst->dev;

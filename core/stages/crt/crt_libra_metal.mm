@@ -18,6 +18,8 @@ namespace {
 class MetalChain final : public Chain {
 public:
     MetalChain(Library &lib, gpu::Device &dev, const std::string &preset_path) : lib_(lib), dev_(dev) {
+        // (A compile-only chain is built the same way: creating it commits its own
+        // command buffer on the queue and takes no lock; see ~MetalChain.)
         create_ = reinterpret_cast<PFN_libra_mtl_filter_chain_create>(lib.sym("libra_mtl_filter_chain_create"));
         frame_ = reinterpret_cast<PFN_libra_mtl_filter_chain_frame>(lib.sym("libra_mtl_filter_chain_frame"));
         set_param_ = reinterpret_cast<PFN_libra_mtl_filter_chain_set_param>(lib.sym("libra_mtl_filter_chain_set_param"));
@@ -34,6 +36,10 @@ public:
         }
     }
     ~MetalChain() override {
+        if (!framed_) {  // never ran a frame (a shader-cache warm-up's): nobody else uses it
+            if (chain_) free_(&chain_);
+            return;
+        }
         std::lock_guard<std::recursive_mutex> lock(dev_.context_mutex());
         if (chain_) free_(&chain_);
     }
@@ -44,6 +50,7 @@ public:
         // librashader encodes into the device's current command buffer: hold
         // the device's lock until it's done (other threads may share it).
         std::lock_guard<std::recursive_mutex> lock(dev_.context_mutex());
+        framed_ = true;
         id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)dev_.native_context();
         libra_viewport_t vp{0.f, 0.f, uint32_t(out.desc().width), uint32_t(out.desc().height)};
         frame_mtl_opt_t opt{};
@@ -66,6 +73,7 @@ private:
     Library &lib_;
     gpu::Device &dev_;
     libra_mtl_filter_chain_t chain_ = nullptr;
+    bool framed_ = false;  // frame() ran (under the context lock)
     PFN_libra_mtl_filter_chain_create create_ = nullptr;
     PFN_libra_mtl_filter_chain_frame frame_ = nullptr;
     PFN_libra_mtl_filter_chain_set_param set_param_ = nullptr;
@@ -74,7 +82,7 @@ private:
 
 }  // namespace
 
-std::unique_ptr<Chain> create_metal_chain(Library &lib, gpu::Device &dev, const std::string &preset_path) {
+std::unique_ptr<Chain> create_metal_chain(Library &lib, gpu::Device &dev, const std::string &preset_path, bool) {
     return std::make_unique<MetalChain>(lib, dev, preset_path);
 }
 

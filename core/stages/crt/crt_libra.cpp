@@ -187,19 +187,19 @@ void Library::shader_cache_stats(uint64_t &hits, uint64_t &misses, uint64_t &wri
         f(&hits, &misses, &writes);
 }
 
-std::unique_ptr<Chain> Library::create_chain(gpu::Device &dev, const std::string &preset_path) {
+std::unique_ptr<Chain> Library::create_chain(gpu::Device &dev, const std::string &preset_path, bool compile_only) {
     shader_cache_on = configure_shader_cache(*this, dev).on;
-    if (dev.backend() == gpu::Backend::D3D11) return create_d3d11_chain(*this, dev, preset_path);
-    return create_metal_chain(*this, dev, preset_path);
+    if (dev.backend() == gpu::Backend::D3D11) return create_d3d11_chain(*this, dev, preset_path, compile_only);
+    return create_metal_chain(*this, dev, preset_path, compile_only);
 }
 
 #ifndef _WIN32
-std::unique_ptr<Chain> create_d3d11_chain(Library &, gpu::Device &, const std::string &) {
+std::unique_ptr<Chain> create_d3d11_chain(Library &, gpu::Device &, const std::string &, bool) {
     throw std::runtime_error("librashader D3D11 runtime is Windows-only");
 }
 #endif
 #ifndef __APPLE__
-std::unique_ptr<Chain> create_metal_chain(Library &, gpu::Device &, const std::string &) {
+std::unique_ptr<Chain> create_metal_chain(Library &, gpu::Device &, const std::string &, bool) {
     throw std::runtime_error("librashader Metal runtime is macOS-only");
 }
 #endif
