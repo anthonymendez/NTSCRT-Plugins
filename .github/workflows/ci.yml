@@ -34,10 +34,10 @@ jobs:
   windows:
     name: windows (MSVC, Release)
     runs-on: windows-2022
-    # 150, not 90: ctest alone takes ~75 min on the runner (test_ofx ~32 min, test_howl_seek ~30,
-    # test_ofx_screenloop_store ~6), and building, golden images, packaging and the installer smoke
-    # tests come on top.
-    timeout-minutes: 150
+    # The job takes ~55 min (run 45051537481: build 7, ctest -j 4 ~46 before the smaller
+    # default-window cases, golden 1, packaging and installer smoke tests ~3; it was ~99 with
+    # serial ctest): 75 leaves room for a slow runner without letting a hang run for hours.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
         with:

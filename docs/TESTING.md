@@ -153,9 +153,10 @@ ctest --test-dir <build> -C Release -V -L golden                          # the 
 Screen Loop cases run smaller (`tests/test_sizes.h`), with the same checks: `test_howl_seek` renders 192x54
 frames instead of 192x108 and test_ofx's Screen Loop cases 128x36 instead of 128x72 (32:9: the loop's feedback
 picture is ~1300-2000 pixels wide whatever the frame's width, so on WARP its cost goes with height over width),
-and test_ofx's far playheads are 490 instead of 1850 (edits) and 600 (aborts): also past the first two windows,
-with the shortest re-run there (the expected counts are computed from the playhead). On a hardware GPU (your
-PC, the Mac runners) they run full size. `NTSCRT_TEST_FULL_SIZE=1` forces the full sizes on WARP, `0` the CI
+test_ofx's far playheads are 490 instead of 1850 (edits) and 600 (aborts): also past the first two windows,
+with the shortest re-run there (the expected counts are computed from the playhead), and test_howl_seek's two
+default-window cases use a 48-frame window instead of 240, the frames they seek to scaled the same way. On a
+hardware GPU (your PC, the Mac runners) they run full size. `NTSCRT_TEST_FULL_SIZE=1` forces the full sizes on WARP, `0` the CI
 sizes on a GPU. Before a merge run both on Windows:
 ```powershell
 $env:NTSCRT_REQUIRE_GPU=1; $env:NTSCRT_GOLDEN_STRICT=1

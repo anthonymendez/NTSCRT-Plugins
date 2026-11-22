@@ -184,29 +184,40 @@ TEST_CASE("Screen Loop: seeks and scrubbing render what playing from frame 0 ren
     }
 }
 
+// The window of the two cases below: the default (240) on a hardware GPU; on WARP (CI) 48, the
+// default scaled down by 5 with the frames they seek to (tests/test_sizes.h): the same windows
+// and positions in them, a fifth of the frames to render.
+int64_t big_window() {
+    static const int64_t b = testsizes::pick<int64_t>(240, 48);
+    return b;
+}
+
 TEST_CASE("Screen Loop: default window, a seek past two windows and back") {
-    const std::string fb = feedback("Bottom to top", 240);
+    const int64_t B = big_window(), n = 2 * B + 1;  // 481 with the default window
+    const std::string fb = feedback("Bottom to top", int(B));
     std::vector<uint8_t> want;
     {
         Inst a("{}", fb);
         if (!a.ok) return;
-        for (int64_t f = 0; f <= 481; ++f) {
+        for (int64_t f = 0; f <= n; ++f) {
             auto out = a.render(f);
-            if (f == 481) want = out;
+            if (f == n) want = out;
         }
     }
     Inst b("{}", fb);
-    CHECK(b.render(481) == want);  // window start 240
+    CHECK(b.render(n) == want);  // window start B
 }
 
 TEST_CASE("Screen Loop: a far cold seek has a bounded cost and holds one host frame at a time") {
-    // Default window (240 frames): a cold seek to N re-runs the loop from its window start
+    // Default window (240 frames; on WARP 48: big_window()): a cold seek to N re-runs the loop from its window start
     // A(N) = (floor(N / 240) - 1) * 240, so it fetches at most 2 * 240 - 1 earlier source frames,
     // never one before A(N), and gives each host image back before asking for the next one (a
     // host's UHD float frame is ~133 MB; Resolve keeps every frame fetched: docs/dev/SCREENLOOP-MEMORY.md).
     // The frames after it continue: no fetch at all, window starts included.
-    const std::string fb = feedback("Bottom to top", 240);
-    for (int64_t n : {int64_t(1850), int64_t(2159)}) {
+    const int64_t B = big_window();
+    const std::string fb = feedback("Bottom to top", int(B));
+    // 1850 and 2159 with the default window: 170 frames into window 7, the last frame of window 8.
+    for (int64_t n : {7 * B + B * 170 / 240, 9 * B - 1}) {
         CAPTURE(n);
         set_env("NTSCRT_SOURCE_CACHE_MB", "0");  // nothing served from the cache: every history frame is fetched
         set_env("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
@@ -215,11 +226,11 @@ TEST_CASE("Screen Loop: a far cold seek has a bounded cost and holds one host fr
         set_env("NTSCRT_SCREENLOOP_SOURCE_MB", nullptr);
         if (!a.ok) return;
         a.render(n);
-        const int64_t anchor = (n / 240 - 1) * 240;
+        const int64_t anchor = (n / B - 1) * B;
         CHECK(a.src.first == anchor);
         CHECK(a.src.last == n - 1);
         CHECK(a.src.fetches == n - anchor);  // each history frame once (the frame itself is the render's source)
-        CHECK(a.src.fetches < 2 * 240);
+        CHECK(a.src.fetches < 2 * B);
         CHECK(a.src.held_max == 1);
         CHECK(a.src.img.empty());  // all given back
         // What the host is told it may be asked for covers exactly that.
@@ -233,7 +244,7 @@ TEST_CASE("Screen Loop: a far cold seek has a bounded cost and holds one host fr
         CHECK(first == anchor);
         // Playing on across the next window start (1920, 2160): its run went along with the
         // one shown, so nothing is fetched again, and the frames are the cold seek's.
-        const int64_t last = (n / 240 + 1) * 240 + 5;
+        const int64_t last = (n / B + 1) * B + 5;
         std::vector<uint8_t> played;
         for (int64_t f = n + 1; f <= last; ++f) {
             CAPTURE(f);

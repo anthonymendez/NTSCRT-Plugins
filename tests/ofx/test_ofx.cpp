@@ -777,6 +777,10 @@ static EditTimings edits_at_frame(double T) {
 TEST_CASE("high frame number: renders after edits stay bounded") {
     const char *bench_frame = std::getenv("NTSCRT_BENCH_FRAME");  // another timeline position
     const double T = bench_frame ? std::atof(bench_frame) : 216067;
+    // Untimed first: the process's first renders (device, shader chains, the plug-in's statics)
+    // would otherwise count against the hour-in ones. ctest runs this case in a process of its
+    // own (test_ofx.timing), not after the cases before it in the file that used to warm it up.
+    (void)edits_at_frame(101);
     const EditTimings hi = edits_at_frame(T);
     if (T < 100000) return;  // no hour to simulate: nothing to compare
     // The same edits two seconds into the timeline: what they cost whatever the frame (CRT
