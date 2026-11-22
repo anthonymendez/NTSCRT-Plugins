@@ -89,6 +89,7 @@ Setting one for Resolve:
 | `NTSCRT_RESOURCE_DIR` | `test_golden` | Core resource folder (shaders, presets). |
 | `NTSCRT_TESTASSETS_DIR` | `test_golden` | Upstream test images (default `upstream/NTSCRT/TestAssets`). |
 | `NTSCRT_TEST_EXHAUSTIVE` | `test_convert_threads` | `1`: check the rounding of every float in 0…1 instead of a sample. |
+| `NTSCRT_TEST_FULL_SIZE` | `test_howl_seek`, `test_ofx` (Screen Loop cases) | `1`: their full sizes (the default on a hardware GPU); `0`: the smaller CI sizes (the default on WARP). Same checks either way ([TESTING.md](TESTING.md#unit-tests-in-parallel-developers-a-build)). |
 | `NTSCRT_TEST_OFX_BINARY` | `test_ofx` | Run the mock-host tests against another build of `NTSCRT.ofx` (timings before / after). |
 | `RESOLVE_SCRIPT_API`, `RESOLVE_SCRIPT_LIB` | `tests/resolve/run_resolve_tests.py` | Resolve's scripting folder and `fusionscript` library, when not in the default place. |
 | `OFX_PLUGIN_PATH` | OpenFX hosts | Extra plug-in folders (the standard OpenFX variable; the dev launchers use it). The doctor reports it when set. |

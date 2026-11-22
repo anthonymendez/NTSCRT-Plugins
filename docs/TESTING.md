@@ -124,6 +124,48 @@ Lines that mention a project or file name containing "NTSCRT" are kept as they a
 Nothing is uploaded anywhere. Look through it if you like, then send it along with a description of
 what went wrong.
 
+### Unit tests in parallel (developers, a build)
+`ctest` runs the doctest suites one after the other by default. Run them side by side with `-j` (CI uses
+`-j 4` on Windows, `-j 3` on macOS):
+```bash
+ctest --test-dir <build> -C Release --output-on-failure -j 8 -LE golden   # Windows (macOS: no -C Release)
+ctest --test-dir <build> -C Release -V -L golden                          # the golden images, as CI does
+```
+- The long suites are split into several ctest entries so `-j` can spread them: `test_ofx.sl_edits`,
+  `test_ofx.screenloop`, ..., `test_ofx.rest`, the same for `test_ofx_screenloop_store`, `test_howl_seek`,
+  `test_howlaround`, `test_ntsc_gpu`, `test_hostparams` and `test_digital_gpu` (`ntscrt_split_test` in
+  `tests/CMakeLists.txt`: each part is a doctest `--test-case=` filter, `.rest` is everything else).
+  `ctest -R test_ofx` still runs all of test_ofx. Each split suite has a `<suite>.split_check` entry
+  (`tests/split_check.cmake`) that fails unless the parts and the rest run every test case of the executable
+  exactly once: a new case lands in `.rest` by itself; a renamed one that no part matches any more fails the check.
+- Cases with a time budget or a wait (the `high frame number` and *debug logging for all effects* cases of
+  test_ofx, the debug switch's poll interval in test_hostparams, `test_shader_warmup_background`) are
+  `RUN_SERIAL`: ctest runs them with nothing else running, so a busy machine can't fail them.
+- Tests running at once don't share files: test_ofx's log and settings folder have the process id in their
+  names, the shader warm-up and shader cache tests make their own temporary folders, and the build's
+  `test-shader-cache` folder is written whole-file-then-rename (safe for several processes). Each test process
+  has its own GPU device. Two `ctest` runs of the **same** build folder at once still collide (the CRT order
+  hashes, the warm-up tool's folder): give each its own build folder.
+- To see what `-j` buys on a 4-CPU machine like GitHub's runner, pin ctest to 4 CPUs and force WARP (no GPU),
+  from PowerShell: `$env:NTSCRT_D3D11_WARP=1; cmd /c start /affinity F /b /wait ctest ... -j 4`.
+
+**Full and CI sizes.** On a software rasterizer (WARP: GitHub's Windows runners have no GPU) the slowest
+Screen Loop cases run smaller (`tests/test_sizes.h`), with the same checks: `test_howl_seek` renders 192x54
+frames instead of 192x108 and test_ofx's Screen Loop cases 128x36 instead of 128x72 (32:9: the loop's feedback
+picture is ~1300-2000 pixels wide whatever the frame's width, so on WARP its cost goes with height over width),
+and test_ofx's far playheads are 490 instead of 1850 (edits) and 600 (aborts): also past the first two windows,
+with the shortest re-run there (the expected counts are computed from the playhead). On a hardware GPU (your
+PC, the Mac runners) they run full size. `NTSCRT_TEST_FULL_SIZE=1` forces the full sizes on WARP, `0` the CI
+sizes on a GPU. Before a merge run both on Windows:
+```powershell
+$env:NTSCRT_REQUIRE_GPU=1; $env:NTSCRT_GOLDEN_STRICT=1
+ctest --test-dir <build> -C Release --output-on-failure -j 8                          # GPU, full sizes
+$env:NTSCRT_D3D11_WARP=1; $env:CUDA_VISIBLE_DEVICES=-1                                # as on the runner:
+ctest --test-dir <build> -C Release --output-on-failure -j 8 -LE golden              # WARP, CI sizes
+```
+(`CUDA_VISIBLE_DEVICES=-1`: test_ofx's fake CUDA host case expects CUDA frames on the GPU it renders on; with
+WARP forced on a PC with an NVIDIA card it would see the CUDA device but render on WARP and fail.)
+
 ### GPU vs CPU parity (developers, a build, Resolve Studio)
 The plug-in has three GPU routes that are on by default (fast transfers, host GPU frames, the NTSC signal on the
 GPU); `run_resolve_tests.py --parity` checks in Resolve itself that they render what the CPU version renders.

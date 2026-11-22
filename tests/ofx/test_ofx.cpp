@@ -5,6 +5,7 @@
 #include <ntscrt/ntscrt.h>
 
 #include "mock_host.h"
+#include "../test_sizes.h"
 #include "ntscrt_host/params.h"
 #include "../../core/params/timeline.h"
 #include "../../core/stages/digital/migrate.h"
@@ -1896,6 +1897,11 @@ TEST_CASE("GPU render (fake CUDA host) matches the CPU render") {
 // render scale. A history re-run fetches T - A(T) earlier source frames; "replays" counts the renders
 // that fetched any earlier frame. Pictures are checked against a render from clean caches.
 namespace {
+// Screen Loop cases' frame height: 128x72 on a hardware GPU, 128x36 (32:9) on WARP (CI). The
+// loop's feedback picture is ~1300 pixels wide whatever the frame's width, so on a software
+// rasterizer its cost goes with height / width (tests/test_sizes.h); nothing checked depends on it.
+int loop_h() { return testsizes::pick(72, 36); }
+
 struct LoopEditFixture : ProtoFixture {
     LoopEditFixture(int w_, int h_) {
         w = w_;
@@ -2107,17 +2113,12 @@ std::string loop_steps_table(const std::vector<LoopEditStep> &steps, double T) {
 }
 }  // namespace
 
-TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history only when they must") {
+// The playheads are two test cases (ctest runs them side by side: tests/ofx/CMakeLists.txt): frame
+// 100, inside the first two windows (the loop runs from frame 0), and a far one.
+static void screenloop_edits(const std::vector<double> &frames) {
     // NTSCRT_BENCH_SL_SIZE=WxH: another frame size (timings); NTSCRT_BENCH_SL_FRAMES=a,b: other playheads.
-    int w = 128, h = 72;
+    int w = 128, h = loop_h();
     if (const char *e = std::getenv("NTSCRT_BENCH_SL_SIZE"); e && *e) std::sscanf(e, "%dx%d", &w, &h);
-    // With the store on (its own ctest run) one playhead: its checks don't depend on how far in it is.
-    std::vector<double> frames = loop_store_on() ? std::vector<double>{100} : std::vector<double>{100, 1850};
-    if (const char *e = std::getenv("NTSCRT_BENCH_SL_FRAMES"); e && *e) {
-        frames.clear();
-        std::istringstream in(e);
-        for (std::string x; std::getline(in, x, ',');) frames.push_back(std::atof(x.c_str()));
-    }
     const bool bench = std::getenv("NTSCRT_BENCH_SL_SIZE") || std::getenv("NTSCRT_BENCH_SL_FRAMES");
     std::string report;
     // Screen Loop's store of its window's source frames is off in this process (kLoopStore), so
@@ -2175,6 +2176,25 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
     }
     MESSAGE(report);
     std::printf("[timing] Screen Loop edits %dx%d\n%s", w, h, report.c_str());
+}
+
+TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history only when they must") {
+    std::vector<double> frames = {100};
+    if (const char *e = std::getenv("NTSCRT_BENCH_SL_FRAMES"); e && *e) {  // timings: these playheads instead
+        frames.clear();
+        std::istringstream in(e);
+        for (std::string x; std::getline(in, x, ',');) frames.push_back(std::atof(x.c_str()));
+    }
+    screenloop_edits(frames);
+}
+
+TEST_CASE("Screen Loop: preset changes and Inspector edits far into the clip re-run the history only when they must") {
+    // With the store on (its own ctest run) only the case above: its checks don't depend on how far
+    // in the playhead is. 1850 on a hardware GPU; on WARP (CI) 490, also past the first two windows
+    // (its window start 240, (T / 240 - 1) * 240 as 1850's 1440) with the shortest re-run there is
+    // (250 frames, 1850's 410); the expected counts are computed from T.
+    if (loop_store_on() || std::getenv("NTSCRT_BENCH_SL_FRAMES")) return;
+    screenloop_edits({testsizes::pick(1850.0, 490.0)});
 }
 
 // ---- projects saved with an earlier plug-in version ---------------------------------------
@@ -2273,7 +2293,7 @@ TEST_CASE("Screen Loop: an animated preset's look (no keyframes) through re-runs
     // keyframes: the loop's history frames use their own frame's look; an edit re-runs the window
     // (from the store of source frames when it is on: test_ofx_screenloop_store); every picture is
     // a clean instance's.
-    LoopEditFixture f(128, 72);
+    LoopEditFixture f(128, loop_h());
     const double T = 150;  // inside the first two windows: the loop runs from frame 0
     f.shot(0);
     f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
@@ -2298,8 +2318,8 @@ TEST_CASE("Screen Loop: a render the host aborts drops only the loop it was runn
     // stood in pictures for the frames it skipped and must go, but the loops of the settings before
     // (kept to come back to) stay.
     if (loop_store_on()) return;  // counts the host's fetches
-    LoopEditFixture f(128, 72);
-    const double T = 600;
+    LoopEditFixture f(128, loop_h());
+    const double T = testsizes::pick(600.0, 490.0);  // past the first two windows (WARP, CI: the shortest re-run there)
     f.shot(0);
     f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
     CHECK(f.shot(T).fetches > 0);

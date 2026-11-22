@@ -96,10 +96,13 @@ jobs:
             build/cargo-ntscrs
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
+      # -j 4: the runner's 4 vCPUs. The long suites are split into parts so they spread, the cases
+      # with time budgets run alone (RUN_SERIAL), and the slowest Screen Loop cases run at their
+      # smaller WARP sizes (docs/TESTING.md "Unit tests in parallel").
       - name: Test
         env:
           NTSCRT_REQUIRE_GPU: "1"   # a missing D3D11 device fails the GPU tests instead of skipping them
-        run: ctest --test-dir build -C Release --output-on-failure -LE golden
+        run: ctest --test-dir build -C Release --output-on-failure -LE golden -j 4
 
       # Golden images (docs/TESTING.md): upstream crt-smoke references and self-references,
       # verbose so every comparison's numbers are in the log. Strict: a missing reference fails.
@@ -315,7 +318,7 @@ jobs:
         if: success() || failure()
         env:
           NTSCRT_REQUIRE_GPU: "1"   # a missing Metal device fails the GPU tests instead of skipping them
-        run: ctest --test-dir build --output-on-failure -LE golden
+        run: ctest --test-dir build --output-on-failure -LE golden -j "$(sysctl -n hw.ncpu)"
 
       - name: Package OFX bundle (universal)
         shell: bash

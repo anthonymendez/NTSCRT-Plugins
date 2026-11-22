@@ -17,6 +17,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "../test_sizes.h"
+
 namespace {
 
 bool gpu_required() {
@@ -32,7 +34,14 @@ void set_env(const char *k, const char *v) {
 #endif
 }
 
-constexpr int W = 192, H = 108;
+// 192x108 on a hardware GPU; 192x54 (32:9) on WARP (CI): Screen Loop's feedback picture is
+// ~1300-2000 pixels wide whatever the frame's width, so its cost on a software rasterizer goes
+// with the frame's height over its width (tests/test_sizes.h). Nothing checked depends on it.
+constexpr int W = 192;
+int frame_h() {
+    static const int h = testsizes::pick(108, 54);
+    return h;
+}
 
 struct Source {
     std::map<int64_t, std::vector<uint8_t>> px;
@@ -40,8 +49,8 @@ struct Source {
     int fetches = 0;
     size_t held_max = 0;            // host images handed out and not yet released, at most
     int64_t first = -1, last = -1;  // the earliest / latest frame fetched since the counters were reset
-    int w = W, h = H;               // the size frames are fetched at (a render at a reduced scale: smaller)
-    static std::vector<uint8_t> make(int64_t f, int w = W, int h = H) {
+    int w = W, h = frame_h();       // the size frames are fetched at (a render at a reduced scale: smaller)
+    static std::vector<uint8_t> make(int64_t f, int w = W, int h = frame_h()) {
         std::vector<uint8_t> p(size_t(w) * h * 4);
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
@@ -111,7 +120,7 @@ struct Inst {
     // scale < 1: a host's reduced render scale (its viewer): frames that much smaller.
     std::vector<uint8_t> render(int64_t f, double scale = 1) {
         src.w = int(W * scale);
-        src.h = int(H * scale);
+        src.h = int(frame_h() * scale);
         std::vector<uint8_t> in = Source::make(f, src.w, src.h), out(in.size());
         ntscrt_image s{src.w, src.h, ptrdiff_t(src.w) * 4, NTSCRT_RGBA8, in.data()};
         ntscrt_image d{src.w, src.h, ptrdiff_t(src.w) * 4, NTSCRT_RGBA8, out.data()};
@@ -309,7 +318,7 @@ TEST_CASE("Screen Loop: its window of source frames is kept: re-runs ask the hos
     CHECK(a.render(n) == want[2]);
     CHECK(a.src.fetches == 0);
 
-    const size_t frame_bytes = size_t(W) * H * 4;
+    const size_t frame_bytes = size_t(W) * frame_h() * 4;
     const std::string mb = std::to_string(double(20 * frame_bytes) / (1024.0 * 1024.0) + 0.0001);
     set_env("NTSCRT_SOURCE_CACHE_MB", "0");
     set_env("NTSCRT_SCREENLOOP_SOURCE_MB", mb.c_str());  // 20 frames: the frame itself and 19 before it

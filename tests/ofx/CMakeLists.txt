@@ -1,15 +1,34 @@
 # Mock-OpenFX-host test of the built NTSCRT.ofx bundle (agent E).
 if(TARGET ntscrt_ofx)
-  ntscrt_add_test(test_ofx test_ofx.cpp mock_host.cpp)
+  ntscrt_add_test_exe(test_ofx test_ofx.cpp mock_host.cpp)
   target_link_libraries(test_ofx PRIVATE ntscrt_ofx_headers ntscrt_hostparams)
   target_compile_definitions(test_ofx PRIVATE NTSCRT_OFX_BINARY="$<TARGET_FILE:ntscrt_ofx>")
   add_dependencies(test_ofx ntscrt_ofx)
   # The host protocol as DaVinci Resolve sees it (getFramesNeeded leaves out Screen Loop's history).
   add_test(NAME test_ofx_resolve_host COMMAND test_ofx "--test-case=host protocol: getFramesNeeded*")
   set_tests_properties(test_ofx_resolve_host PROPERTIES ENVIRONMENT "NTSCRT_MOCK_HOST_NAME=DaVinciResolve")
+  # In parts, so `ctest -j` runs them side by side (tests/CMakeLists.txt: ntscrt_split_test;
+  # test_ofx.split_check: each case once). COST (seconds on GitHub's Windows runner, WARP):
+  # the long ones start first. "timing": cases with time budgets or waits (a busy machine would
+  # fail them), alone (RUN_SERIAL) and first, so nothing waits for them to have the machine.
+  ntscrt_split_test(test_ofx COMMAND test_ofx PARTS
+    sl_edits "Screen Loop: preset changes and Inspector edits re-run*"
+    sl_edits_far "Screen Loop: preset changes and Inspector edits far*"
+    screenloop "Screen Loop: a*"
+    digital "Digital video: *"
+    presets "presets: *"
+    old_projects "old projects: *"
+    timing "high frame number: *,debug logging for all effects: *")
   # Screen Loop's store of its window's source frames on (test_ofx turns it off otherwise)
-  add_test(NAME test_ofx_screenloop_store COMMAND test_ofx "--test-case=Screen Loop: *")
-  set_tests_properties(test_ofx_screenloop_store PROPERTIES ENVIRONMENT "NTSCRT_SCREENLOOP_SOURCE_MB=2048")
+  ntscrt_split_test(test_ofx_screenloop_store COMMAND test_ofx BASE "Screen Loop: *"
+    ENVIRONMENT "NTSCRT_SCREENLOOP_SOURCE_MB=2048" PARTS
+    edits "Screen Loop: preset changes*")
+  set_tests_properties(test_ofx.timing PROPERTIES RUN_SERIAL TRUE COST 100000)
+  set_tests_properties(test_ofx.sl_edits_far PROPERTIES COST 700)
+  set_tests_properties(test_ofx.sl_edits PROPERTIES COST 300)
+  set_tests_properties(test_ofx.screenloop PROPERTIES COST 250)
+  set_tests_properties(test_ofx_screenloop_store.edits PROPERTIES COST 150)
+  set_tests_properties(test_ofx.digital test_ofx.presets test_ofx.old_projects test_ofx_screenloop_store.rest PROPERTIES COST 60)
   if(UNIX)
     target_link_libraries(test_ofx PRIVATE ${CMAKE_DL_LIBS})
   endif()
