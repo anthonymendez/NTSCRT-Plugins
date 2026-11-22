@@ -4,19 +4,24 @@
 //   bench_screenloop [--w 1920] [--h 1080] [--preset "7 copies slow luma"] [--look JSON]
 //                    [--play 30] [--seek 600,1000] [--then 300] [--scrub] [--fps 30]
 //
-// Sources are generated in memory (a moving picture), served through
-// fetch_source like a host, with the fetch time counted separately.
+// Sources are generated in memory (a moving picture: windows of one wide picture, served
+// without a copy, so fetching costs next to nothing), through fetch_source like a host.
 //   play:  frames 0..play-1 in order on one instance (ms per frame).
 //   seek:  for each frame, a fresh instance renders it cold, then the next two
 //          frames (what a host asks for when playback starts after a seek).
 //   then:  after each cold seek, play on that many frames (crossing window starts) and
 //          report the source fetches and time of those frames.
 //   scrub: on one instance, after the cold seek: back 30, forward 10, back 100.
+//   float: sources (fetched and the frame's own) as RGBA32F, as Resolve hands them over.
+//   phases: print the core's timings line (ntscrt_last_timings) of each cold seek.
+//   edits: after each cold seek, that many Screen Loop zoom edits, each followed by a render of
+//          the frame (an Inspector edit at the playhead: a re-run of its window).
 #include <ntscrt/ntscrt.h>
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -49,31 +54,57 @@ static double ms(Clock::time_point a, Clock::time_point b) {
 namespace {
 struct Src {
     int w = 0, h = 0;
+    bool fp = false;  // RGBA32F
+    std::vector<uint8_t> base;  // a wide picture made once; frame f is a window of it (cheap to serve)
     std::map<int64_t, std::vector<uint8_t>> live;
     std::map<int64_t, ntscrt_image> imgs;
     int fetches = 0;
     double fetch_ms = 0;
     size_t peak_live = 0;  // host images handed out and not yet released, at most
-    void fill(std::vector<uint8_t> &px, int64_t f) const {
-        px.resize(size_t(w) * h * 4);
+    static constexpr int kPad = 512;
+    size_t px_bytes() const { return fp ? 16 : 4; }
+    void make_base() {
+        const int bw = w + kPad;
+        base.assign(size_t(bw) * h * px_bytes(), 0);
         for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x) {
-                uint8_t *p = &px[(size_t(y) * w + x) * 4];
-                const bool bar = ((x + f * 7) / 64) % 2 == 0;
-                p[0] = uint8_t((x * 3 + f * 5) % 256);
-                p[1] = uint8_t((y * 2 + f * 3) % 256);
-                p[2] = uint8_t(bar ? 40 : 210);
-                p[3] = 255;
+            for (int x = 0; x < bw; ++x) {
+                const bool bar = (x / 64) % 2 == 0;
+                const uint8_t c[4] = {uint8_t((x * 3) % 256), uint8_t((y * 2 + x) % 256), uint8_t(bar ? 40 : 210), 255};
+                const size_t i = size_t(y) * bw + x;
+                if (fp) {
+                    float *q = reinterpret_cast<float *>(base.data()) + i * 4;
+                    for (int k = 0; k < 4; ++k) q[k] = float(c[k]) / 255.f;
+                } else {
+                    std::memcpy(base.data() + i * 4, c, 4);
+                }
             }
+    }
+    // A moving picture: frame f is the base shifted left by (f * 7) % kPad pixels.
+    void fill(std::vector<uint8_t> &px, int64_t f) {
+        if (base.empty()) make_base();
+        const size_t pb = px_bytes(), row = size_t(w) * pb, brow = size_t(w + kPad) * pb;
+        const size_t off = size_t((f * 7) % kPad) * pb;
+        px.resize(row * h);
+        for (int y = 0; y < h; ++y) std::memcpy(px.data() + y * row, base.data() + y * brow + off, row);
+    }
+    // Frame f without a copy: the host's frame costs nothing to fetch, so the times are the core's.
+    ntscrt_image view(int64_t f) {
+        if (base.empty()) make_base();
+        const size_t pb = px_bytes();
+        return {w, h, ptrdiff_t(size_t(w + kPad) * pb), fp ? NTSCRT_RGBA32F : NTSCRT_RGBA8,
+                base.data() + size_t((f * 7) % kPad) * pb};
+    }
+    ntscrt_image image(std::vector<uint8_t> &px) const {
+        return {w, h, ptrdiff_t(size_t(w) * px_bytes()), fp ? NTSCRT_RGBA32F : NTSCRT_RGBA8, px.data()};
     }
 };
 const ntscrt_image *fetch(void *u, int64_t f) {
     auto *s = static_cast<Src *>(u);
     if (f < 0) return nullptr;
     auto t0 = Clock::now();
-    auto &px = s->live[f];
-    s->fill(px, f);
-    s->imgs[f] = {s->w, s->h, ptrdiff_t(s->w) * 4, NTSCRT_RGBA8, px.data()};
+    auto &px = s->live[f];  // empty: the frame is a window of the base picture (no copy)
+    (void)px;
+    s->imgs[f] = s->view(f);
     s->fetch_ms += ms(t0, Clock::now());
     ++s->fetches;
     if (s->live.size() > s->peak_live) s->peak_live = s->live.size();
@@ -97,9 +128,9 @@ std::string read_file(const std::string &p) {
 }  // namespace
 
 int main(int argc, char **argv) {
-    int w = 1920, h = 1080, play = 30, then = 0;
+    int w = 1920, h = 1080, play = 30, then = 0, edits = 0;
     double fps = 30;
-    bool scrub = false;
+    bool scrub = false, fp = false, phases = false;
     std::string preset = "7 copies slow luma", look = "{}";
     std::vector<int64_t> seeks;
     for (int i = 1; i < argc; ++i) {
@@ -112,7 +143,10 @@ int main(int argc, char **argv) {
         else if (a == "--play") play = std::atoi(next().c_str());
         else if (a == "--fps") fps = std::atof(next().c_str());
         else if (a == "--scrub") scrub = true;
+        else if (a == "--float") fp = true;
+        else if (a == "--phases") phases = true;
         else if (a == "--then") then = std::atoi(next().c_str());
+        else if (a == "--edits") edits = std::atoi(next().c_str());
         else if (a == "--seek") {
             std::stringstream ss(next());
             std::string t;
@@ -128,9 +162,11 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "no preset %s\n", preset.c_str());
         return 2;
     }
+    std::string fb_cur = fb;  // the feedback rendered (edits change it)
     Src src;
     src.w = w;
     src.h = h;
+    src.fp = fp;
     std::vector<uint8_t> in_px, out_px(size_t(w) * h * 4);
     auto make = [&](ntscrt_instance **inst) {
         ntscrt_create_info ci{NTSCRT_ABI_VERSION, NTSCRT_GPU_AUTO, nullptr, nullptr, res.c_str()};
@@ -138,13 +174,13 @@ int main(int argc, char **argv) {
     };
     auto render = [&](ntscrt_instance *inst, int64_t f) {
         src.fill(in_px, f);
-        ntscrt_image s{w, h, ptrdiff_t(w) * 4, NTSCRT_RGBA8, in_px.data()};
+        ntscrt_image s = src.image(in_px);
         ntscrt_image d{w, h, ptrdiff_t(w) * 4, NTSCRT_RGBA8, out_px.data()};
         ntscrt_render_args ra{};
         ra.frame_index = f;
         ra.fps = fps;
         ra.look_json = look.c_str();
-        ra.feedback_json = fb.c_str();
+        ra.feedback_json = fb_cur.c_str();
         ra.render_scale = 1;
         ra.fetch_source = fetch;
         ra.release_source = release;
@@ -182,12 +218,14 @@ int main(int argc, char **argv) {
         ntscrt_instance *inst = nullptr;
         if (!make(&inst)) return 1;
         double t = render(inst, n);
+        const std::string seek_timings = ntscrt_last_timings(inst);
         int fetches = src.fetches;
         double fetch_ms = src.fetch_ms;
         double t1 = render(inst, n + 1), t2 = render(inst, n + 2);
         std::printf("seek %lld: %.0f ms (%d source fetches, %.0f ms of it fetching, at most %zu held at once); "
                     "then %.1f, %.1f ms; peak memory %.0f MB\n",
                     (long long)n, t, fetches, fetch_ms, src.peak_live, t1, t2, peak_mb());
+        if (phases) std::printf("  phases: %s\n", seek_timings.c_str());
         if (then > 0) {
             int tf = 0;
             double tt = 0, worst = 0;
@@ -200,6 +238,18 @@ int main(int argc, char **argv) {
             std::printf("  then %lld..%lld: %.1f s, %d source fetches, worst frame %.0f ms; peak memory %.0f MB\n",
                         (long long)(n + 3), (long long)(n + 2 + then), tt / 1000.0, tf, worst, peak_mb());
         }
+        for (int k = 1; k <= edits; ++k) {
+            // the preset with another zoom (textual: "zoom" : <number>)
+            const size_t z = fb_cur.find("\"zoom\"");
+            const size_t v = z == std::string::npos ? z : fb_cur.find_first_of("0123456789.-", z + 6);
+            const size_t e = v == std::string::npos ? v : fb_cur.find_first_not_of("0123456789.-e", v);
+            if (e == std::string::npos) break;
+            fb_cur = fb_cur.substr(0, v) + std::to_string(0.5 + 0.05 * k) + fb_cur.substr(e);
+            double tm = render(inst, n);
+            std::printf("  edit %d at %lld: %.0f ms (%d fetches)\n", k, (long long)n, tm, src.fetches);
+            if (phases) std::printf("    phases: %s\n", ntscrt_last_timings(inst));
+        }
+        fb_cur = fb;
         if (scrub) {
             for (int64_t m : {n - 30, n - 20, n + 10, n - 100, n - 99}) {
                 if (m < 0) continue;

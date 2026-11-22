@@ -259,16 +259,20 @@ bool read_gpu_padded(ntscrt_instance *inst, const ntscrt_host_gpu &host, OFX::Im
     ntscrt_gpu_image g{};
     if (!gpu_view(im, g) || r.x2 <= r.x1 || r.y2 <= r.y1) return false;
     const size_t pb = pixel_bytes(g.format);
-    std::vector<uint8_t> whole(size_t(g.width) * g.height * pb);
+    const OfxRectI b = im.getBounds();
+    const bool same = r.x1 == b.x1 && r.y1 == b.y1 && r.x2 == b.x2 && r.y2 == b.y2;
+    // The frame lands in buf itself when it needs no padding: a buffer handed back by the last
+    // fetch (RenderCtx::spare) has the size already, so no 33-133 MB allocation and fill per frame.
+    std::vector<uint8_t> other;
+    std::vector<uint8_t> &whole = same ? buf : other;
+    whole.resize(size_t(g.width) * g.height * pb);
     ntscrt_image w{g.width, g.height, ptrdiff_t(size_t(g.width) * pb), g.format, whole.data()};
     if (ntscrt_host_gpu_read(inst, &host, &g, &w) != NTSCRT_OK) return false;
-    const OfxRectI b = im.getBounds();
     out.width = r.x2 - r.x1;
     out.height = r.y2 - r.y1;
     out.format = g.format;
     out.row_bytes = ptrdiff_t(size_t(out.width) * pb);
-    if (r.x1 == b.x1 && r.y1 == b.y1 && r.x2 == b.x2 && r.y2 == b.y2) {
-        buf = std::move(whole);
+    if (same) {
         out.data = buf.data();
         return true;
     }
@@ -1627,6 +1631,7 @@ struct RenderCtx {
         std::vector<uint8_t> padded;
     };
     std::map<const ntscrt_image *, Live> live;
+    std::vector<uint8_t> spare;  // the last released frame's copy, for the next GPU fetch
     bool animated = true;  // some param has keyframes or moves with the animation: other frames can differ
     std::shared_ptr<const Animation> anim;  // the procedural animation this render uses
     int fetches = 0;  // other frames the core pulled (debug log)
@@ -1665,6 +1670,7 @@ struct RenderCtx {
             }
             if (c->fetched.empty()) c->fetched = dlog::rect(im->getBounds()) + " " + dlog::depth_name(im->getPixelDepth());
             Live l{std::move(im), std::make_unique<ntscrt_image>(), {}};
+            if (c->gpu.api != NTSCRT_HOST_GPU_NONE) l.padded = std::move(c->spare);
             if (c->gpu.api != NTSCRT_HOST_GPU_NONE) {
                 if (!read_gpu_padded(c->fx->inst_, c->gpu, *l.image, c->frame, *l.view, l.padded)) return nullptr;
                 l.image.reset();  // the copy is all the core reads
@@ -1679,7 +1685,13 @@ struct RenderCtx {
             return nullptr;
         }
     }
-    static void release(void *u, const ntscrt_image *im) { static_cast<RenderCtx *>(u)->live.erase(im); }
+    static void release(void *u, const ntscrt_image *im) {
+        auto *c = static_cast<RenderCtx *>(u);
+        auto it = c->live.find(im);
+        if (it == c->live.end()) return;
+        if (it->second.padded.capacity() > c->spare.capacity()) c->spare = std::move(it->second.padded);
+        c->live.erase(it);
+    }
     static const char *look_at(void *u, int64_t frame) {
         auto *c = static_cast<RenderCtx *>(u);
         if (!c->animated) return nullptr;  // "same as the current frame": nothing to build

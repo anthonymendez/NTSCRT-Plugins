@@ -66,6 +66,20 @@ const fs::path kLogFile = [] {
     return p;
 }();
 const fs::path kSwitchFile = kSettingsDir / "debug-logging-all-effects.txt";
+// Screen Loop's store of source frames (NTSCRT_SCREENLOOP_SOURCE_MB): off unless the environment
+// sets it, so the Screen Loop tests count re-runs as the host's fetches. Set before the plug-in loads
+// (its static CRT reads the environment once).
+const bool kLoopStore = [] {
+    const char *e = std::getenv("NTSCRT_SCREENLOOP_SOURCE_MB");
+    if (e && *e) return std::string(e) != "0";
+#ifdef _WIN32
+    _putenv_s("NTSCRT_SCREENLOOP_SOURCE_MB", "0");
+#else
+    setenv("NTSCRT_SCREENLOOP_SOURCE_MB", "0", 1);
+#endif
+    return false;
+}();
+bool loop_store_on() { return kLoopStore; }
 // This process's files go when it ends (best effort: the plug-in may still hold the log).
 struct RemoveTestFiles {
     ~RemoveTestFiles() {
@@ -2097,7 +2111,8 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
     // NTSCRT_BENCH_SL_SIZE=WxH: another frame size (timings); NTSCRT_BENCH_SL_FRAMES=a,b: other playheads.
     int w = 128, h = 72;
     if (const char *e = std::getenv("NTSCRT_BENCH_SL_SIZE"); e && *e) std::sscanf(e, "%dx%d", &w, &h);
-    std::vector<double> frames = {100, 1850};
+    // With the store on (its own ctest run) one playhead: its checks don't depend on how far in it is.
+    std::vector<double> frames = loop_store_on() ? std::vector<double>{100} : std::vector<double>{100, 1850};
     if (const char *e = std::getenv("NTSCRT_BENCH_SL_FRAMES"); e && *e) {
         frames.clear();
         std::istringstream in(e);
@@ -2105,6 +2120,10 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
     }
     const bool bench = std::getenv("NTSCRT_BENCH_SL_SIZE") || std::getenv("NTSCRT_BENCH_SL_FRAMES");
     std::string report;
+    // Screen Loop's store of its window's source frames is off in this process (kLoopStore), so
+    // re-runs show as the host's fetches; ctest's test_ofx_screenloop_store runs this with it on:
+    // then only the first render fetches (its window once per render scale), the re-runs none.
+    const bool store = loop_store_on();
     for (double T : frames) {
         LoopEditFixture f(w, h);
         f.shot(0);  // warm-up: shaders
@@ -2130,6 +2149,16 @@ TEST_CASE("Screen Loop: preset changes and Inspector edits re-run the history on
             // the loop run again and some renders fetch its window twice (CI run 44478596023; not
             // understood without a Mac). The pictures are still checked above.
             MESSAGE("re-run counts not checked on the CI runner's virtual GPU");
+            continue;
+        }
+        if (store) {
+            CAPTURE(T);
+            const int64_t window = int64_t(T) - (T < 480 ? 0 : (int64_t(T) / 240 - 1) * 240);
+            CHECK(steps.front().fetches == 2 * window);
+            for (size_t i = 1; i < steps.size(); ++i) {
+                CAPTURE(steps[i].what);
+                CHECK(steps[i].fetches == 0);
+            }
             continue;
         }
         for (const auto &st : steps) {
@@ -2239,10 +2268,36 @@ TEST_CASE("old projects: opening the panel keeps the saved values and stays boun
     CHECK(ui_sets() == ui1);
 }
 
+TEST_CASE("Screen Loop: an animated preset's look (no keyframes) through re-runs and the source store") {
+    // The look of earlier frames comes from the preset's animation (host_animation), not from
+    // keyframes: the loop's history frames use their own frame's look; an edit re-runs the window
+    // (from the store of source frames when it is on: test_ofx_screenloop_store); every picture is
+    // a clean instance's.
+    LoopEditFixture f(128, 72);
+    const double T = 150;  // inside the first two windows: the loop runs from frame 0
+    f.shot(0);
+    f.choose("host_screenloop_preset", "Screen Loop/Bottom to top", T);
+    f.choose("host_preset", "Glitch pop", T);
+    REQUIRE_FALSE(f.param("host_animation")->str.empty());
+    const auto first = f.shot(T);
+    CHECK(first.fetches == int(T));
+    CHECK(first.px == f.clean(T));
+    f.param("screenloop_zoom")->v[0] = 0.5;
+    f.user_edit("screenloop_zoom", T);
+    const auto edited = f.shot(T);
+    CHECK(edited.fetches == (loop_store_on() ? 0 : int(T)));
+    CHECK(edited.px == f.clean(T));
+    const auto next = f.shot(T + 1);
+    CHECK(next.fetches == 0);
+    CHECK(next.px == f.clean(T + 1));
+    CHECK(f.shot(T - 45).px == f.clean(T - 45));  // back: from a checkpoint
+}
+
 TEST_CASE("Screen Loop: a render the host aborts drops only the loop it was running") {
     // Resolve aborts a render it no longer needs (a newer edit): the loop that render was re-running
     // stood in pictures for the frames it skipped and must go, but the loops of the settings before
     // (kept to come back to) stay.
+    if (loop_store_on()) return;  // counts the host's fetches
     LoopEditFixture f(128, 72);
     const double T = 600;
     f.shot(0);

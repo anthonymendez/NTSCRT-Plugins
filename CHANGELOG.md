@@ -47,6 +47,18 @@ The version lives in [`VERSION`](VERSION): the version of the next release (the 
   just means compiling as before. `NTSCRT_SHADER_CACHE=0` turns it off or `=<folder>` moves it
   ([docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)). Before, librashader tried to keep its own cache in
   `%LOCALAPPDATA%\librashader`, but lost it almost every time; that folder isn't used any more and can be deleted.
+- Screen Loop: re-running its history (a new setting or an edit at the playhead, a jump far into a clip) is
+  much faster in DaVinci Resolve. It now keeps the source frames of its window (up to 4 GB for all effects,
+  `NTSCRT_SCREENLOOP_SOURCE_MB`), so another edit at the same spot doesn't fetch them from Resolve again, and it
+  no longer gives each frame it fetches a new buffer. Frame 1850, an edit there: 7 s → 1 s at 1080p, 18 s →
+  7.5 s at UHD (2-3 s with `NTSCRT_SCREENLOOP_SOURCE_MB=16384`); the first jump there 21 s → 13.5 s at UHD. The
+  pictures are the same.
+
+### Added
+
+- `NTSCRT_SCREENLOOP_AHEAD=defer` (for A/B timing): Screen Loop leaves its run ahead out of re-runs and catches it
+  up while you play. Not the default: it saved 3-5% of a re-run in Resolve and cost seconds of fetching when
+  playing on afterwards.
 
 ## [0.5.3] - 2026-11-20
 

@@ -15,6 +15,7 @@
 #include <functional>
 #include <future>
 #include <map>
+#include <mutex>
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
@@ -85,6 +86,8 @@ struct SourceKey {
     }
 };
 
+constexpr size_t kLoopSourceDefaultMB = 4096;  // a whole 1080p window (about 3.4 GB); a third of a UHD one
+
 size_t default_source_budget() {
     if (const char *e = std::getenv("NTSCRT_SOURCE_CACHE_MB"); e && *e) {
         char *end = nullptr;
@@ -104,6 +107,18 @@ struct SourceCache {
     std::map<SourceKey, Entry> m;
     size_t bytes = 0, budget = default_source_budget();
     uint64_t tick = 0;
+    // Buffers of evicted frames nobody holds any more, for the next frames converted (fast_transfer):
+    // a Screen Loop re-run converts hundreds, and a new 8-33 MB buffer each is a zero fill and page faults.
+    std::vector<std::vector<uint8_t>> spare;
+    std::vector<uint8_t> take(size_t n) {
+        for (auto it = spare.begin(); it != spare.end(); ++it)
+            if (it->size() == n) {
+                std::vector<uint8_t> v = std::move(*it);
+                spare.erase(it);
+                return v;
+            }
+        return {};
+    }
 
     std::shared_ptr<const ImageBGRA8> get(const SourceKey &k) {
         auto it = m.find(k);
@@ -124,10 +139,145 @@ struct SourceCache {
             auto lru = std::min_element(m.begin(), m.end(),
                                         [](const auto &a, const auto &b) { return a.second.used < b.second.used; });
             bytes -= lru->second.img->px.size();
+            if (lru->second.img.use_count() == 1 && spare.size() < 2) {
+                // made non-const (source_at), so taking its pixels is fine
+                spare.push_back(std::move(std::const_pointer_cast<ImageBGRA8>(lru->second.img)->px));
+            }
             m.erase(lru);
         }
     }
     void clear() {
+        m.clear();
+        bytes = 0;
+        spare.clear();
+    }
+};
+
+// Screen Loop's window of source frames, kept so that a re-run (an edit at the same playhead, a
+// seek back, the run ahead catching up) doesn't ask the host for them again: a host frame costs
+// the host's render and our conversion (in DaVinci Resolve at UHD, about three quarters of a
+// re-run's time). NTSCRT_SCREENLOOP_SOURCE_MB (0: none) is for all effects together (each its own
+// store, the least recently used effect's frames given up first: one effect at a time is edited).
+// When full, an effect keeps the frames closest below the one rendered: a re-run reads its window in
+// order from the start, so a frame further back than all it holds is not kept (it would push out
+// one the same re-run is about to read: then no re-run would find any), and the run ahead catching
+// up after a seek reads the last ones. Frames no window around the frame rendered reads go first.
+// docs/dev/SCREENLOOP-MEMORY.md.
+size_t default_loop_source_budget() {
+    if (const char *e = std::getenv("NTSCRT_SCREENLOOP_SOURCE_MB"); e && *e) {
+        char *end = nullptr;
+        double mb = std::strtod(e, &end);
+        if (end != e && mb >= 0) return size_t(mb * 1024 * 1024);
+    }
+    return size_t(kLoopSourceDefaultMB) << 20;
+}
+
+struct LoopSourceStore;
+struct LoopStores {  // every effect's store (render threads of several effects share them)
+    std::mutex mu;
+    std::vector<LoopSourceStore *> all;
+    uint64_t tick = 0;
+    static LoopStores &get() {
+        static LoopStores *s = new LoopStores;  // never destroyed: stores may outlive statics at unload
+        return *s;
+    }
+};
+
+struct LoopSourceStore {
+    std::map<SourceKey, std::shared_ptr<const ImageBGRA8>> m;  // guarded by LoopStores::mu
+    size_t bytes = 0;
+    const size_t budget = default_loop_source_budget();  // for all effects' stores together
+    uint64_t used = 0;
+    int64_t hits = 0, stored = 0;  // in the current render (timings)
+
+    LoopSourceStore() {
+        LoopStores &g = LoopStores::get();
+        std::lock_guard<std::mutex> lk(g.mu);
+        g.all.push_back(this);
+    }
+    ~LoopSourceStore() {
+        LoopStores &g = LoopStores::get();
+        std::lock_guard<std::mutex> lk(g.mu);
+        g.all.erase(std::remove(g.all.begin(), g.all.end(), this), g.all.end());
+    }
+    LoopSourceStore(const LoopSourceStore &) = delete;
+    LoopSourceStore &operator=(const LoopSourceStore &) = delete;
+
+    std::shared_ptr<const ImageBGRA8> get(const SourceKey &k) {
+        LoopStores &g = LoopStores::get();
+        std::lock_guard<std::mutex> lk(g.mu);
+        auto it = m.find(k);
+        if (it == m.end()) return nullptr;
+        ++hits;
+        used = ++g.tick;
+        return it->second;
+    }
+    bool has(const SourceKey &k) {
+        std::lock_guard<std::mutex> lk(LoopStores::get().mu);
+        return m.count(k) > 0;
+    }
+    // Keeps frame k.frame, making room if needed: first other effects' frames (the least recently
+    // used effect first), then frames outside [lo, hi] or of another picture (size, scale, alpha,
+    // crop) than `k`, then the furthest back, if further back than k.frame.
+    void put(const SourceKey &k, std::shared_ptr<const ImageBGRA8> img, int64_t lo, int64_t hi) {
+        const size_t need = img->px.size();
+        if (need > budget) return;
+        LoopStores &g = LoopStores::get();
+        std::lock_guard<std::mutex> lk(g.mu);
+        if (m.count(k)) return;
+        used = ++g.tick;
+        auto total = [&] {
+            size_t t = 0;
+            for (auto *st : g.all) t += st->bytes;
+            return t;
+        };
+        size_t others = total() - bytes;
+        while (bytes + others + need > budget && others > 0) {
+            LoopSourceStore *lru = nullptr;
+            for (auto *st : g.all)
+                if (st != this && st->bytes > 0 && (!lru || st->used < lru->used)) lru = st;
+            if (!lru) break;
+            others -= lru->bytes;
+            lru->drop_all();
+        }
+        const size_t room = budget - std::min(budget, others);
+        if (bytes + need > room) {
+            for (auto it = m.begin(); it != m.end() && bytes + need > room;) {
+                const SourceKey &e = it->first;
+                const bool other = e.scale != k.scale || e.width != k.width || e.height != k.height ||
+                                   e.mode != k.mode || e.premult != k.premult || e.crop != k.crop;
+                if (other || e.frame < lo || e.frame > hi) {
+                    bytes -= it->second->px.size();
+                    it = m.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            while (bytes + need > room) {
+                auto low = m.begin();  // the furthest back (keys order by frame first)
+                if (low == m.end() || low->first.frame >= k.frame) return;
+                bytes -= low->second->px.size();
+                m.erase(low);
+            }
+        }
+        bytes += need;
+        ++stored;
+        m.emplace(k, std::move(img));
+    }
+    void clear() {
+        std::lock_guard<std::mutex> lk(LoopStores::get().mu);
+        drop_all();
+    }
+    struct Stats {
+        size_t frames, bytes;
+    };
+    Stats stats() {
+        std::lock_guard<std::mutex> lk(LoopStores::get().mu);
+        return {m.size(), bytes};
+    }
+
+private:
+    void drop_all() {  // LoopStores::mu held
         m.clear();
         bytes = 0;
     }
@@ -187,6 +337,7 @@ struct ntscrt_instance {
     int test_digital_gpu_errors = 0;  // testing::simulate_digital_gpu_errors
     std::string presets_cache;
     SourceCache sources;
+    LoopSourceStore loop_sources;  // Screen Loop's window of source frames (NTSCRT_SCREENLOOP_SOURCE_MB)
     LookStore looks;
     std::vector<uint8_t> spare_px;  // last frame's picture buffers, reused (fast_transfer)
     std::vector<float> spare_alpha;
@@ -360,7 +511,10 @@ const char *ntscrt_last_error(ntscrt_instance *inst) { return inst ? inst->last_
 
 void ntscrt_flush_caches_mask(ntscrt_instance *inst, uint32_t which) {
     if (!inst) return;
-    if (which & NTSCRT_CACHE_SOURCE) inst->sources.clear();
+    if (which & NTSCRT_CACHE_SOURCE) {
+        inst->sources.clear();
+        inst->loop_sources.clear();
+    }
     if (which & NTSCRT_CACHE_DIGITAL) inst->digital.flush();
     if ((which & NTSCRT_CACHE_GLITCH) && inst->glitch) inst->glitch->flush();
     if ((which & NTSCRT_CACHE_CRT) && inst->crt) inst->crt->flush();
@@ -614,27 +768,40 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
 
     int raw_w = 0, raw_h = 0;  // this frame's source size (host frames of a clip share it)
     bool missed_earlier = false;  // the host gave no picture for an earlier frame (an abort, missing media)
-    ctx.source_at = [&](int64_t f) -> std::shared_ptr<const ImageBGRA8> {
+    // Screen Loop on: its source frames go to (and come from) its own store, while there's room.
+    bool loop_store = false;
+    int64_t loop_lo = 0;  // the earliest frame a window around this one reads
+    inst->loop_sources.hits = inst->loop_sources.stored = 0;
+    auto source = [&](int64_t f, bool optional) -> std::shared_ptr<const ImageBGRA8> {
         std::shared_ptr<const json> lf = look_ptr(f);
         const SourceKey key{f, ctx.render_scale, raw_w, raw_h, int(mode), int(premult), crop_hash(*lf)};
-        if (auto p = inst->sources.get(key)) return p;
+        if (loop_store)
+            if (auto p = inst->loop_sources.get(key)) return p;
+        if (auto p = inst->sources.get(key)) {
+            if (loop_store) inst->loop_sources.put(key, p, loop_lo, args->frame_index);
+            return p;
+        }
         if (!args->fetch_source) return nullptr;
         const ntscrt_image *im = args->fetch_source(args->user, f);
         if (!im) {
-            if (f >= 0 && f < args->frame_index) missed_earlier = true;
+            if (f >= 0 && f < args->frame_index && !optional) missed_earlier = true;
             return nullptr;
         }
         ImageBGRA8 raw, cropped;
         {
             PhaseScope ps(pt, PhaseTimes::In);
+            if (fast_transfer()) raw.px = inst->sources.take(size_t(im->width) * size_t(im->height) * 4);
             to_bgra8(*im, raw, nullptr, mode, premult);
         }
         if (args->release_source) args->release_source(args->user, im);
         Crop::apply(*lf, std::move(raw), cropped);
-        auto p = std::make_shared<const ImageBGRA8>(std::move(cropped));
+        std::shared_ptr<const ImageBGRA8> p = std::make_shared<ImageBGRA8>(std::move(cropped));
         inst->sources.put(key, p);
+        if (loop_store) inst->loop_sources.put(key, p, loop_lo, args->frame_index);
         return p;
     };
+    ctx.source_at = [&](int64_t f) { return source(f, false); };
+    ctx.source_optional = [&](int64_t f) { return source(f, true); };
 
     // This frame's pictures reuse the last frame's buffers (fast_transfer):
     // no 8-33 MB allocation, page faults and free per frame.
@@ -657,6 +824,12 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
     std::string ntsc_why;
     const bool ntsc_gpu = ntsc_on && inst->dev && !inst->test_lose_device && ntsc_gpu_on(inst, *inst->dev, ntsc_why);
     const bool howl_active = inst->dev && inst->howl && inst->howl->active(args->feedback_json ? &feedback : nullptr);
+    if (howl_active && inst->loop_sources.budget > 0) {
+        int64_t window = 240;  // howl::kDefaultWindow
+        if (auto it = feedback.find("window"); it != feedback.end() && it->is_number_integer()) window = it->get<int64_t>();
+        loop_store = true;
+        loop_lo = window > 0 ? args->frame_index - 2 * window : 0;
+    }
     // Digital video on the GPU (docs/dev/DIGITAL-GPU.md: by default on D3D11 hardware
     // devices) when its route is on and the picture can stay there: NTSC off or on
     // the GPU (ntsc-rs needs the picture on the CPU). Screen Loop: Digital is off.
@@ -695,6 +868,13 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
         raw_h = img.height = direct_src->h;
     } else {
         convert_source();
+        // This frame's picture is a history frame of the next ones: kept too, while there's room
+        // (the run ahead catching up after a seek, an edit after playing, find it).
+        LoopSourceStore &ls = inst->loop_sources;
+        if (loop_store && img.px.size() <= ls.budget) {
+            const SourceKey key{args->frame_index, ctx.render_scale, raw_w, raw_h, int(mode), int(premult), crop_hash(look)};
+            if (!ls.has(key)) ls.put(key, std::make_shared<ImageBGRA8>(img), loop_lo, args->frame_index);
+        }
     }
     // The source alpha, when it lines up with the result (no crop).
     auto aligned_alpha = [&]() -> const std::vector<float> * {
@@ -898,6 +1078,12 @@ ntscrt_status render_once(ntscrt_instance *inst, const ntscrt_render_args *args,
             if (missed_earlier) inst->howl->drop_current();
         }
         if (!inst->howl->note().empty()) pt.note += " loop_select=" + inst->howl->note();
+        if (loop_store) {
+            LoopSourceStore &ls = inst->loop_sources;
+            const auto st = ls.stats();
+            pt.note += " loop_sources=reused:" + std::to_string(ls.hits) + ",kept:" + std::to_string(ls.stored) +
+                       ",held:" + std::to_string(st.frames) + " (" + std::to_string(st.bytes >> 20) + " MB)";
+        }
         std::shared_ptr<gpu::Texture> up;
         if (ntsc_gpu) {
             PhaseScope ps(pt, PhaseTimes::Ntsc, &dev);

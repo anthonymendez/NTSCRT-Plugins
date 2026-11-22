@@ -44,6 +44,9 @@ struct FrameContext {
     // the crop stage already applied (façade caches these). Returns nullptr
     // when the host cannot supply it; stages must degrade gracefully.
     std::function<std::shared_ptr<const ImageBGRA8>(int64_t)> source_at;
+    // The same, for work that may do without the frame (Screen Loop catching up its run
+    // ahead): a frame the host doesn't give is not a degraded render. Null: source_at.
+    std::function<std::shared_ptr<const ImageBGRA8>(int64_t)> source_optional;
     // Look JSON at a past frame (keyframe history). Never null; returns
     // current look when the host gave no history.
     std::function<const json &(int64_t)> look_at;
